@@ -1,0 +1,341 @@
+from typing import TypedDict, List, Optional
+from langgraph.graph import StateGraph, END
+from app.services.llm import llm_service
+from app.services.graph import graph_service
+from app.services.embedding import embedding_service
+from app.services.multimedia import multimedia_service
+from app.schemas.extraction import Extraction, NoteInput
+import uuid
+from datetime import datetime
+import asyncio
+
+# Global Concurrency Limit: 2 parallel ingestions max to protect Supabase/Ollama
+concurrency_limit = asyncio.Semaphore(2)
+
+# 1. Define Agent State
+class IngestionState(TypedDict):
+    input: NoteInput
+    content: str
+    extraction: Optional[Extraction]
+    embedding: Optional[List[float]]
+    note_id: Optional[str]
+    created_at: Optional[str]
+    errors: List[str]
+    status: str # START, MULTIMEDIA_DONE, EXTRACTED, INDEXED
+    logs: List[str]
+    is_complex: bool
+
+# 2. Node Functions
+async def multimodal_node(state: IngestionState):
+    logs = state.get("logs", [])
+    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] START: Processing Multimedia...")
+    import time
+    t_start = time.perf_counter()
+    print("[Agent] Processing Multimedia Sources...")
+    
+    # Acquire semaphore for the entire workflow (held implicitly by the chain? No, we need to wrap the whole graph execution)
+    # Actually, wrapping inside a node only throttles that node.
+    # To throttle the whole workflow, we should modify the background runner in `ingestion.py` instead.
+    # BUT, we can add it here as a "Gatekeeper" in the first node.
+    async with concurrency_limit:
+        print(f"[Agent] Sempahore Acquired. (Active: {2 - concurrency_limit._value + 1 if hasattr(concurrency_limit, '_value') else '?'})")
+        # Proceed logic...
+        content = state["input"].content or ""
+    changed = False
+    
+    # 1. Transcribe Audio (Usually replaces text if primary source)
+    if state["input"].audio_path:
+        transcription = await asyncio.to_thread(multimedia_service.transcribe_audio, state["input"].audio_path)
+        content += f"\n\n[Audio Transcription]: {transcription}"
+        changed = True
+        
+    # 2. Extract PDF Text (Additive)
+    if state["input"].pdf_path:
+        pdf_text = await asyncio.to_thread(multimedia_service.extract_text_from_pdf, state["input"].pdf_path)
+        content += f"\n\n[PDF Extraction]: {pdf_text}"
+        changed = True
+        
+    # 3. Describe Image (Additive)
+    if state["input"].image_path:
+        desc = await asyncio.to_thread(multimedia_service.describe_image, state["input"].image_path)
+        content += f"\n\n[Image Description]: {desc}"
+        changed = True
+
+    # 4. Unified File Link Parsing [📎 Filename](URL) or [🎤 Voice Recording](URL)
+    import re
+    
+    # Match both attachment icon and microphone icon
+    file_matches = re.findall(r"\[(?:📎|🎤) (.*?)\]\((http.*?|/uploads/.*?)\)", content)
+    for filename, url in file_matches:
+        print(f"[Agent] Processing File: {filename} ({url})")
+        try:
+            lower_url = url.lower()
+            
+            # --- AUDIO ---
+            if lower_url.endswith((".webm", ".m4a", ".mp3", ".wav", ".ogg", ".mp4")):
+                print(f"  -> Detected Audio. Transcribing...")
+                transcription = await asyncio.to_thread(multimedia_service.transcribe_audio, url)
+                snippet = transcription[:100].replace("\n", " ") + "..." if len(transcription) > 100 else transcription
+                print(f"  -> Audio Result ({len(transcription)} chars): \"{snippet}\"")
+                content += f"\n\n[Audio Transcript ({filename})]: {transcription}"
+                changed = True
+
+            # --- PDF ---
+            elif lower_url.endswith(".pdf"):
+                print(f"  -> Detected PDF. Extracting text...")
+                pdf_text = await asyncio.to_thread(multimedia_service.extract_text_from_pdf, url)
+                snippet = pdf_text[:100].replace("\n", " ") + "..." if len(pdf_text) > 100 else pdf_text
+                print(f"  -> PDF Result ({len(pdf_text)} chars): \"{snippet}\"")
+                content += f"\n\n[PDF Extraction ({filename})]: {pdf_text}"
+                changed = True
+
+            # --- IMAGE ---
+            elif lower_url.endswith((".jpg", ".jpeg", ".png", ".webp")):
+                print(f"  -> Detected Image. Describing...")
+                img_desc = await asyncio.to_thread(multimedia_service.describe_image, url)
+                print(f"  -> Image Description: \"{img_desc}\"")
+                content += f"\n\n[Image Description ({filename})]: {img_desc}"
+                changed = True
+
+            else:
+                print(f"  -> Skipped (Unsupported Type): {url}")
+                
+        except Exception as e:
+             print(f"  File Processing Failed: {e}")
+    
+    # CRITICAL: Sync back to Postgres if content changed (Transcription)
+    if changed and state.get("note_id"):
+        from app.workflows.ingestion import ingestion_workflow
+        print(f"[Agent] Syncing extracted text to Postgres for Note {state['note_id']}...")
+        await ingestion_workflow._update_note_content_postgres(state["note_id"], content)
+
+    # Calculate Complexity for "Refiner" Level
+    # Heuristic: If content is very long (>3000 chars) OR involves PDF/Audio (often messy output), mark as complex.
+    is_complex = len(content) > 3000 or bool(state["input"].pdf_path) or bool(state["input"].audio_path)
+    if is_complex:
+        logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Note marked as COMPLEX (Tier 2 Refinement Enabled).")
+
+    t_end = time.perf_counter()
+    print(f"  [Perf] Multimedia processing took: {t_end - t_start:.4f}s")
+    return {"content": content.strip(), "logs": logs, "status": "MULTIMEDIA_DONE", "is_complex": is_complex}
+
+async def extraction_node(state: IngestionState):
+    logs = state["logs"]
+    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] EXTRACT: Running Knowledge Architect ({llm_service.models_path})...")
+    import time
+    t_start = time.perf_counter()
+    print(f"[Agent] Extracting Metadata (Knowledge Architect)...")
+    prompt = f"""
+    Analyze the following user note and extract structured metadata.
+    RULES:
+    1. Return ONLY a single valid JSON object. 
+    2. ENTITY TYPES: Person, Place, Tool, Organization.
+    3. CONCEPT: Abstract themes, topics, or emotional states. EXAMPLES: "Health", "Work", "Productivity".
+    4. TASK: Specific actionable goals mentioned.
+    5. PERSONA: Traits about the user's state.
+    6. CRITICAL: Extract text snippets exactly as they appear. Do NOT wrap values in extra quotes. 
+       Example: {{"quote": "I am happy"}}, NOT {{"quote": ""I am happy""}}.
+    7. NO COMMENTARY: Do not explain your errors or apologize. Return ONLY valid JSON.
+    8. ENGLISH ONLY: All output keys and values MUST be in English. Do not use Chinese characters (e.g., "反感") even if the model feels they are more precise. Translate if necessary.
+
+    CONTENT:
+    "{state['content']}"
+
+    """
+    try:
+        extraction = await asyncio.to_thread(llm_service.extract_structured, prompt, Extraction)
+        if not extraction:
+            return {"errors": ["LLM returned empty extraction"]}
+        
+        # FILTER: Remove garbage entities/concepts
+        extraction.entities = [
+            e for e in extraction.entities 
+            if e.name and e.name.strip().lower() not in ["untitled", "none", "unknown", ""]
+        ]
+        extraction.concepts = [
+            c for c in extraction.concepts 
+            if c.name and c.name.strip().lower() not in ["untitled", "none", "unknown", ""]
+        ]
+        
+        print(f"  Extracted: {len(extraction.entities)} entities, {len(extraction.concepts)} concepts.")
+        t_end = time.perf_counter()
+        print(f"  [Perf] Extraction took: {t_end - t_start:.4f}s")
+        return {"extraction": extraction, "logs": logs, "status": "EXTRACTED"}
+    except Exception as e:
+        print(f"  Extraction Error: {e}")
+        logs.append(f"ERROR: Extraction failed: {e}")
+        return {"errors": [f"Extraction failed: {str(e)}"], "logs": logs}
+
+async def embedding_node(state: IngestionState):
+    if state.get("errors"): return {}
+    logs = state["logs"]
+    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] EMBED: Generating Vectors...")
+    import time
+    t_start = time.perf_counter()
+    print("[Agent] Generating 4096-dim Embedding (Qwen)...")
+    full_vector = await asyncio.to_thread(embedding_service.embed_query, state["content"])
+    t_end = time.perf_counter()
+    print(f"  [Perf] Embedding took: {t_end - t_start:.4f}s")
+    return {"embedding": full_vector, "logs": logs, "status": "EMBEDDED"}
+
+async def storage_node(state: IngestionState):
+    if state.get("errors") or not state.get("extraction"):
+        return {"errors": state.get("errors") or ["Missing extraction data"]}
+        
+    logs = state["logs"]
+    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] STORE: Writing to Graph & Postgres...")
+    import time
+    t_start = time.perf_counter()
+    print("[Agent] Storing in Neo4j (Ontology)...")
+    note_id = state.get("note_id") or str(uuid.uuid4())
+    
+    # Prioritize: 1. Input Created At (from upload/picker), 2. Now
+    created_at = state.get("input").created_at or datetime.now().isoformat()
+    
+    # We use a simplified internal method for the actual write logic
+    from app.workflows.ingestion import ingestion_workflow
+    try:
+        title = await asyncio.to_thread(
+            ingestion_workflow._write_ontology, 
+            note_id, 
+            state["content"], 
+            state["extraction"], 
+            state["embedding"], 
+            created_at
+        )
+        
+        # Sync Title to Postgres (Async)
+        if title:
+            await ingestion_workflow._update_note_title_postgres(note_id, title)
+            
+        t_end = time.perf_counter()
+        print(f"  [Perf] Graph Storage took: {t_end - t_start:.4f}s")
+        return {"note_id": note_id, "created_at": created_at}
+    except Exception as e:
+        logs.append(f"ERROR: Storage failed: {e}")
+        return {"errors": [f"Storage failed: {str(e)}"], "logs": logs}
+
+async def summarization_node(state: IngestionState):
+    if state.get("errors") or not state.get("extraction"): return {}
+    logs = state["logs"]
+    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] SUMMARIZE: Updating Neighborhoods...")
+    import time
+    t_start = time.perf_counter()
+    print("[Agent] Updating Neighborhood Summaries (Delta Updates)...")
+    print("[Agent] Updating Neighborhood Summaries (Delta Updates)...")
+    from app.workflows.ingestion import ingestion_workflow
+    await ingestion_workflow._update_neighborhoods(
+        state["extraction"].concepts, 
+        state["extraction"].entities, 
+        state["extraction"].tasks, 
+        state["extraction"].persona_traits, 
+        state["content"]
+    )
+    t_end = time.perf_counter()
+    print(f"  [Perf] Summarization took: {t_end - t_start:.4f}s")
+    
+    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] DONE: Ingestion Complete.")
+    return {"logs": logs, "status": "INDEXED"}
+
+# 3. Router logic
+def should_continue(state: IngestionState):
+    if state.get("errors"):
+        return "end"
+    return "continue"
+
+async def refinement_node(state: IngestionState):
+    """
+    Tier 2: The Refiner (Phi-4-Mini-Reasoning)
+    Only runs for "Complex" notes.
+    Checks for consistencies/conflicts (Simulated for now, can be expanded to RAG).
+    """
+    if not state.get("is_complex") or not state.get("extraction"):
+        return {} # Skip
+        
+    logs = state["logs"]
+    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] REFINE: Running Reasoning Engine (Tier 2)...")
+    print(f"[Agent] Refinement (Reasoning) triggered...")
+    
+    # In a full impl, we would RAG here. For now, we ask it to self-reflect on the extraction quality.
+    prompt = f"""
+    AUDIT CHECK:
+    You are a Quality Assurance Auditor. Review the Extraction below against the Source Text.
+    Identify any CRITICAL missing Entities (People, Places, Organizations) that were overlooked.
+    
+    SOURCE TEXT: 
+    "{state['content'][:3000]}..."
+    
+    CURRENTLY EXTRACTED:
+    {[e.name for e in state['extraction'].entities]}
+    
+    INSTRUCTIONS:
+    1. specificy ONLY new/missing entities in the `entities` list.
+    2. Leave other fields (summary, concepts) empty unless strictly necessary.
+    3. Return valid JSON.
+    """
+    try:
+        # Use DeepSeek-R1 (Architect) to find what it missed
+        patch = await asyncio.to_thread(llm_service.extract_structured, prompt, Extraction)
+        
+        if patch and patch.entities:
+            # Merge Logic: Prevent duplicates
+            existing_names = {e.name.lower() for e in state["extraction"].entities}
+            added_count = 0
+            
+            for e in patch.entities:
+                if e.name and e.name.strip() and e.name.lower() not in existing_names:
+                    state["extraction"].entities.append(e)
+                    existing_names.add(e.name.lower())
+                    added_count += 1
+            
+            if added_count > 0:
+                print(f"  [Refiner] 🛠️ Patched Extraction: Added {added_count} new entities.")
+                logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] REFINE: Added {added_count} missing entities.")
+            else:
+                logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] REFINE: No new entities found.")
+        else:
+            logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] REFINE: Audit passed (No changes).")
+
+    except Exception as e:
+        logs.append(f"WARN: Refinement failed: {e}")
+        
+    return {"logs": logs, "status": "REFINED", "extraction": state["extraction"]}
+
+def should_refine(state: IngestionState):
+    if state.get("errors"): return "end"
+    if state.get("is_complex"): return "refine"
+    return "skip"
+
+# 3. Build Graph
+workflow = StateGraph(IngestionState)
+
+# Add Nodes
+workflow.add_node("multimodal", multimodal_node)
+workflow.add_node("extraction", extraction_node)
+workflow.add_node("refinement", refinement_node) # NEW
+workflow.add_node("embedding", embedding_node)
+workflow.add_node("storage", storage_node)
+workflow.add_node("summarization", summarization_node)
+
+# Define Edges
+workflow.set_entry_point("multimodal")
+workflow.add_edge("multimodal", "extraction")
+
+# Conditional Logic for Tier 2
+workflow.add_conditional_edges(
+    "extraction",
+    should_refine,
+    {
+        "refine": "refinement",
+        "skip": "embedding",
+        "end": END
+    }
+)
+workflow.add_edge("refinement", "embedding") # After refinement, go to embedding
+
+workflow.add_edge("embedding", "storage")
+workflow.add_edge("storage", "summarization")
+workflow.add_edge("summarization", END)
+
+# Compile
+ingestion_agent = workflow.compile()

@@ -1,0 +1,23 @@
+# System
+.DS_Store
+.idea
+.vscode
+tmp/
+.agent/
+.gemini/
+*.log
+
+# Models (too large for git)
+backend/models/
+
+# Extra
+/data
+*.pyc
+/backend/venv
+/frontend/.next
+/frontend/node_modules
+/frontend/out/
+/frontend/build/
+.env
+.env.local
+/data
