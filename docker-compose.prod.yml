@@ -10,7 +10,7 @@ services:
       POSTGRES_USER: liveos
       POSTGRES_PASSWORD: liveos_password
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - ./data/local_db/data:/var/lib/postgresql/data
     healthcheck:
