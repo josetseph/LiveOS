@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
-import { Send, User, Loader2, Sparkles, Database, Network, Cpu, Brain, X, FileText, ExternalLink } from "lucide-react";
+import { Send, User, Loader2, Sparkles, Database, Network, Cpu, Brain, X, FileText, ExternalLink, Trash2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -110,19 +110,16 @@ export default function ChatPage() {
     }
   };
 
-  const handleNoteReference = async (noteTitle: string) => {
+  const handleNoteReference = async (noteId: string) => {
     try {
-      // Search for the note by title
-      const notes = await api.getNotes(noteTitle);
-      if (notes && notes.length > 0) {
-        const note = notes[0];
-        const fullNote = await api.getNote(note.id);
-        setPreviewNote({
-          id: fullNote.id,
-          title: fullNote.title || "Untitled",
-          content: fullNote.content,
-        });
-      }
+      console.log('Fetching note with ID:', noteId);
+      const fullNote = await api.getNote(noteId);
+      console.log('Note fetched:', fullNote);
+      setPreviewNote({
+        id: fullNote.id,
+        title: fullNote.title || "Untitled",
+        content: fullNote.content,
+      });
     } catch (error) {
       console.error("Error fetching note:", error);
     }
@@ -141,6 +138,13 @@ export default function ChatPage() {
     }
     
     setFilePreview({ url, filename, type });
+  };
+
+  const handleClearChat = () => {
+    if (window.confirm("Clear all chat messages? This cannot be undone.")) {
+      setMessages([]);
+      sessionStorage.removeItem("chat-messages");
+    }
   };
 
   const suggestions = [
@@ -169,6 +173,15 @@ export default function ChatPage() {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {messages.length > 0 && (
+                <button
+                  onClick={handleClearChat}
+                  className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-400 transition-all hover:bg-red-500/20"
+                >
+                  <Trash2 className="h-3 w-3" />
+                  Clear Chat
+                </button>
+              )}
               <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
                 <Database className="h-3 w-3 text-green-400" />
                 <span className="text-xs text-white/70">Postgres</span>
@@ -242,8 +255,8 @@ export default function ChatPage() {
                       {message.role === "assistant" ? (
                         <>
                           {(() => {
-                            // Check if message contains References section
-                            const refMatch = message.content.match(/References[:\s]*\n([\s\S]+?)(?=\n\n|$)/i);
+                            // Check if message contains References section (### References or References:)
+                            const refMatch = message.content.match(/###?\s*References[:\s]*\n([\s\S]+?)$/i);
                             if (refMatch) {
                               const beforeRefs = message.content.substring(0, refMatch.index);
                               const refsList = refMatch[1];
@@ -286,18 +299,24 @@ export default function ChatPage() {
                                     <p className="text-sm font-semibold text-white/60 mb-2">References:</p>
                                     <div className="flex flex-wrap gap-2">
                                       {titles.map((title, i) => {
-                                        // Remove markdown and path info like (/notes/xxx)
-                                        let cleanTitle = title.replace(/[\*\[\]]/g, "").trim();
-                                        cleanTitle = cleanTitle.replace(/\(\/notes\/[^)]+\)/, "").trim();
-                                        if (!cleanTitle) return null;
+                                        // Extract note ID from markdown link format: - [Title](/notes/id)
+                                        const linkMatch = title.match(/\[([^\]]+)\]\(\/notes\/([^)]+)\)/);
+                                        if (!linkMatch) return null;
+                                        
+                                        const noteTitle = linkMatch[1];
+                                        const noteId = linkMatch[2];
+                                        
                                         return (
                                           <button
                                             key={i}
-                                            onClick={() => handleNoteReference(cleanTitle)}
+                                            onClick={() => {
+                                              console.log('Clicked note:', noteTitle, 'ID:', noteId);
+                                              handleNoteReference(noteId);
+                                            }}
                                             className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
                                           >
                                             <FileText className="h-3.5 w-3.5" />
-                                            {cleanTitle}
+                                            {noteTitle}
                                           </button>
                                         );
                                       })}
@@ -435,8 +454,45 @@ export default function ChatPage() {
                 </button>
               </div>
               <div className="overflow-y-auto p-6" style={{ maxHeight: "calc(80vh - 80px)" }}>
-                <div className="prose prose-invert max-w-none prose-headings:font-bold prose-p:leading-relaxed prose-a:text-purple-400 prose-code:text-pink-400">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <div className="prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-4xl prose-h1:mt-6 prose-h1:mb-4 prose-h2:text-3xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-2xl prose-h3:mt-4 prose-h3:mb-3 prose-h4:text-xl prose-h4:mt-3 prose-h4:mb-2 prose-p:leading-relaxed prose-p:text-white/90 prose-p:my-3 prose-strong:text-white prose-strong:font-bold prose-em:text-white/90 prose-em:italic prose-a:text-purple-400 prose-a:underline hover:prose-a:text-purple-300 prose-code:text-pink-400 prose-code:bg-white/10 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:before:content-[''] prose-code:after:content-[''] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-l-4 prose-blockquote:border-purple-500/50 prose-blockquote:text-white/80 prose-blockquote:pl-4 prose-blockquote:italic prose-ul:text-white/90 prose-ul:my-3 prose-ol:text-white/90 prose-ol:my-3 prose-li:text-white/90 prose-li:my-1">
+                  <ReactMarkdown 
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      a: ({ node, children, href, ...props }) => {
+                        const text = children?.toString() || "";
+                        if (href && (text.startsWith("📎") || text.startsWith("🎤"))) {
+                          const filename = text.replace(/^[📎🎤]\s*/, "");
+                          return (
+                            <button
+                              onClick={() => handleFileClick(href, filename)}
+                              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
+                            >
+                              {text}
+                            </button>
+                          );
+                        }
+                        return <a href={href} {...props}>{children}</a>;
+                      },
+                      h1: ({ node, children, ...props }) => (
+                        <h1 className="text-4xl font-bold text-white mt-6 mb-4" {...props}>{children}</h1>
+                      ),
+                      h2: ({ node, children, ...props }) => (
+                        <h2 className="text-3xl font-bold text-white mt-5 mb-3" {...props}>{children}</h2>
+                      ),
+                      h3: ({ node, children, ...props }) => (
+                        <h3 className="text-2xl font-bold text-white mt-4 mb-3" {...props}>{children}</h3>
+                      ),
+                      h4: ({ node, children, ...props }) => (
+                        <h4 className="text-xl font-bold text-white mt-3 mb-2" {...props}>{children}</h4>
+                      ),
+                      strong: ({ node, children, ...props }) => (
+                        <strong className="font-bold text-white" {...props}>{children}</strong>
+                      ),
+                      em: ({ node, children, ...props }) => (
+                        <em className="italic text-white/90" {...props}>{children}</em>
+                      ),
+                    }}
+                  >
                     {previewNote.content || "*Empty note*"}
                   </ReactMarkdown>
                 </div>

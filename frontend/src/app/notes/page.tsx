@@ -40,8 +40,22 @@ export default function NotesPage() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
-  // Fetch notes on mount
+  // Load draft from localStorage on mount
   useEffect(() => {
+    const savedDraft = localStorage.getItem('note-draft');
+    if (savedDraft) {
+      try {
+        const draft = JSON.parse(savedDraft);
+        // Add draft to notes list and select it
+        setNotes((prevNotes) => [draft, ...prevNotes]);
+        setSelectedNote(draft);
+        setIsPreviewMode(false);
+        contentBeforeEditRef.current = draft.content;
+      } catch (error) {
+        console.error('Error loading draft:', error);
+        localStorage.removeItem('note-draft');
+      }
+    }
     fetchNotes();
   }, []);
 
@@ -139,6 +153,9 @@ export default function NotesPage() {
         // Remove temp note from list
         setNotes((prevNotes) => prevNotes.filter((n) => n.id !== selectedNote.id));
         
+        // Clear draft from localStorage
+        localStorage.removeItem('note-draft');
+        
         setSelectedNote(createdNote);
         contentBeforeEditRef.current = createdNote.content;
       } else {
@@ -177,7 +194,13 @@ export default function NotesPage() {
 
   const handleContentChange = (content: string) => {
     if (!selectedNote) return;
-    setSelectedNote({ ...selectedNote, content });
+    const updatedNote = { ...selectedNote, content };
+    setSelectedNote(updatedNote);
+    
+    // Autosave to localStorage for temp notes
+    if (selectedNote.id.startsWith('temp-')) {
+      localStorage.setItem('note-draft', JSON.stringify(updatedNote));
+    }
   };
 
   const handleBlur = () => {
@@ -217,7 +240,13 @@ export default function NotesPage() {
         const markdownLink = `[📎 ${file.name}](${response.url})`;
         const newContent = textBefore + markdownLink + textAfter;
         
-        setSelectedNote({ ...selectedNote, content: newContent });
+        const updatedNote = { ...selectedNote, content: newContent };
+        setSelectedNote(updatedNote);
+        
+        // Autosave to localStorage for temp notes
+        if (selectedNote.id.startsWith('temp-')) {
+          localStorage.setItem('note-draft', JSON.stringify(updatedNote));
+        }
         
         setTimeout(() => {
           textarea.focus();
@@ -261,7 +290,13 @@ export default function NotesPage() {
             const markdownLink = `[🎤 Voice Recording](${response.url})`;
             const newContent = textBefore + markdownLink + textAfter;
             
-            setSelectedNote({ ...selectedNote, content: newContent });
+            const updatedNote = { ...selectedNote, content: newContent };
+            setSelectedNote(updatedNote);
+            
+            // Autosave to localStorage for temp notes
+            if (selectedNote.id.startsWith('temp-')) {
+              localStorage.setItem('note-draft', JSON.stringify(updatedNote));
+            }
             
             setTimeout(() => {
               textarea.focus();
@@ -314,10 +349,14 @@ export default function NotesPage() {
     
     try {
       // Update note with new created_at date
-      // You'll need to add this endpoint to your API
       const updatedNote = { ...selectedNote, created_at: dateString };
       setSelectedNote(updatedNote);
       setShowDatePicker(false);
+      
+      // Autosave to localStorage for temp notes
+      if (selectedNote.id.startsWith('temp-')) {
+        localStorage.setItem('note-draft', JSON.stringify(updatedNote));
+      }
     } catch (error) {
       console.error("Error updating date:", error);
     }

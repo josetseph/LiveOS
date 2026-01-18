@@ -19,7 +19,7 @@ export const api = {
         return response.data;
     },
 
-    async ingest(data: { content: string; image_path?: string; audio_path?: string; pdf_path?: string; created_at?: string }) {
+    async ingest(data: { content: string; created_at?: string }) {
         const response = await axios.post(`${API_BASE_URL}/ingest`, data);
         return response.data;
     },

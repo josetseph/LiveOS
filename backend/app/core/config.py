@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     # LLM (Local)
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     MODEL_EXTRACTION: str = "gemma3:12b"
-    MODEL_ARCHITECT: str = "knowledge-architect"
+    MODEL_ARCHITECT: str = "gemma3:12b"
     MODEL_SUMMARIZATION: str = "gemma3:12b"
     MODEL_BRAIN: str = "gemma3:12b"
     MODEL_REASONING: str = "gemma3:12b"

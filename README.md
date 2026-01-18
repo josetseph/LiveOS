@@ -3,6 +3,7 @@
 LiveOS Brain is a multimodal, graph-based personal memory system. It ingests notes, audio, images, and PDFs, understands their semantic meaning, and creates a living ontology (knowledge graph) of your life.
 
 > **Project History**: For a detailed log of the architectural evolution and model choices, see [Development Process](./development_process.md).
+> **Project Findings**: For a detailed log of the results from testing multiple models, see [Test Results](./findings/test_results.md).
 
 ## System Architecture
 
@@ -78,7 +79,7 @@ The system runs locally using Docker for services and Ollama for models.
     # Create Database Tables & Storage Bucket
     python scripts/init_local.py
 
-    # Build Custom Model
+    # Build Custom Model (Optional)
     ollama create knowledge-architect -f Architect.modelfile
 
     # Start API Server
@@ -113,7 +114,7 @@ Deploy the entire stack with a single command (requires Ollama running on host).
     ```bash
     ollama pull gemma3:12b
     ollama pull qwen3-embedding:8b
-    ollama create knowledge-architect -f backend/Architect.modelfile
+    ollama create knowledge-architect -f backend/Architect.modelfile # Optional
     ```
 
 2.  **Download Hugging Face Models** (pre-bundled in repo):
@@ -155,7 +156,7 @@ If you want to wipe all data (Notes, Graph, Vectors, Files) and start fresh:
     *This script will wipe the Neo4j Graph, Postgres Tables, and MinIO Bucket.*
 
 ### How to Manage Models
-The system uses custom Modelfiles for optimized extraction. To rebuild:
+The system (optionally) uses custom Modelfiles for optimized extraction. To rebuild:
 ```bash
 ollama create knowledge-architect -f backend/Architect.modelfile
 ```
@@ -174,7 +175,7 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
     *   **Historical Dates**: Backdate notes using the **Date Picker** in the toolbar. The system uses `dateparser` for robust parsing of user-selected dates.
 
 2.  **Cognition (Extraction)**:
-    *   **Model**: `knowledge-architect` (Custom ModelFile based on `gemma3:12b`).
+    *   **Model**: `knowledge-architect` (Custom ModelFile based on `gemma3:12b`) OR `gemma3:12b`.
     *   **Schema**: Strict JSON extraction for `Entities`, `Concepts`, `Tasks`, `Persona`.
     *   **JSON Repair Pipeline**: A robust regex layer fixes common LLM syntax errors (comments, smart quotes, unquoted keys).
     *   **Entity-Level Locking**: Prevents race conditions when multiple notes update the same entity concurrently.
@@ -227,3 +228,47 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 *   **Soft-Capped Reranking**: 50-snippet limit for consistent 3-5s response times
 *   **Markdown Support**: Note previews render markdown in chat
 *   **Real-time System Info**: Header displays all active services and databases
+
+---
+
+## 5. Batch Processing & Testing
+
+### Batch Note Processing (`batch-note-processing/`)
+
+For bulk ingestion of notes from text files, use the batch processing scripts:
+
+**Scripts:**
+- `send_note.py` - Send individual notes to the ingestion endpoint
+- `batch_ingest.py` - Batch process all `.txt` and `.md` files from `notes/` directory
+
+**Usage:**
+```bash
+cd batch-note-processing
+
+# Single note
+python send_note.py "Your note content"
+python send_note.py --file my-note.txt
+python send_note.py "Historical note" --date "2024-01-15"
+
+# Batch processing
+python batch_ingest.py
+python batch_ingest.py --dry-run              # Preview without sending
+python batch_ingest.py --delay 1              # Add 1s delay between notes
+python batch_ingest.py --auto-date            # Extract dates from filenames
+```
+
+**Auto-date filename patterns:**
+- `2024-01-15-my-note.txt` → Uses 2024-01-15
+- `note-2024-01-15.md` → Uses 2024-01-15
+- `20240115_meeting.txt` → Uses 2024-01-15
+
+**Features:**
+- 📂 Automatically processes all `.txt` and `.md` files
+- 📅 Extracts dates from filenames (optional)
+- ⏳ Configurable delay to avoid overwhelming the system
+- 🔍 Dry-run mode for previewing
+- 📊 Summary report with success/failure counts
+
+### Test Results (`findings/`)
+
+Local test results, benchmarks, and system validation reports are stored in the `Findings/` directory. This includes performance metrics, accuracy tests, and experimental results during development.
