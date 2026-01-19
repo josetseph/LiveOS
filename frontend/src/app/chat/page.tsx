@@ -417,7 +417,13 @@ export default function ChatPage() {
             <span>•</span>
             <span className="font-medium text-pink-400">Qwen3 Embedding</span>
             <span>•</span>
-            <span className="font-medium text-blue-400">MxBai Reranker</span>
+            <span className="font-medium text-cyan-400">MxBai Reranker</span>
+            <span>•</span>
+            <span className="font-medium text-emerald-400">DeepSeek OCR</span>
+            <span>•</span>
+            <span className="font-medium text-teal-400">Florence 2</span>
+            <span>•</span>
+            <span className="font-medium text-amber-400">Whisper V3</span>
           </div>
         </div>
       </div>

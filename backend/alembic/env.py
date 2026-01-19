@@ -26,6 +26,7 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 from app.models.note import Base
+
 target_metadata = Base.metadata
 
 
@@ -37,6 +38,7 @@ def get_url():
     if url.startswith("postgresql://"):
         return url.replace("postgresql://", "postgresql+asyncpg://", 1)
     return url
+
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
@@ -77,7 +79,7 @@ async def run_async_migrations() -> None:
 
     configuration = config.get_section(config.config_ini_section)
     configuration["sqlalchemy.url"] = get_url()
-    
+
     connectable = async_engine_from_config(
         configuration,
         prefix="sqlalchemy.",

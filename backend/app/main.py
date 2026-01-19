@@ -6,6 +6,11 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+# Setup logging before any other imports
+from app.core.logging_config import setup_logging
+
+setup_logging()
+
 app = FastAPI(title="LiveOS Brain API", version="0.1.0")
 
 # Ensure upload directory exists
@@ -24,6 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.post("/api/v1/upload")
 async def upload_file(file: UploadFile = File(...)):
     """
@@ -31,44 +37,50 @@ async def upload_file(file: UploadFile = File(...)):
     """
     from app.utils.bucket_storage import send_files, get_files
     import uuid
-    
+
     # Generate unique key
-    ext = file.filename.split('.')[-1]
+    ext = file.filename.split(".")[-1]
     filename = f"{uuid.uuid4()}.{ext}"
     content = await file.read()
-    
+
     # Upload to R2
     await send_files(content, filename, file.content_type)
-    
+
     # Get Public URL
     url = get_files(filename)
-    
+
     return {
         "filename": file.filename,
         "url": url,
-        "local_path": url, # Legacy compatibility
-        "status": "success"
+        "local_path": url,  # Legacy compatibility
+        "status": "success",
     }
+
 
 @app.get("/")
 async def root():
     return {"message": "LiveOS Brain is online", "status": "active"}
+
 
 @app.get("/health")
 async def health_check():
     # TODO: Check Neo4j connection here
     return {"status": "healthy", "neo4j": "unknown"}
 
+
 from app.schemas.extraction import NoteInput
 from app.workflows.ingestion import ingestion_workflow
 
 
-
 from pydantic import BaseModel
+
+
 class ChatInput(BaseModel):
     query: str
 
+
 from app.workflows.chat import chat_workflow
+
 
 @app.post("/api/v1/chat")
 async def chat(input: ChatInput):
@@ -77,7 +89,9 @@ async def chat(input: ChatInput):
     """
     return await chat_workflow.chat(input.query)
 
+
 from app.services.graph import graph_service
+
 
 @app.get("/api/v1/graph/summary")
 async def get_graph_summary():
@@ -93,8 +107,9 @@ async def get_graph_summary():
     with graph_service.driver.session() as session:
         result = session.run(query)
         concepts = [record.data() for record in result]
-    
+
     return {"themes": concepts}
+
 
 @app.get("/api/v1/graph/visualization")
 async def get_graph_visualization():
@@ -126,7 +141,7 @@ async def get_graph_visualization():
     # Actually, for Notes that might not have connections yet, we might want to just show them?
     # But usually ForceGraph needs links. Let's stick to the original query but REMOVE the Note exclusion.
     # And maybe add a separate match for Notes to ensure they appear even if disconnected (force graph can handle disconnected nodes if we pass them in nodes list).
-    
+
     query = """
     MATCH (n)
     WHERE labels(n)[0] IN ['Note', 'Concept', 'Entity', 'Task']
@@ -136,79 +151,89 @@ async def get_graph_visualization():
            type(r) as type
     LIMIT 300
     """
-    
+
     # Let's use a cleaner query that gets everything.
     query = """
     MATCH (n)-[r]->(m)
     RETURN elementId(n) as source_id, 
-           COALESCE(n.name, n.summary, n.content, n.trait, n.description) as source_name, 
+           COALESCE(n.name, n.summary, n.content, n.trait, n.description, n.title) as source_name, 
            labels(n)[0] as source_label,
            n.id as source_uuid,
            n.summary as source_summary,
+           n.domain as source_domain,
            elementId(m) as target_id, 
-           COALESCE(m.name, m.summary, m.trait, m.description) as target_name, 
+           COALESCE(m.name, m.summary, m.trait, m.description, m.title) as target_name, 
            labels(m)[0] as target_label,
            m.id as target_uuid,
            m.summary as target_summary,
+           m.domain as target_domain,
            type(r) as type
     
     UNION
     MATCH (n:Note)
     WHERE NOT (n)--()
     RETURN elementId(n) as source_id, 
-           COALESCE(n.name, n.summary, n.content, n.trait, n.description) as source_name, 
+           COALESCE(n.name, n.summary, n.content, n.trait, n.description, n.title) as source_name, 
            labels(n)[0] as source_label,
            n.id as source_uuid,
            n.summary as source_summary,
+           n.domain as source_domain,
            NULL as target_id, 
            NULL as target_name, 
            NULL as target_label,
            NULL as target_uuid,
            NULL as target_summary,
+           NULL as target_domain,
            NULL as type
     
     """
-    
+
     nodes = {}
     links = []
-    
+
     with graph_service.driver.session() as session:
         result = session.run(query)
         for record in result:
             s_id = str(record["source_id"])
-            
+
             # Skip if source has no useful label
-            if not record["source_label"]: continue
+            if not record["source_label"]:
+                continue
 
             name = record["source_name"]
-            if name and len(name) > 30: name = name[:30] + "..."
-            
+            if name and len(name) > 30:
+                name = name[:30] + "..."
+
             if s_id not in nodes:
                 nodes[s_id] = {
-                    "id": s_id, 
-                    "name": name or "Untitled", 
+                    "id": s_id,
+                    "name": name or "Untitled",
                     "group": record["source_label"],
                     "uuid": record["source_uuid"],
-                    "summary": record["source_summary"]
+                    "summary": record["source_summary"],
+                    "domain": record["source_domain"],
                 }
-            
+
             if record["target_id"] is not None:
                 t_id = str(record["target_id"])
                 t_name = record["target_name"]
-                if t_name and len(t_name) > 30: t_name = t_name[:30] + "..."
-                
+                if t_name and len(t_name) > 30:
+                    t_name = t_name[:30] + "..."
+
                 if t_id not in nodes:
                     nodes[t_id] = {
-                        "id": t_id, 
-                        "name": t_name or "Untitled", 
+                        "id": t_id,
+                        "name": t_name or "Untitled",
                         "group": record["target_label"],
                         "uuid": record["target_uuid"],
-                        "summary": record["target_summary"]
+                        "summary": record["target_summary"],
+                        "domain": record["target_domain"],
                     }
-                
+
                 links.append({"source": s_id, "target": t_id, "type": record["type"]})
-            
+
     return {"nodes": list(nodes.values()), "links": links}
+
 
 # --- Notes API ---
 
@@ -217,6 +242,7 @@ from app.models.note import Note
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete
 from fastapi import Depends, HTTPException
+
 
 class NoteResponse(BaseModel):
     id: str
@@ -228,49 +254,53 @@ class NoteResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
 @app.post("/api/v1/ingest")
-async def ingest_note(note_data: NoteInput, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+async def ingest_note(
+    note_data: NoteInput,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     """
-    Ingest a new note: 
+    Ingest a new note:
     1. Save to Postgres (Body).
     2. Background: Extract metadata -> Save to Graph (Mind).
     """
     note_id = str(uuid.uuid4())
-    
+
     # 1. Save to Postgres
     # Use provided created_at if available (for historical notes), else default to now.
     # We parse the ISO string if provided.
     c_at = datetime.utcnow()
     if note_data.created_at:
         try:
-             # Try parsing common formats if not strict ISO
-             import dateparser
-             dt = dateparser.parse(note_data.created_at)
-             if dt: c_at = dt
-        except:
-             pass # Fallback to now
+            # Try parsing common formats if not strict ISO
+            import dateparser
 
-    new_note = Note(
-        id=note_id,
-        content=note_data.content,
-        created_at=c_at
-    )
+            dt = dateparser.parse(note_data.created_at)
+            if dt:
+                c_at = dt
+        except:
+            pass  # Fallback to now
+
+    new_note = Note(id=note_id, content=note_data.content, created_at=c_at)
     db.add(new_note)
     await db.commit()
-    
+
     # 2. Trigger Graph Ingestion
     # Pass created_at along so the agent knows about it too
     if note_data.created_at is None:
         note_data.created_at = c_at.isoformat()
-        
+
     background_tasks.add_task(ingestion_workflow.process_note, note_data, note_id)
-    
+
     return {
         "note_id": note_id,
         "status": "processing_started",
         "content": note_data.content,
-        "created_at": c_at.isoformat()
+        "created_at": c_at.isoformat(),
     }
+
 
 @app.get("/api/v1/notes")
 async def get_notes(search: str | None = None, db: AsyncSession = Depends(get_db)):
@@ -279,9 +309,12 @@ async def get_notes(search: str | None = None, db: AsyncSession = Depends(get_db
     """
     if search:
         term = f"%{search}%"
-        query = select(Note).where(
-            (Note.title.ilike(term)) | (Note.content.ilike(term))
-        ).order_by(Note.created_at.desc()).limit(100)
+        query = (
+            select(Note)
+            .where((Note.title.ilike(term)) | (Note.content.ilike(term)))
+            .order_by(Note.created_at.desc())
+            .limit(100)
+        )
     else:
         query = select(Note).order_by(Note.created_at.desc()).limit(100)
 
@@ -290,6 +323,7 @@ async def get_notes(search: str | None = None, db: AsyncSession = Depends(get_db
     # Normalize created_at to string for JSON serialization if needed, or rely on Pydantic
     return notes
 
+
 @app.get("/api/v1/notes/{note_id}")
 async def get_note(note_id: str, db: AsyncSession = Depends(get_db)):
     """
@@ -297,13 +331,19 @@ async def get_note(note_id: str, db: AsyncSession = Depends(get_db)):
     """
     result = await db.execute(select(Note).where(Note.id == note_id))
     note = result.scalar_one_or_none()
-    
+
     if not note:
         return {"error": "Note not found"}
     return note
 
+
 @app.put("/api/v1/notes/{note_id}")
-async def update_note(note_id: str, note_data: NoteInput, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+async def update_note(
+    note_id: str,
+    note_data: NoteInput,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Update a note:
     1. Check if content changed.
@@ -313,7 +353,7 @@ async def update_note(note_id: str, note_data: NoteInput, background_tasks: Back
     # 1. Fetch existing note to compare
     result = await db.execute(select(Note).where(Note.id == note_id))
     existing_note = result.scalar_one_or_none()
-    
+
     if not existing_note:
         return {"error": "Note not found", "status": "failed"}
 
@@ -324,33 +364,36 @@ async def update_note(note_id: str, note_data: NoteInput, background_tasks: Back
         # For strict user requirement: "If exactly the same, nothing happens."
         if existing_note.processed:
             return {"status": "skipped_no_change", "id": note_id}
-        
+
         # If processed=False, we fall through to trigger ingestion again (retry)
-    
+
     # 3. Update Postgres
     # Reset processed = False because we are changing it
     existing_note.content = note_data.content
     existing_note.processed = False
-    
+
     # Update created_at if provided (for correcting dates)
     if note_data.created_at:
         try:
-             import dateparser
-             dt = dateparser.parse(note_data.created_at)
-             if dt: existing_note.created_at = dt
+            import dateparser
+
+            dt = dateparser.parse(note_data.created_at)
+            if dt:
+                existing_note.created_at = dt
         except:
-             pass
+            pass
 
     # updated_at will auto-update if config allows, or we set it manually:
     existing_note.updated_at = datetime.utcnow()
-    
+
     await db.commit()
     await db.refresh(existing_note)
 
     # 4. Trigger Re-Ingestion (Background)
     background_tasks.add_task(ingestion_workflow.process_note, note_data, note_id)
-    
+
     return {"status": "updated_and_processing", "id": note_id}
+
 
 @app.delete("/api/v1/notes/{note_id}")
 async def delete_note(note_id: str, db: AsyncSession = Depends(get_db)):
@@ -360,7 +403,7 @@ async def delete_note(note_id: str, db: AsyncSession = Depends(get_db)):
     # 1. Delete from Postgres
     await db.execute(delete(Note).where(Note.id == note_id))
     await db.commit()
-    
+
     # 2. Delete from Bio/Graph (Neo4j)
     # We can do this synchronously here as it's fast enough, or background it.
     query = """
@@ -369,5 +412,5 @@ async def delete_note(note_id: str, db: AsyncSession = Depends(get_db)):
     """
     with graph_service.driver.session() as session:
         session.run(query, {"id": note_id})
-    
+
     return {"status": "deleted", "id": note_id}

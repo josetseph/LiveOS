@@ -5,9 +5,12 @@ from app.services.graph import graph_service
 from app.services.embedding import embedding_service
 from app.services.multimedia import multimedia_service
 from app.schemas.extraction import Extraction, NoteInput
+from app.core.logging_config import get_component_logger
 import uuid
 from datetime import datetime
 import asyncio
+
+logger = get_component_logger("IngestionPipeline")
 
 # Global Concurrency Limit: 2 parallel ingestions max to protect Supabase/Ollama
 concurrency_limit = asyncio.Semaphore(2)
@@ -36,15 +39,15 @@ async def multimodal_node(state: IngestionState):
     import time
 
     t_start = time.perf_counter()
-    print("[Agent] Processing Multimedia Sources...")
+    logger.info("Processing Multimedia Sources...")
 
     # Acquire semaphore for the entire workflow (held implicitly by the chain? No, we need to wrap the whole graph execution)
     # Actually, wrapping inside a node only throttles that node.
     # To throttle the whole workflow, we should modify the background runner in `ingestion.py` instead.
     # BUT, we can add it here as a "Gatekeeper" in the first node.
     async with concurrency_limit:
-        print(
-            f"[Agent] Sempahore Acquired. (Active: {2 - concurrency_limit._value + 1 if hasattr(concurrency_limit, '_value') else '?'})"
+        logger.info(
+            f"Sempahore Acquired. (Active: {2 - concurrency_limit._value + 1 if hasattr(concurrency_limit, '_value') else '?'})"
         )
         # Proceed logic...
         content = state["input"].content or ""
@@ -56,13 +59,13 @@ async def multimodal_node(state: IngestionState):
     # Match both attachment icon and microphone icon
     file_matches = re.findall(r"\[(?:📎|🎤) (.*?)\]\((http.*?|/uploads/.*?)\)", content)
     for filename, url in file_matches:
-        print(f"[Agent] Processing File: {filename} ({url})")
+        logger.info(f"Processing File: {filename} ({url})")
         try:
             lower_url = url.lower()
 
             # --- AUDIO ---
             if lower_url.endswith((".webm", ".m4a", ".mp3", ".wav", ".ogg", ".mp4")):
-                print(f"  -> Detected Audio. Transcribing...")
+                logger.info(f"Detected Audio. Transcribing...")
                 transcription = await asyncio.to_thread(
                     multimedia_service.transcribe_audio, url
                 )
@@ -71,13 +74,13 @@ async def multimodal_node(state: IngestionState):
                     if len(transcription) > 100
                     else transcription
                 )
-                print(f'  -> Audio Result ({len(transcription)} chars): "{snippet}"')
+                logger.info(f'Audio Result ({len(transcription)} chars): "{snippet}"')
                 content += f"\n\n[Audio Transcript ({filename})]: {transcription}"
                 changed = True
 
             # --- PDF ---
             elif lower_url.endswith(".pdf"):
-                print(f"  -> Detected PDF. Extracting text...")
+                logger.info(f"Detected PDF. Extracting text...")
                 pdf_text = await asyncio.to_thread(
                     multimedia_service.extract_text_from_pdf, url
                 )
@@ -86,32 +89,32 @@ async def multimodal_node(state: IngestionState):
                     if len(pdf_text) > 100
                     else pdf_text
                 )
-                print(f'  -> PDF Result ({len(pdf_text)} chars): "{snippet}"')
+                logger.info(f'PDF Result ({len(pdf_text)} chars): "{snippet}"')
                 content += f"\n\n[PDF Extraction ({filename})]: {pdf_text}"
                 changed = True
 
             # --- IMAGE ---
             elif lower_url.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                print(f"  -> Detected Image. Describing...")
+                logger.info(f"Detected Image. Describing...")
                 img_desc = await asyncio.to_thread(
                     multimedia_service.describe_image, url
                 )
-                print(f'  -> Image Description: "{img_desc}"')
+                logger.info(f'Image Description: "{img_desc}"')
                 content += f"\n\n[Image Description ({filename})]: {img_desc}"
                 changed = True
 
             else:
-                print(f"  -> Skipped (Unsupported Type): {url}")
+                logger.info(f"Skipped (Unsupported Type): {url}")
 
         except Exception as e:
-            print(f"  File Processing Failed: {e}")
+            logger.error(f"File Processing Failed: {e}")
 
     # CRITICAL: Sync back to Postgres if content changed (Transcription)
     if changed and state.get("note_id"):
         from app.workflows.ingestion import ingestion_workflow
 
-        print(
-            f"[Agent] Syncing extracted text to Postgres for Note {state['note_id']}..."
+        logger.info(
+            f"Syncing extracted text to Postgres for Note {state['note_id']}..."
         )
         await ingestion_workflow._update_note_content_postgres(
             state["note_id"], content
@@ -126,7 +129,7 @@ async def multimodal_node(state: IngestionState):
         )
 
     t_end = time.perf_counter()
-    print(f"  [Perf] Multimedia processing took: {t_end - t_start:.4f}s")
+    logger.info(f"Multimedia processing took: {t_end - t_start:.4f}s")
     return {
         "content": content.strip(),
         "logs": logs,
@@ -143,19 +146,39 @@ async def extraction_node(state: IngestionState):
     import time
 
     t_start = time.perf_counter()
-    print(f"[Agent] Extracting Metadata (Knowledge Architect)...")
+    logger.info(f"Extracting Metadata (Knowledge Architect)...")
     prompt = f"""
     Analyze the following user note and extract structured metadata.
+    
+    DOMAIN CATEGORIZATION (Choose ONE - CRITICAL):
+    Classify based on the PRIMARY SUBJECT MATTER, not the writing style or tone.
+    
+    - "Academic": The main content is learning material, concepts, theories, research, or educational topics
+      Examples: explaining algorithms, discussing papers, studying theories, learning new concepts
+      
+    - "Professional": The main content is about work, projects, business decisions, or professional activities  
+      Examples: team meetings, project updates, technical architecture decisions, work tasks
+      
+    - "Personal": The main content is personal reflections, emotions, life events, or relationships
+      Examples: journal entries about feelings, personal goals unrelated to work/study, daily life reflections
+    
+    IMPORTANT: A note written in first person ("I learned about X") that explains academic concepts should be classified as Academic, not Personal. Similarly, "We decided in the meeting to use X" should be Professional, not Personal. Look at WHAT the note is about, not HOW it's written.
+    
     RULES:
     1. Return ONLY a single valid JSON object. 
     2. ENTITY TYPES: Person, Place, Tool, Organization.
-    3. CONCEPT: Abstract themes, topics, or emotional states. EXAMPLES: "Health", "Work", "Productivity".
+    3. CONCEPT: Abstract themes, topics, or emotional states. EXAMPLES: "Health", "Work", "Productivity", "Stochastic Processes", "Machine Learning".
     4. TASK: Specific actionable goals mentioned.
-    5. PERSONA: Traits about the user's state.
-    6. CRITICAL: Extract text snippets exactly as they appear. Do NOT wrap values in extra quotes. 
+    5. PERSONA: Traits about the user's state (for Personal domain only).
+    6. REFERENCES: For Academic/Professional domains - extract external citations, quotes, papers, books.
+       - type: "Paper", "Book", "Quote", "Video", "Song"
+       - title: Full title of the work
+       - content: The actual quote or key excerpt (if applicable)
+       - source: Author/Artist/Creator name
+    7. CRITICAL: Extract text snippets exactly as they appear. Do NOT wrap values in extra quotes. 
        Example: {{"quote": "I am happy"}}, NOT {{"quote": ""I am happy""}}.
-    7. NO COMMENTARY: Do not explain your errors or apologize. Return ONLY valid JSON.
-    8. ENGLISH ONLY: All output keys and values MUST be in English. Do not use Chinese characters (e.g., "反感") even if the model feels they are more precise. Translate if necessary.
+    8. NO COMMENTARY: Do not explain your errors or apologize. Return ONLY valid JSON.
+    9. ENGLISH ONLY: All output keys and values MUST be in English. Do not use Chinese characters (e.g., "反感") even if the model feels they are more precise. Translate if necessary.
 
     CONTENT:
     "{state['content']}"
@@ -182,14 +205,15 @@ async def extraction_node(state: IngestionState):
             and c.name.strip().lower() not in ["untitled", "none", "unknown", ""]
         ]
 
-        print(
-            f"  Extracted: {len(extraction.entities)} entities, {len(extraction.concepts)} concepts."
+        logger.info(
+            f"Extracted: {len(extraction.entities)} entities, {len(extraction.concepts)} concepts, {len(extraction.references)} references."
         )
+        logger.info(f"Domain: {extraction.domain}")
         t_end = time.perf_counter()
-        print(f"  [Perf] Extraction took: {t_end - t_start:.4f}s")
+        logger.info(f"Extraction took: {t_end - t_start:.4f}s")
         return {"extraction": extraction, "logs": logs, "status": "EXTRACTED"}
     except Exception as e:
-        print(f"  Extraction Error: {e}")
+        logger.error(f"Extraction Error: {e}")
         logs.append(f"ERROR: Extraction failed: {e}")
         return {"errors": [f"Extraction failed: {str(e)}"], "logs": logs}
 
@@ -202,12 +226,14 @@ async def embedding_node(state: IngestionState):
     import time
 
     t_start = time.perf_counter()
-    print("[Agent] Generating 4096-dim Embedding (Qwen)...")
+    from app.core.config import settings
+
+    logger.info(f"Generating {settings.EMBEDDING_DIMENSIONS}-dim Embedding...")
     full_vector = await asyncio.to_thread(
         embedding_service.embed_query, state["content"]
     )
     t_end = time.perf_counter()
-    print(f"  [Perf] Embedding took: {t_end - t_start:.4f}s")
+    logger.info(f"Embedding took: {t_end - t_start:.4f}s")
     return {"embedding": full_vector, "logs": logs, "status": "EMBEDDED"}
 
 
@@ -222,7 +248,7 @@ async def storage_node(state: IngestionState):
     import time
 
     t_start = time.perf_counter()
-    print("[Agent] Storing in Neo4j (Ontology)...")
+    logger.info("Storing in Neo4j (Ontology)...")
     note_id = state.get("note_id") or str(uuid.uuid4())
 
     # Prioritize: 1. Input Created At (from upload/picker), 2. Now
@@ -246,7 +272,7 @@ async def storage_node(state: IngestionState):
             await ingestion_workflow._update_note_title_postgres(note_id, title)
 
         t_end = time.perf_counter()
-        print(f"  [Perf] Graph Storage took: {t_end - t_start:.4f}s")
+        logger.info(f"  [Perf] Graph Storage took: {t_end - t_start:.4f}s")
         return {"note_id": note_id, "created_at": created_at}
     except Exception as e:
         logs.append(f"ERROR: Storage failed: {e}")
@@ -263,8 +289,8 @@ async def summarization_node(state: IngestionState):
     import time
 
     t_start = time.perf_counter()
-    print("[Agent] Updating Neighborhood Summaries (Delta Updates)...")
-    print("[Agent] Updating Neighborhood Summaries (Delta Updates)...")
+    logger.info("[Agent] Updating Neighborhood Summaries (Delta Updates)...")
+    logger.info("[Agent] Updating Neighborhood Summaries (Delta Updates)...")
     from app.workflows.ingestion import ingestion_workflow
 
     await ingestion_workflow._update_neighborhoods(
@@ -272,10 +298,11 @@ async def summarization_node(state: IngestionState):
         state["extraction"].entities,
         state["extraction"].tasks,
         state["extraction"].persona_traits,
+        state["extraction"].references,
         state["content"],
     )
     t_end = time.perf_counter()
-    print(f"  [Perf] Summarization took: {t_end - t_start:.4f}s")
+    logger.info(f"  [Perf] Summarization took: {t_end - t_start:.4f}s")
 
     logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] DONE: Ingestion Complete.")
     return {"logs": logs, "status": "INDEXED"}
@@ -290,7 +317,7 @@ def should_continue(state: IngestionState):
 
 async def refinement_node(state: IngestionState):
     """
-    Tier 2: The Refiner (Phi-4-Mini-Reasoning)
+    Tier 2: The Refiner (Reasoning Model)
     Only runs for "Complex" notes.
     Checks for consistencies/conflicts (Simulated for now, can be expanded to RAG).
     """
@@ -301,7 +328,7 @@ async def refinement_node(state: IngestionState):
     logs.append(
         f"[{datetime.now().strftime('%H:%M:%S')}] REFINE: Running Reasoning Engine (Tier 2)..."
     )
-    print(f"[Agent] Refinement (Reasoning) triggered...")
+    logger.info("[Agent] Refinement (Reasoning) triggered...")
 
     # In a full impl, we would RAG here. For now, we ask it to self-reflect on the extraction quality.
     prompt = f"""
@@ -338,7 +365,7 @@ async def refinement_node(state: IngestionState):
                     added_count += 1
 
             if added_count > 0:
-                print(
+                logger.info(
                     f"  [Refiner] 🛠️ Patched Extraction: Added {added_count} new entities."
                 )
                 logs.append(

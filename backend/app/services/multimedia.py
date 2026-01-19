@@ -3,17 +3,17 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForCausalLM, AutoModelForSpeechSeq2Seq
 from app.core.config import settings
+from app.core.logging_config import get_component_logger
 
 # Shim for PaddleOCR's dependency on legacy LangChain paths
 import sys
+
+logger = get_component_logger("MultimediaService")
 
 try:
     import langchain_community.docstore.document as doc
     import langchain_community.docstore as docstore
     import langchain_text_splitters as ts
-
-    # Create the top-level langchain if it doesn't have these submodules
-    import langchain
 
     sys.modules["langchain.docstore"] = docstore
     sys.modules["langchain.docstore.document"] = doc
@@ -27,20 +27,6 @@ try:
         pass
 except ImportError:
     pass
-
-# Try to import PaddleOCR, handle failure gracefully
-try:
-    from paddleocr import PaddleOCR
-
-    PADDLE_AVAILABLE = True
-except ImportError as e:
-    PADDLE_AVAILABLE = False
-    print(
-        f"Warning: PaddleOCR not available (Import Error: {e}). PDF/Image text extraction will be limited."
-    )
-except Exception as e:
-    PADDLE_AVAILABLE = False
-    print(f"Warning: PaddleOCR failed to initialize: {e}")
 
 
 class MultimediaService:
@@ -61,7 +47,9 @@ class MultimediaService:
     def _load_whisper(self):
         if not self.whisper_model:
             model_path = os.path.join(self.models_path, settings.MODEL_WHISPER_LOCAL)
-            print(f"Loading Whisper ({settings.MODEL_WHISPER_HF}) from {model_path}...")
+            logger.info(
+                f"Loading Whisper ({settings.MODEL_WHISPER_HF}) from {model_path}..."
+            )
             self.whisper_model = (
                 AutoModelForSpeechSeq2Seq.from_pretrained(model_path)
                 .to(self.device)
@@ -76,12 +64,11 @@ class MultimediaService:
         """
         import requests
         import tempfile
-        import urllib.parse
 
         if not path_or_url.startswith("http"):
             return path_or_url
 
-        print(f"Downloading remote file: {path_or_url}...")
+        logger.info(f"Downloading remote file: {path_or_url}...")
         try:
             response = requests.get(path_or_url)
             response.raise_for_status()
@@ -92,13 +79,15 @@ class MultimediaService:
                 tmp.write(response.content)
                 return tmp.name
         except Exception as e:
-            print(f"Failed to download file: {e}")
+            logger.error(f"Failed to download file: {e}")
             raise e
 
     def _load_florence(self):
         if not self.florence_model:
             model_path = os.path.join(self.models_path, settings.MODEL_FLORENCE_LOCAL)
-            print(f"Loading Florence ({settings.MODEL_FLORENCE_HF}) from {model_path}...")
+            logger.info(
+                f"Loading Florence ({settings.MODEL_FLORENCE_HF}) from {model_path}..."
+            )
             # Florence-2-Large requires trust_remote_code=True
             self.florence_model = (
                 AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
@@ -147,11 +136,11 @@ class MultimediaService:
             )
 
             description = parsed_answer.get(prompt, "")
-            print(f"Florence Description: {description}")
+            logger.info(f"Florence Description: {description}")
             return description
 
         except Exception as e:
-            print(f"Florence Failed: {e}")
+            logger.error(f"Florence Failed: {e}")
             return f"Image Description Failed: {e}"
         finally:
             if local_path != image_path and os.path.exists(local_path):
@@ -170,7 +159,7 @@ class MultimediaService:
         local_path = self._download_temp_file(audio_path)
 
         try:
-            print(f"Transcribing audio: {local_path}")
+            logger.info(f"Transcribing audio: {local_path}")
 
             # Convert to WAV using pydub to ensure compatibility with librosa/soundfile
             # This fixes "PySoundFile failed" and "Processing Multimedia Sources" warnings
@@ -179,7 +168,7 @@ class MultimediaService:
             # Determine format or let pydub auto-detect
             # We convert to a new temp WAV file
             wav_path = local_path + ".converted.wav"
-            print(f"Converting to WAV: {wav_path}")
+            logger.info(f"Converting to WAV: {wav_path}")
 
             audio_segment = AudioSegment.from_file(local_path)
             audio_segment = audio_segment.set_frame_rate(16000).set_channels(
@@ -246,18 +235,22 @@ class MultimediaService:
 
                 # Heuristic: If we got a decent amount of text, return it.
                 if len(full_native_text) > 100:
-                    print("PDF Text Extraction: Used Native Text Layer (PyMuPDF).")
+                    logger.info(
+                        "PDF Text Extraction: Used Native Text Layer (PyMuPDF)."
+                    )
                     return full_native_text
 
-                print(
+                logger.info(
                     "PDF Text Extraction: Native text too sparse. Falling back to OCR..."
                 )
                 extracted_text = []  # Reset for OCR
 
             except ImportError:
-                print("PyMuPDF (fitz) not installed. Skipping native text check.")
+                logger.error(
+                    "PyMuPDF (fitz) not installed. Skipping native text check."
+                )
             except Exception as e:
-                print(f"PyMuPDF failed: {e}. Falling back to OCR.")
+                logger.error(f"PyMuPDF failed: {e}. Falling back to OCR.")
 
             # --- Strategy 2: Vision Model (DeepSeek-OCR) ---
             # Fallback for Scanned PDFs or images
@@ -267,7 +260,7 @@ class MultimediaService:
             from app.core.config import settings
             from openai import OpenAI
 
-            print(f"Converting PDF {local_path} to images for OCR...")
+            logger.info(f"Converting PDF {local_path} to images for OCR...")
             images = convert_from_path(local_path)
 
             client = OpenAI(
@@ -276,7 +269,7 @@ class MultimediaService:
             )
 
             for i, img in enumerate(images):
-                print(f"Processing PDF Page {i+1}/{len(images)} (OCR)...")
+                logger.info(f"Processing PDF Page {i+1}/{len(images)} (OCR)...")
 
                 # Convert PIL image to base64
                 buffered = io.BytesIO()

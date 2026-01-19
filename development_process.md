@@ -239,6 +239,46 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 
 ---
 
+## 📅 Phase 16: The "PKM Upgrade" (Dual-Purpose Knowledge Management)
+**Goal**: Transform LiveOS from pure personal journal into dual-purpose system supporting Academic/Professional PKM alongside personal journaling.
+
+*   **Domain Categorization**:
+    *   **Schema Extension**: Added `domain` field (Academic/Personal/Professional) and `references: List[ExternalReference]` to Extraction model.
+    *   **Intelligent Classification**: LLM classifies notes based on PRIMARY SUBJECT MATTER, not writing style.
+        *   "I learned about Linear Regression" → Academic (learning material)
+        *   "Met with team to discuss GraphRAG" → Professional (work meeting)
+        *   "Feeling anxious about thesis defense" → Personal (emotions/feelings)
+    *   **Critical Fix**: Updated `system_msg` in `llm.py` to include `domain` and `references` in JSON template - without this, LLM defaulted all notes to "Personal".
+*   **Academic Knowledge Graph**:
+    *   **External References**: New `Reference` node type for papers, books, quotes, videos.
+    *   **Citation Tracking**: `CITES` relationships link Notes to References.
+    *   **Academic Relationships**: 
+        *   `PREREQUISITE_FOR`: Knowledge dependencies (e.g., Probability → Linear Regression)
+        *   `CONTRADICTS`: Conflicting concepts (e.g., Deterministic vs Stochastic)
+        *   Detected via heuristics from concept definitions ("builds on", "requires", "contradicts")
+*   **Domain-Aware Retrieval**:
+    *   **Query Classification**: Keyword-based detection of query domain using same heuristics as synthesis.
+    *   **Domain Boosting**: 1.5x score multiplier for notes matching query domain in hybrid search.
+    *   **Graph Service Update**: Added `query_vector_with_domain()` method returning domain field.
+*   **Domain-Aware Synthesis**:
+    *   **Adaptive Prompts**: System instructions change based on detected query domain:
+        *   **Academic**: Pedagogical, conceptual, references papers/theorems, explains prerequisites
+        *   **Personal**: Empathetic, insight-focused, connects feelings and experiences
+        *   **Professional**: Concise, action-oriented, references meetings/tasks/decisions
+    *   **Consistent Detection**: Uses same keyword matching as retrieval for domain detection.
+*   **Graph Visualization**:
+    *   **Reference Nodes**: Gold (#ffd700) nodes for citations with summaries
+    *   **Domain Colors**: Notes colored by domain (Academic=emerald, Professional=purple, Personal=blue)
+    *   **Academic Link Styling**: 
+        *   `CITES` links: Gold with 0.4 opacity
+        *   `PREREQUISITE_FOR`: Emerald with directional particles
+        *   `CONTRADICTS`: Red with 0.3 opacity
+    *   **Color Fix**: Changed Persona nodes from orange to light purple (#a78bfa) to distinguish from gold References
+*   **Documentation**: Created comprehensive `PKM_UPGRADE.md` with examples, test scenarios, and implementation details.
+*   **Testing**: Full test suite (`test_pkm_upgrade.py`) validates domain detection, cross-domain insights, and reference extraction.
+
+---
+
 ## 🏗️ Architectural Principles
 
 1.  **Local-First**: All data and processing stays on the user's machine.
@@ -248,3 +288,4 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 5.  **Entity-Level Consistency**: Locking mechanisms prevent race conditions during concurrent updates.
 6.  **Performance Caps**: Soft limits (50 snippets) ensure predictable response times.
 7.  **Transparency**: Real-time system info displays all active services and models.
+8.  **Dual-Purpose Design**: Single system serves both personal journaling and academic/professional knowledge management with domain-aware intelligence.

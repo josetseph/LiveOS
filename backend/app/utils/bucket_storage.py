@@ -3,10 +3,10 @@ from botocore.client import Config
 from aioboto3 import session as aioboto3_session
 import logging
 from app.core.config import settings
+from app.core.logging_config import get_component_logger
 
 # Initialize logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = get_component_logger("BucketStorage")
 
 # Configuration for the S3 client, including retry strategy
 my_config = Config(
@@ -71,7 +71,7 @@ async def send_files(file, file_key, file_type):
                 ContentType=file_type,
             )
             logger.info(f"Successfully uploaded file to S3: {file_key}")
-            logger.debug(f"Upload response: {upload_file_response}")
+            logger.info(f"Upload response: {upload_file_response}")
             return upload_file_response
     except Exception as e:
         logger.error(f"Error uploading file to S3: {file_key} - {e}")
@@ -183,7 +183,7 @@ async def send_files_multipart(file, file_key, file_type, part_size=MAX_FILE_SIZ
 
                 parts.append({"ETag": part_response["ETag"], "PartNumber": part_number})
 
-                logger.debug(f"Uploaded part {part_number} for {file_key}")
+                logger.info(f"Uploaded part {part_number} for {file_key}")
                 part_number += 1
 
             # Complete multipart upload
@@ -208,7 +208,7 @@ async def send_files_multipart(file, file_key, file_type, part_size=MAX_FILE_SIZ
                         Key=file_key,
                         UploadId=upload_id,
                     )
-                    logger.debug(f"Aborted multipart upload {upload_id} for {file_key}")
+                    logger.info(f"Aborted multipart upload {upload_id} for {file_key}")
             except Exception as abort_error:
                 logger.warning(
                     f"Failed to abort multipart upload {upload_id} for {file_key}: {abort_error}"

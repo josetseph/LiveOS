@@ -7,7 +7,22 @@ LiveOS Brain is a multimodal, graph-based personal memory system. It ingests not
 
 ## System Architecture
 
-The system operates on a **Polyglot Persistence** model ("Mind & Body") supported by three main pillars: **Ingestion**, **Memory**, and **Retrieval**.
+The system operates on a **Polyglot Persistence** model ("Mind & Body") with **dual-purpose knowledge management**: Personal Journal + Academic/Professional PKM.
+
+**Why Dual-Purpose?** A single system that handles both personal reflections ("I'm anxious about my thesis") and academic learning ("Markov Chains have the memoryless property") with domain-aware intelligence. The system automatically detects the note's purpose and adapts retrieval and synthesis accordingly.
+
+### Dual-Mode Operation
+
+**Personal Journal Mode:**
+- Daily activities, feelings, goals, relationships
+- Tasks and persona trait tracking
+- Emotional pattern analysis
+
+**Academic/Professional PKM:**
+- Learning notes, papers, concepts, theorems
+- Citation tracking and reference management
+- Knowledge graph with prerequisites and contradictions
+- Domain-aware retrieval and synthesis
 
 ```mermaid
 graph TD
@@ -29,20 +44,23 @@ graph TD
         
         Transcribe --> Extractor[Knowledge Architect - Gemma3 12B]
         OCR --> Extractor
-        Extractor -->|JSON Repair| Cleaner[JSON Repair Pipeline]
+        Extractor -->|Domain Detection| DomainClassifier{Personal/Academic/Professional}
+        DomainClassifier -->|JSON Repair| Cleaner[JSON Repair Pipeline]
         Cleaner -->|Entities & Concepts| Embedder[Qwen3 Embedding 8B]
         Embedder -->|Vectors + Metadata| Neo4j
+        Embedder -->|Academic Relationships| AcademicGraph[PREREQUISITE_FOR, CONTRADICTS, CITES]
         Embedder -->|Summaries| Summarizer[Neighborhood Updates]
         Summarizer -->|Entity-Level Locking| Neo4j
     end
     
     subgraph Retrieval Pipeline [GraphRAG]
-        User -->|Query| Search[Hybrid Search]
+        User -->|Query| QueryClassifier{Detect Domain}
+        QueryClassifier -->|Academic/Personal/Pro| Search[Hybrid Search + Domain Boost]
         Search -->|1. Vector Scan| Neo4j
         Search -.->|2. Fetch Content| Postgres
         Search -->|3. Graph Expansion| Neo4j
         Search -->|4. Rerank - 50 cap| Reranker[MxBai Reranker Seq-Cls]
-        Reranker -->|Top Context| Synthesis[Gemma3 12B Chat]
+        Reranker -->|Top Context| Synthesis[Domain-Aware Synthesis]
         Synthesis --> User
     end
 ```
@@ -176,7 +194,9 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 2.  **Cognition (Extraction)**:
     *   **Model**: `knowledge-architect` (Custom ModelFile based on `gemma3:12b`) OR `gemma3:12b`.
-    *   **Schema**: Strict JSON extraction for `Entities`, `Concepts`, `Tasks`, `Persona`.
+    *   **Schema**: Strict JSON extraction for `Entities`, `Concepts`, `Tasks`, `Persona`, `Domain`, `References`.
+    *   **Domain Classification**: Automatically categorizes notes as Academic/Personal/Professional based on primary subject matter.
+    *   **Reference Extraction**: Captures citations (papers, books, quotes) with full attribution for academic notes.
     *   **JSON Repair Pipeline**: A robust regex layer fixes common LLM syntax errors (comments, smart quotes, unquoted keys).
     *   **Entity-Level Locking**: Prevents race conditions when multiple notes update the same entity concurrently.
 
@@ -189,13 +209,18 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 ## 2. The Retrieval System ("The Voice")
 
-1.  **Double-Fetch Hybrid RAG**:
-    *   **Step 1**: Vector Search in Neo4j finds top 50 distinct Note IDs.
+1.  **Double-Fetch Hybrid RAG with Domain Awareness**:
+    *   **Step 0**: Query domain detection (Academic/Personal/Professional) via keyword heuristics.
+    *   **Step 1**: Vector Search in Neo4j with 1.5x domain boost for matching notes.
     *   **Step 2**: Full content is fetched from Postgres (Single Source of Truth).
-    *   **Step 3**: Graph Context expansion (Entities, Concepts, Tasks, Persona Traits with evidence quotes).
+    *   **Step 3**: Graph Context expansion (Entities, Concepts, Tasks, Persona Traits, References with evidence quotes).
     *   **Step 4**: Soft cap at 50 snippets for reranker performance (3-5s response time).
 2.  **Reranking**: `mxbai-rerank-large-v2-seq` (Generative Reranker).
-3.  **Synthesis**: **Gemma3 12B** with strict grounding (no advice, only insights).
+3.  **Domain-Aware Synthesis**: **Gemma3 12B** with adaptive system prompts:
+    *   **Academic**: Pedagogical, conceptual explanations with prerequisites and citations
+    *   **Personal**: Empathetic insights connecting experiences and feelings
+    *   **Professional**: Concise, action-oriented responses referencing work context
+    *   **Strict Grounding**: No advice, only insights from user's notes
 
 ---
 
@@ -220,8 +245,11 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 ## 4. Key Features
 
+*   **Dual-Purpose PKM**: Single system for personal journaling + academic/professional knowledge management
+*   **Domain-Aware Intelligence**: Automatic categorization with adaptive retrieval and synthesis
+*   **Academic Knowledge Graph**: Citation tracking, prerequisite chains, contradiction detection
 *   **Multimodal Ingestion**: Text, Audio, Images, PDFs
-*   **GraphRAG**: Semantic search + Knowledge graph traversal
+*   **GraphRAG**: Semantic search + Knowledge graph traversal with domain boosting
 *   **Historical Journaling**: Manual date picker for backdating notes
 *   **Entity-Level Locking**: Prevents data corruption during concurrent updates
 *   **Parallel Neighborhood Updates**: Faster ingestion with `asyncio.gather`
@@ -268,6 +296,103 @@ python batch_ingest.py --auto-date            # Extract dates from filenames
 - ⏳ Configurable delay to avoid overwhelming the system
 - 🔍 Dry-run mode for previewing
 - 📊 Summary report with success/failure counts
+
+---
+
+## 📚 PKM (Personal Knowledge Management) Capabilities
+
+LiveOS now supports **dual-purpose knowledge management** for both personal journaling and academic/professional learning. For full details, see [PKM_UPGRADE.md](./PKM_UPGRADE.md).
+
+### Key Features
+
+**Domain Categorization:**
+- Notes are automatically classified as Personal, Academic, or Professional
+- Retrieval and chat synthesis adapt based on query domain
+- Domain-specific boosting (1.5x) for relevant notes
+
+**Academic Knowledge Graph:**
+- Citation tracking with `CITES` relationships to papers, books, quotes
+- Prerequisite chains with `PREREQUISITE_FOR` (e.g., Calculus → Linear Algebra)
+- Contradiction detection with `CONTRADICTS` (e.g., Deterministic vs Stochastic)
+
+**External References:**
+- Track papers, books, videos, quotes with full attribution
+- Automatic extraction from note content
+- Linked to concepts in knowledge graph
+
+**Cross-Domain Insights:**
+- System connects personal experiences with academic learning
+- Example: Links "anxiety about unpredictability" with "studying stochastic processes"
+
+**Domain-Aware Synthesis:**
+- Academic queries get pedagogical, concept-focused responses
+- Personal queries get empathetic, insight-focused responses
+- Professional queries get concise, action-focused responses
+
+### Example Use Cases
+
+**Academic Learning:**
+```
+Input: "Markov Chains lecture - memoryless property"
+Output:
+  - Domain: Academic
+  - Concepts: Markov Chain, Memoryless Property
+  - Graph: Markov Chain -[PREREQUISITE_FOR]-> Probability Distributions
+```
+
+**Personal Journal:**
+```
+Input: "Feeling anxious about thesis defense"
+Output:
+  - Domain: Personal
+  - Concepts: Anxiety
+  - Persona: Anxious about unpredictability
+  - Cross-link: Connects to "Stochastic Processes" concept
+```
+
+**Professional Documentation:**
+```
+Input: "Team meeting - decided to use GraphRAG architecture"
+Output:
+  - Domain: Professional
+  - Entities: Team, GraphRAG
+  - Tasks: Implement GraphRAG
+```
+
+### Implementation Details
+
+**Schema Fix (Critical):** The LLM extraction requires both the Pydantic model AND the `system_msg` JSON template in `llm.py` to include `domain` and `references` fields. Without the template update, the LLM defaults to "Personal" for all notes.
+
+**Domain Detection:** The system prioritizes content over writing style:
+- "I learned about X" (first-person academic content) → Academic
+- "We decided in meeting to use X" (first-person work content) → Professional  
+- "I feel anxious about X" (emotional reflection) → Personal
+
+**Migration Notes:**
+- **Existing data:** All old notes default to "Personal" domain - no migration needed
+- **New features:** Automatically available for new notes without breaking changes
+- **Graph visualization:** Domain colors and Reference nodes appear immediately after backend restart
+
+---
+
+### Logging System (`backend/logs/`)
+
+The backend uses a comprehensive file-based logging system with automatic rotation. All debug/info output goes to component-specific log files, while the console only shows warnings and errors.
+
+**Log Files:**
+- `ingestion.log` - Ingestion pipeline operations
+- `retrieval.log` - Query processing and search
+- `graph.log` - Neo4j operations
+- `llm.log` - LLM service calls
+- `api.log` - FastAPI endpoints
+- `errors.log` - All ERROR+ messages across services
+
+**Configuration:**
+- 10MB max file size with 5 rotating backups
+- DEBUG level in files, WARNING+ in console
+- See [backend/logs/README.md](backend/logs/README.md) for viewing commands
+
+---
 
 ### Test Results (`findings/`)
 

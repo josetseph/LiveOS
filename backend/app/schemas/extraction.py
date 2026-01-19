@@ -54,15 +54,31 @@ class PersonaTrait(BaseModel):
         return v or ""
 
 
+class ExternalReference(BaseModel):
+    title: str = ""
+    type: str = "Quote"  # "Song", "Quote", "Book", "Paper", "Video"
+    content: str = ""
+    source: Optional[str] = None  # Author/Artist
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def handle_none(cls, v: Any) -> Any:
+        return v or "" if v is not None else ""
+
+
 class Extraction(BaseModel):
     summary: str = ""
+    domain: str = "Personal"  # "Personal", "Academic", "Professional"
     entities: List[Entity] = Field(default_factory=list)
     concepts: List[Concept] = Field(default_factory=list)
     tasks: List[Task] = Field(default_factory=list)
     persona_traits: List[PersonaTrait] = Field(default_factory=list)
+    references: List[ExternalReference] = Field(default_factory=list)
     sentiment: str = "Neutral"
 
-    @field_validator("entities", "concepts", "tasks", "persona_traits", mode="before")
+    @field_validator(
+        "entities", "concepts", "tasks", "persona_traits", "references", mode="before"
+    )
     @classmethod
     def ensure_list_of_objects(cls, v, info):
         if v is None:

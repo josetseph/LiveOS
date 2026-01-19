@@ -7,6 +7,9 @@ tmp/
 .gemini/
 *.log
 
+# Logs
+backend/logs/
+
 # Models (too large for git)
 backend/models/
 
@@ -20,4 +23,4 @@ backend/models/
 /frontend/build/
 .env
 .env.local
-/data
+/batch-note-processing/notes

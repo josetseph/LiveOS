@@ -96,8 +96,8 @@ export default function GraphPage() {
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#ffbd2e] shadow-[0_0_12px_#ffbd2e]"></span>
-              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#ffbd2e] opacity-30"></span>
+              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#a78bfa] shadow-[0_0_12px_#a78bfa]"></span>
+              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#a78bfa] opacity-30"></span>
             </div>
             <span className="font-semibold">Persona / Trait</span>
           </div>
@@ -115,8 +115,29 @@ export default function GraphPage() {
             </div>
             <span className="font-semibold">Note / Memory</span>
           </div>
+          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
+            <div className="relative">
+              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#ffd700] shadow-[0_0_12px_#ffd700]"></span>
+              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#ffd700] opacity-30"></span>
+            </div>
+            <span className="font-semibold">Reference / Citation</span>
+          </div>
         </div>
-        <div className="mt-4 flex items-center justify-center gap-2 border-t border-white/10 pt-3 text-[10px] text-zinc-600">
+        <div className="mt-3 space-y-1.5 border-t border-white/10 pt-3">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Domain Colors</p>
+          <div className="flex flex-wrap gap-2">
+            <div className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-400">
+              Academic
+            </div>
+            <div className="rounded-md border border-blue-500/20 bg-blue-500/10 px-2 py-1 text-[10px] font-semibold text-blue-400">
+              Personal
+            </div>
+            <div className="rounded-md border border-purple-500/20 bg-purple-500/10 px-2 py-1 text-[10px] font-semibold text-purple-400">
+              Professional
+            </div>
+          </div>
+        </div>
+        <div className="mt-3 flex items-center justify-center gap-2 border-t border-white/10 pt-3 text-[10px] text-zinc-600">
           <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"></div>
           <span className="font-mono font-semibold">LIVE GRAPH</span>
         </div>
@@ -128,15 +149,45 @@ export default function GraphPage() {
         graphData={data}
         nodeLabel={(node: any) => node.title || node.name}
         nodeColor={(node: any) => {
+          // Reference nodes (papers, books, citations)
+          if (node.group === "Reference") return "#ffd700";
+          
+          // Domain-aware coloring for Notes
+          if (node.group === "Note") {
+            if (node.domain === "Academic") return "#10b981"; // emerald
+            if (node.domain === "Professional") return "#a855f7"; // purple
+            return "#3b82f6"; // blue for Personal (default)
+          }
+          
+          // Original colors for other node types
           if (node.group === "Concept") return "#00c6ff";
           if (node.group === "Entity") return "#7000ff";
-          if (node.group === "Persona") return "#ffbd2e";
+          if (node.group === "Persona") return "#a78bfa"; // light purple (distinct from gold references)
           if (node.group === "Task") return "#ff0055";
-          if (node.group === "Note") return "#ffffff";
           return "#ffffff";
         }}
         nodeRelSize={6}
-        linkColor={() => "rgba(255,255,255,0.15)"}
+        linkColor={(link: any) => {
+          // Academic relationships get special colors
+          if (link.type === "CITES") return "rgba(255, 215, 0, 0.4)"; // gold for citations
+          if (link.type === "PREREQUISITE_FOR") return "rgba(16, 185, 129, 0.3)"; // emerald for prerequisites
+          if (link.type === "CONTRADICTS") return "rgba(239, 68, 68, 0.3)"; // red for contradictions
+          // Default for other relationships
+          return "rgba(255,255,255,0.15)";
+        }}
+        linkWidth={(link: any) => {
+          // Make academic relationships slightly thicker
+          if (link.type === "CITES" || link.type === "PREREQUISITE_FOR" || link.type === "CONTRADICTS") {
+            return 2;
+          }
+          return 1;
+        }}
+        linkDirectionalParticles={(link: any) => {
+          // Show direction particles for academic relationships
+          if (link.type === "PREREQUISITE_FOR") return 2;
+          return 0;
+        }}
+        linkDirectionalParticleWidth={2}
         backgroundColor="rgba(0,0,0,1)"
         d3VelocityDecay={0.3}
         cooldownTicks={100}
@@ -164,10 +215,17 @@ export default function GraphPage() {
                     selectedNode.group === "Entity" &&
                       "border-[#7000ff]/30 bg-[#7000ff]/15 text-[#7000ff] shadow-lg shadow-[#7000ff]/10",
                     selectedNode.group === "Persona" &&
-                      "border-[#ffbd2e]/30 bg-[#ffbd2e]/15 text-[#ffbd2e] shadow-lg shadow-[#ffbd2e]/10",
+                      "border-[#ff6b35]/30 bg-[#ff6b35]/15 text-[#ff6b35] shadow-lg shadow-[#ff6b35]/10",
                     selectedNode.group === "Task" &&
                       "border-[#ff0055]/30 bg-[#ff0055]/15 text-[#ff0055] shadow-lg shadow-[#ff0055]/10",
-                    selectedNode.group === "Note" && "border-white/20 bg-white/10 text-white"
+                    selectedNode.group === "Reference" &&
+                      "border-[#ffd700]/30 bg-[#ffd700]/15 text-[#ffd700] shadow-lg shadow-[#ffd700]/10",
+                    selectedNode.group === "Note" && selectedNode.domain === "Academic" &&
+                      "border-emerald-500/30 bg-emerald-500/15 text-emerald-400 shadow-lg shadow-emerald-500/10",
+                    selectedNode.group === "Note" && selectedNode.domain === "Professional" &&
+                      "border-purple-500/30 bg-purple-500/15 text-purple-400 shadow-lg shadow-purple-500/10",
+                    selectedNode.group === "Note" && (!selectedNode.domain || selectedNode.domain === "Personal") &&
+                      "border-blue-500/30 bg-blue-500/15 text-blue-400 shadow-lg shadow-blue-500/10"
                   )}
                 >
                   {selectedNode.group}
@@ -184,6 +242,25 @@ export default function GraphPage() {
             <h2 className="mb-3 text-2xl font-bold leading-tight text-white">
               {selectedNode.title || selectedNode.name}
             </h2>
+
+            {selectedNode.domain && selectedNode.group === "Note" && (
+              <div className="mb-3 w-fit">
+                <div
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold",
+                    selectedNode.domain === "Academic" &&
+                      "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
+                    selectedNode.domain === "Professional" &&
+                      "border-purple-500/30 bg-purple-500/10 text-purple-400",
+                    (!selectedNode.domain || selectedNode.domain === "Personal") &&
+                      "border-blue-500/30 bg-blue-500/10 text-blue-400"
+                  )}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-current"></span>
+                  {selectedNode.domain || "Personal"} Domain
+                </div>
+              </div>
+            )}
 
             {selectedNode.created_at && (
               <div className="mb-5 w-fit rounded-lg border border-white/5 bg-white/5 px-3 py-2">

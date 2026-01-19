@@ -1,6 +1,7 @@
 from langchain_ollama import OllamaEmbeddings
 from app.core.config import settings
 
+
 class EmbeddingService:
     def __init__(self):
         # Option A: Use Ollama but keep it loaded (Safe for 16GB RAM)
@@ -8,7 +9,7 @@ class EmbeddingService:
         self.embeddings = OllamaEmbeddings(
             base_url=settings.OLLAMA_BASE_URL,
             model=settings.MODEL_EMBEDDING,
-            keep_alive="-1" 
+            keep_alive="-1",
         )
 
     def embed_query(self, text: str) -> list[float]:
@@ -25,5 +26,5 @@ class EmbeddingService:
         dummy_vec = self.embed_query("test")
         return len(dummy_vec)
 
-embedding_service = EmbeddingService()
 
+embedding_service = EmbeddingService()

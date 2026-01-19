@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     MODEL_SUMMARIZATION: str = "gemma3:12b"
     MODEL_BRAIN: str = "gemma3:12b"
     MODEL_REASONING: str = "gemma3:12b"
-    MODEL_EMBEDDING: str = "qwen3-embedding:8b"
-    MODEL_RERANKING: str = "mxbai-rerank-large-v2-seq"
+    MODEL_EMBEDDING: str = "qwen3-embedding:0.6b"
+    EMBEDDING_DIMENSIONS: int = 1024
     MODEL_VISION: str = "deepseek-ocr:latest"
 
     # Hugging Face Models (Transformers)
@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     MODEL_WHISPER_HF: str = "openai/whisper-large-v3"
     MODEL_WHISPER_LOCAL: str = "whisper-large-v3"
     MODEL_RERANKER_HF: str = "michaelfeil/mxbai-rerank-large-v2-seq"
+    MODEL_RERANKING_LOCAL: str = "mxbai-rerank-large-v2-seq"
 
     # Model Storage Path
     MODELS_PATH: str = "models"  # Relative to backend root

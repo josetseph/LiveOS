@@ -608,7 +608,6 @@ export default function NotesPage() {
                   ref={textareaRef}
                   value={selectedNote.content}
                   onChange={(e) => handleContentChange(e.target.value)}
-                  onBlur={handleBlur}
                   placeholder="Start writing..."
                   className="h-full w-full resize-none bg-transparent font-mono text-white placeholder-white/20 focus:outline-none"
                 />
