@@ -156,6 +156,7 @@ export default function GraphPage() {
           if (node.group === "Note") {
             if (node.domain === "Academic") return "#10b981"; // emerald
             if (node.domain === "Professional") return "#a855f7"; // purple
+            if (node.domain === "Creative") return "#ec4899"; // pink/rose
             return "#3b82f6"; // blue for Personal (default)
           }
           

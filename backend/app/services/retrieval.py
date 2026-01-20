@@ -99,8 +99,9 @@ class RetrievalService:
             return [(doc, 0.0) for doc in documents]
 
         try:
-            # rerankers.rank returns a RankedResults object
-            results = self.reranker.rank(query=query, docs=documents)
+            # UPGRADE: Added batch_size=5 to prevent memory buffer errors
+            # This ensures the GPU processes snippets in manageable chunks.
+            results = self.reranker.rank(query=query, docs=documents, batch_size=5)
 
             # Convert to list of (doc, score)
             # results is iteratable of Result(doc_id, text, score, rank)
@@ -108,8 +109,8 @@ class RetrievalService:
             return ranked_pairs
 
         except Exception as e:
-            logger.info(f"Reranking error (Batch): {e}")
-            logger.info("  -> Falling back to batch_size=1 (Slow Path)")
+            logger.warning(f"Reranking batch failed (likely VRAM pressure): {e}")
+            logger.info("Falling back to sequential processing (Slow Path)")
             try:
                 # Fallback: Process one by one
                 results = self.reranker.rank(query=query, docs=documents, batch_size=1)
@@ -298,14 +299,11 @@ class RetrievalService:
         # Map back ranked texts to snippet objects
         # Create lookup map (Text -> List[Snippet] to handle duplicates if any)
         final_docs = []
-        snippet_map = {}
-        for s in all_snippets:
-            snippet_map[s["text"]] = s
+        snippet_map = {s["text"]: s for s in all_snippets}
 
         for text, score in ranked_pairs:
             if text in snippet_map:
-                s = snippet_map[text].copy()  # Copy to avoid ref issues
-                # Apply domain boost to final score
+                s = snippet_map[text].copy()
                 domain_boost = s.get("domain_boost", 1.0)
                 s["score"] = score * domain_boost
                 final_docs.append(s)
@@ -314,15 +312,16 @@ class RetrievalService:
         final_docs.sort(key=lambda x: x.get("score", 0), reverse=True)
 
         # Return Top N Objects
-        return final_docs[:20]
+        return final_docs[:10]
 
     def _detect_query_domain(self, query: str) -> str:
         """
-        Heuristic to detect if query is Academic, Personal, or Professional.
+        Heuristic to detect if query is Academic, Personal, Professional, or Creative.
 
         Academic: mentions concepts, learning, papers, theorems, courses
         Personal: mentions feelings, daily life, relationships, goals
         Professional: mentions work, projects, meetings, career
+        Creative: mentions poems, lyrics, metaphors, creative writing
         """
         query_lower = query.lower()
 
@@ -389,12 +388,31 @@ class RetrievalService:
             "business",
         ]
 
+        # Creative keywords
+        creative_keywords = [
+            "poem",
+            "poetry",
+            "verse",
+            "lyric",
+            "lyrics",
+            "song",
+            "metaphor",
+            "stanza",
+            "rhyme",
+            "creative",
+            "fiction",
+            "story",
+            "prose",
+            "writing",
+        ]
+
         academic_score = sum(1 for kw in academic_keywords if kw in query_lower)
         personal_score = sum(1 for kw in personal_keywords if kw in query_lower)
         professional_score = sum(1 for kw in professional_keywords if kw in query_lower)
+        creative_score = sum(1 for kw in creative_keywords if kw in query_lower)
 
         # Return domain with highest score, default to Personal
-        max_score = max(academic_score, personal_score, professional_score)
+        max_score = max(academic_score, personal_score, professional_score, creative_score)
         if max_score == 0:
             return "Personal"  # Default
 
@@ -402,6 +420,8 @@ class RetrievalService:
             return "Academic"
         elif professional_score == max_score:
             return "Professional"
+        elif creative_score == max_score:
+            return "Creative"
         else:
             return "Personal"
 

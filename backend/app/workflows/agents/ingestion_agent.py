@@ -146,7 +146,7 @@ async def extraction_node(state: IngestionState):
     import time
 
     t_start = time.perf_counter()
-    logger.info(f"Extracting Metadata (Knowledge Architect)...")
+    logger.info("Extracting Metadata (Knowledge Architect)...")
     prompt = f"""
     Analyze the following user note and extract structured metadata.
     
@@ -161,6 +161,15 @@ async def extraction_node(state: IngestionState):
       
     - "Personal": The main content is personal reflections, emotions, life events, or relationships
       Examples: journal entries about feelings, personal goals unrelated to work/study, daily life reflections
+
+    - "Creative": Poems, song lyrics, or fictional sketches.
+      * RULE: Do NOT extract literal Tasks or Entities from metaphors (e.g., "carrying the sun" is not a task).
+      * RULE: Extract 'Persona' traits based on the emotional subtext and themes.
+      * RULE: Save the full text as an 'ExternalReference':
+        - type: "Poem"
+        - title: [Original Title or Generated Essence]
+        - content: [Full Text]
+        - source: "User"
     
     IMPORTANT: A note written in first person ("I learned about X") that explains academic concepts should be classified as Academic, not Personal. Similarly, "We decided in the meeting to use X" should be Professional, not Personal. Look at WHAT the note is about, not HOW it's written.
     
@@ -178,7 +187,7 @@ async def extraction_node(state: IngestionState):
     7. CRITICAL: Extract text snippets exactly as they appear. Do NOT wrap values in extra quotes. 
        Example: {{"quote": "I am happy"}}, NOT {{"quote": ""I am happy""}}.
     8. NO COMMENTARY: Do not explain your errors or apologize. Return ONLY valid JSON.
-    9. ENGLISH ONLY: All output keys and values MUST be in English. Do not use Chinese characters (e.g., "反感") even if the model feels they are more precise. Translate if necessary.
+    9. ENGLISH ONLY: All output keys and values MUST be in English.
 
     CONTENT:
     "{state['content']}"

@@ -62,7 +62,6 @@ class LLMService:
         try:
             from json_repair import repair_json
 
-            # ensure_ascii=False keeps chinese/unicode characters if present (though we filter them elsewhere)
             return repair_json(json_str)
         except ImportError:
             logger.warning("json_repair not installed! Falling back to raw string.")
@@ -79,7 +78,7 @@ class LLMService:
         system_msg = """You are a specialized data extraction agent. Output valid JSON (RFC 8259) matching this schema:
 {
   "summary": "Concise summary of note",
-  "domain": "Academic|Personal|Professional",
+  "domain": "Academic|Personal|Professional|Creative",
   "entities": [{"name": "string", "type": "Person|Place|Organization|Tool"}],
   "concepts": ["string"],
   "tasks": [{"description": "string", "status": "string|null", "due_date": "string|null"}],
@@ -92,7 +91,7 @@ RULES:
 2. ALL keys must be double-quoted.
 3. NO "OR" options.
 4. Return ONLY valid JSON found in the schema.
-5. ENGLISH ONLY: Do not use Chinese or other non-English characters. translate if needed."""
+5. ENGLISH ONLY: Do not use non-English characters."""
 
         try:
             model = (
@@ -223,6 +222,15 @@ RULES:
         - Reference technical resources and best practices
         - Maintain professional, concise language
             """
+        elif query_domain == "Creative":
+            domain_instructions = """
+        # MODE: Creative Expression Companion
+        - Focus on themes, metaphors, and emotional resonance in creative works
+        - Connect recurring symbols and imagery across poems/lyrics
+        - Identify emotional arcs and stylistic patterns
+        - Reference specific lines or verses when relevant
+        - Use poetic, interpretive language
+            """
         else:  # Personal
             domain_instructions = """
         # MODE: Personal Journal Companion
@@ -240,14 +248,25 @@ RULES:
         {domain_instructions}
         
         # CRITICAL CONSTRAINTS (VIOLATION = FAILURE)
-        1. **NO ADVICE**: NEVER tell the user what they "should" or "must" do.
-           - Bad: "You should get a detailed schedule."
-           - Good: "You expressed concern about time management regarding your Masters."
-        2. **ONLY INSIGHTS**: Connect dots between notes (e.g., "Your desire for X conflicts with your fear of Y").
-        3. **STRICT GROUNDING**: Use ONLY the provided CONTEXT. If the answer is not in the notes, say "I do not have enough information in your notes to answer that."
-        4. **PERSONA**: Address user as "You".
-        5. **CITATIONS**: When referencing a fact, mention the note context implicitly or explicitly if relevant.
-        6. **LANGUAGE**: Output MUST be in English. Do not use Chinese characters.
+        1. **NO ADVICE OR SUGGESTIONS**: NEVER tell the user what they "should", "must", "need to", or "have to" do.
+           - FORBIDDEN: "You should focus on X", "You need to address Y", "will be crucial to Z"
+           - ALLOWED: "You expressed concern about X", "You mentioned wanting to improve Y"
+        
+        2. **NO FOLLOW-UP QUESTIONS**: Do not ask if you should "delve deeper", "explore further", or help with anything else.
+           - FORBIDDEN: "Do you want me to...", "Should I dive deeper into...", "Would you like help with..."
+           - Simply answer the question and stop.
+        
+        3. **ONLY INSIGHTS**: Connect dots between notes (e.g., "Your desire for X conflicts with your fear of Y").
+        
+        4. **STRICT GROUNDING**: Use ONLY the provided CONTEXT. If the answer is not in the notes, say "I do not have enough information in your notes to answer that."
+        
+        5. **PERSONA**: Address user as "You".
+        
+        6. **CITATIONS**: Reference note titles when stating facts.
+        
+        7. **SUMMARY FORMAT**: If you include a summary/takeaway, make it a factual observation, NOT advice:
+           - FORBIDDEN: "You need to address your emotional challenges to succeed."
+           - ALLOWED: "Your notes reveal a pattern of ambition paired with uncertainty about direction."
         
         # CONTEXT
         {context}
@@ -285,7 +304,7 @@ RULES:
 
     def _detect_query_domain(self, query: str) -> str:
         """
-        Heuristic to detect if query is Academic, Personal, or Professional.
+        Heuristic to detect if query is Academic, Personal, Professional, or Creative.
         Uses same logic as retrieval service for consistency.
         """
         query_lower = query.lower()
@@ -353,12 +372,31 @@ RULES:
             "business",
         ]
 
+        # Creative keywords
+        creative_keywords = [
+            "poem",
+            "poetry",
+            "verse",
+            "lyric",
+            "lyrics",
+            "song",
+            "metaphor",
+            "stanza",
+            "rhyme",
+            "creative",
+            "fiction",
+            "story",
+            "prose",
+            "writing",
+        ]
+
         academic_score = sum(1 for kw in academic_keywords if kw in query_lower)
         personal_score = sum(1 for kw in personal_keywords if kw in query_lower)
         professional_score = sum(1 for kw in professional_keywords if kw in query_lower)
+        creative_score = sum(1 for kw in creative_keywords if kw in query_lower)
 
         # Return domain with highest score, default to Personal
-        max_score = max(academic_score, personal_score, professional_score)
+        max_score = max(academic_score, personal_score, professional_score, creative_score)
         if max_score == 0:
             return "Personal"  # Default
 
@@ -366,6 +404,8 @@ RULES:
             return "Academic"
         elif professional_score == max_score:
             return "Professional"
+        elif creative_score == max_score:
+            return "Creative"
         else:
             return "Personal"
 

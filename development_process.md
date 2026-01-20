@@ -279,6 +279,22 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 
 ---
 
+## 📅 Phase 17: The "Creative Expansion" (Multi-Domain System)
+**Goal**: Expand the system to support creative writing, poetry, and artistic expression as a first-class citizen.
+
+*   **New Domain Integration**:
+    *   **Creative Domain**: Added specific handling for "Creative" notes (poems, stories, lyrics).
+    *   **Keyword Detection**: Heuristics updated to detect "poem", "metaphor", "story", "lyrics".
+    *   **Advice-Free Synthesis**: Synthesis prompt explicitly forbids giving advice or critique for creative queries, focusing instead on thematic reflection and imagery.
+*   **Full-Stack Implementation**:
+    *   **Backend**: Updated Schema, Retrieval, LLM prompts, and Vector Search (lowered threshold to 0.5 to capture poetic semantics).
+    *   **Frontend**: Added pink (#ec4899) color coding for Creative nodes in the Graph view.
+    *   **Documentation**: Detailed newly added extensibility in README and PKM_UPGRADE docs.
+*   **Refinement**:
+    *   **Vector Search Tuning**: Validation scripts revealed a need to lower `min_score` from 0.7 to 0.5 to better catch semantic matches in non-literal creative text.
+
+---
+
 ## 🏗️ Architectural Principles
 
 1.  **Local-First**: All data and processing stays on the user's machine.
@@ -288,4 +304,4 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 5.  **Entity-Level Consistency**: Locking mechanisms prevent race conditions during concurrent updates.
 6.  **Performance Caps**: Soft limits (50 snippets) ensure predictable response times.
 7.  **Transparency**: Real-time system info displays all active services and models.
-8.  **Dual-Purpose Design**: Single system serves both personal journaling and academic/professional knowledge management with domain-aware intelligence.
+8.  **Multi-Domain Design**: Single system serves personal, academic, professional, and creative needs with domain-aware intelligence.

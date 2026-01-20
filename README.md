@@ -7,11 +7,11 @@ LiveOS Brain is a multimodal, graph-based personal memory system. It ingests not
 
 ## System Architecture
 
-The system operates on a **Polyglot Persistence** model ("Mind & Body") with **dual-purpose knowledge management**: Personal Journal + Academic/Professional PKM.
+The system operates on a **Polyglot Persistence** model ("Mind & Body") with **adaptive knowledge management** across multiple domains: Personal Journal, Academic/Professional PKM, and Creative Writing.
 
-**Why Dual-Purpose?** A single system that handles both personal reflections ("I'm anxious about my thesis") and academic learning ("Markov Chains have the memoryless property") with domain-aware intelligence. The system automatically detects the note's purpose and adapts retrieval and synthesis accordingly.
+**Why Multi-Purpose?** A single system that handles personal reflections ("I'm anxious about my thesis"), academic learning ("Markov Chains have the memoryless property"), and creative expression ("The moon is a ghost") with domain-aware intelligence. The system automatically detects the note's purpose and adapts retrieval and synthesis accordingly.
 
-### Dual-Mode Operation
+### Multi-Mode Operation
 
 **Personal Journal Mode:**
 - Daily activities, feelings, goals, relationships
@@ -23,6 +23,11 @@ The system operates on a **Polyglot Persistence** model ("Mind & Body") with **d
 - Citation tracking and reference management
 - Knowledge graph with prerequisites and contradictions
 - Domain-aware retrieval and synthesis
+
+**Creative Mode:**
+- Poems, stories, lyrics, and metaphors
+- Focus on themes, imagery, and emotional resonance
+- Non-judgmental, advice-free synthesis that respects artistic voice
 
 ```mermaid
 graph TD
@@ -220,14 +225,15 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
     *   **Academic**: Pedagogical, conceptual explanations with prerequisites and citations
     *   **Personal**: Empathetic insights connecting experiences and feelings
     *   **Professional**: Concise, action-oriented responses referencing work context
+    *   **Creative**: Themes and imagery focus, no advice or judgment
     *   **Strict Grounding**: No advice, only insights from user's notes
 
 ---
 
 ## 3. Technology Stack
 
-*   **Backend**: Python 3.11 (FastAPI, LangGraph, dateparser, instructor, tenacity)
-*   **Frontend**: Next.js 14 (React, Tailwind, Framer Motion, ReactMarkdown)
+*   **Backend**: Python 3.11 (FastAPI, LangGraph, AsyncPG, Instructor, Tenacity)
+*   **Frontend**: Next.js 16 (React 19, Tailwind v4, Framer Motion, React Force Graph)
 *   **Aesthetics**: High-fidelity cursor effects with subtle glows, glassmorphism, and micro-animations.
 *   **Infrastructure** (Docker):
     *   **Postgres**: Authoritative content (Port 5433)
@@ -245,7 +251,7 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 ## 4. Key Features
 
-*   **Dual-Purpose PKM**: Single system for personal journaling + academic/professional knowledge management
+*   **Multi-Domain PKM**: Unified system for personal journaling, academic learning, professional work, and creative expression
 *   **Domain-Aware Intelligence**: Automatic categorization with adaptive retrieval and synthesis
 *   **Academic Knowledge Graph**: Citation tracking, prerequisite chains, contradiction detection
 *   **Multimodal Ingestion**: Text, Audio, Images, PDFs
@@ -301,12 +307,12 @@ python batch_ingest.py --auto-date            # Extract dates from filenames
 
 ## 📚 PKM (Personal Knowledge Management) Capabilities
 
-LiveOS now supports **dual-purpose knowledge management** for both personal journaling and academic/professional learning. For full details, see [PKM_UPGRADE.md](./PKM_UPGRADE.md).
+LiveOS now supports **multi-domain knowledge management** for personal journaling, academic/professional learning, and creative work. For full details, see [PKM_UPGRADE.md](./PKM_UPGRADE.md).
 
 ### Key Features
 
 **Domain Categorization:**
-- Notes are automatically classified as Personal, Academic, or Professional
+- Notes are automatically classified as Personal, Academic, Professional, or Creative
 - Retrieval and chat synthesis adapt based on query domain
 - Domain-specific boosting (1.5x) for relevant notes
 
@@ -328,6 +334,7 @@ LiveOS now supports **dual-purpose knowledge management** for both personal jour
 - Academic queries get pedagogical, concept-focused responses
 - Personal queries get empathetic, insight-focused responses
 - Professional queries get concise, action-focused responses
+- Creative queries get thematic, imagery-rich reflections
 
 ### Example Use Cases
 
@@ -372,6 +379,45 @@ Output:
 - **Existing data:** All old notes default to "Personal" domain - no migration needed
 - **New features:** Automatically available for new notes without breaking changes
 - **Graph visualization:** Domain colors and Reference nodes appear immediately after backend restart
+
+---
+
+## 🎨 Customization
+
+### Adding Custom Domains
+
+LiveOS supports custom domain categories beyond the built-in Personal/Academic/Professional/Creative. To add a new domain:
+
+**1. Backend Schema** ([app/schemas/extraction.py](backend/app/schemas/extraction.py#L71)):
+```python
+domain: str = "Personal"  # Add your domain to this comment
+```
+
+**2. Ingestion Prompt** ([app/workflows/agents/ingestion_agent.py](backend/app/workflows/agents/ingestion_agent.py#L151)):
+```python
+- "YourDomain": Description and examples
+```
+
+**3. LLM System Message** ([app/services/llm.py](backend/app/services/llm.py#L77)):
+```python
+"domain": "Academic|Personal|Professional|YourDomain"
+```
+
+**4. Retrieval Keywords** ([app/services/retrieval.py](backend/app/services/retrieval.py#L317)):
+```python
+yourdomain_keywords = ["keyword1", "keyword2", ...]
+```
+
+**5. Synthesis Mode** ([app/services/llm.py](backend/app/services/llm.py#L210)):
+```python
+elif query_domain == "YourDomain":
+    domain_instructions = """..."""
+```
+
+**6. Frontend Graph Color** ([frontend/src/app/graph/page.tsx](frontend/src/app/graph/page.tsx#L157)):
+```tsx
+if (node.domain === "YourDomain") return "#hexcolor";
+```
 
 ---
 

@@ -56,7 +56,7 @@ class PersonaTrait(BaseModel):
 
 class ExternalReference(BaseModel):
     title: str = ""
-    type: str = "Quote"  # "Song", "Quote", "Book", "Paper", "Video"
+    type: str = "Quote"  # "Song", "Quote", "Book", "Paper", "Video", "Poem"
     content: str = ""
     source: Optional[str] = None  # Author/Artist
 
@@ -68,7 +68,7 @@ class ExternalReference(BaseModel):
 
 class Extraction(BaseModel):
     summary: str = ""
-    domain: str = "Personal"  # "Personal", "Academic", "Professional"
+    domain: str = "Personal"  # "Personal", "Academic", "Professional", "Creative"
     entities: List[Entity] = Field(default_factory=list)
     concepts: List[Concept] = Field(default_factory=list)
     tasks: List[Task] = Field(default_factory=list)

@@ -60,7 +60,7 @@ class GraphService:
         )
 
     def query_vector_with_domain(
-        self, vector: list[float], top_k: int = 5, min_score: float = 0.7
+        self, vector: list[float], top_k: int = 5, min_score: float = 0.5
     ) -> list[dict]:
         """
         Performs a vector search on the Note index, including domain field.

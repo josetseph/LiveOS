@@ -1,38 +1,40 @@
 # Full PKM Upgrade - Implementation Summary
 
 ## Overview
-LiveOS has been upgraded from a pure personal journal to a **dual-purpose knowledge management system** that handles both:
+LiveOS has been upgraded from a pure personal journal to a **multi-domain knowledge management system** that handles:
 - **Personal Journal**: Daily activities, feelings, tasks, goals, relationships
 - **Academic/Professional PKM**: Learning notes, papers, concepts, theorems, citations
+- **Creative Writing**: Poems, stories, lyrics, metaphors, imagery
 
 ## What Changed
 
 ### 1. Schema Updates ([extraction.py](backend/app/schemas/extraction.py))
 
 **Added to `Extraction` model:**
-- `domain: str = "Personal"` - Categorizes notes as Personal/Academic/Professional
-- `references: List[ExternalReference]` - Tracks citations, quotes, papers, books
+- `domain: str = "Personal"` - Categorizes notes as Personal/Academic/Professional/Creative
+- `references: List[ExternalReference]` - Tracks citations, quotes, papers, books, poems
 
 **ExternalReference model** (already existed, now actively used):
 ```python
 class ExternalReference(BaseModel):
     title: str           # "Deep Learning" or "What I Learned About Anxiety"
-    type: str            # "Paper", "Book", "Quote", "Video", "Song"
+    type: str            # "Paper", "Book", "Quote", "Video", "Song", "Poem"
     content: str         # Actual quote or key excerpt
     source: Optional[str] # Author/Artist name
 ```
 
-### 2. Dual-Mode Extraction ([ingestion_agent.py](backend/app/workflows/agents/ingestion_agent.py))
+### 2. Multi-Mode Extraction ([ingestion_agent.py](backend/app/workflows/agents/ingestion_agent.py))
 
 **Enhanced extraction prompt** with:
-- Domain categorization instructions (Personal/Academic/Professional)
-- Reference extraction for academic content (papers, books, theorems)
+- Domain categorization instructions (Personal/Academic/Professional/Creative)
+- Reference extraction for academic content and creative attributions
 - Context-aware extraction rules per domain
 
 **Example outputs:**
 - **Personal Note**: `domain: "Personal"`, extracts tasks + persona traits
 - **Academic Note**: `domain: "Academic"`, extracts concepts + references
 - **Work Note**: `domain: "Professional"`, extracts projects + documentation
+- **Creative Note**: `domain: "Creative"`, extracts themes + imagery references
 
 ### 3. Academic Graph Relationships ([ingestion.py](backend/app/workflows/ingestion.py))
 
@@ -60,11 +62,13 @@ class ExternalReference(BaseModel):
 **Query domain detection** using keyword heuristics:
 - Academic: "learn", "study", "theorem", "paper", "concept"
 - Personal: "feel", "emotion", "friend", "daily", "goal"
-- Professional: "work", "project", "meeting", "career"
+- Creative: "poem", "story", "metaphor", "write", "lyrics"
 
 **Domain boosting** in hybrid search:
 - Notes matching query domain get 1.5x score boost
 - Academic query → Academic notes prioritized
+- Personal query → Personal notes prioritized
+- Creative query → Creative notes prioritized
 - Personal query → Personal notes prioritized
 
 **Example:**
@@ -92,6 +96,11 @@ Query: "What did I learn about stochastic processes?"
 - Empathetic language
 
 **Professional Mode:**
+
+**Creative Mode:**
+- Focus on thematic exploration and imagery
+- Connect metaphors, lyrical elements, stories
+- Non-directive, reflective language (no advice)
 - Focus on project context and technical docs
 - Connect tasks, meetings, decisions
 - Professional, concise language
