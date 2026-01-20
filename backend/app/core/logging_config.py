@@ -16,7 +16,6 @@ import logging
 import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
 
 # Create logs directory
 LOGS_DIR = Path(__file__).parent.parent.parent / "logs"

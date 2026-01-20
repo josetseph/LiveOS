@@ -1,7 +1,5 @@
-import os
 from botocore.client import Config
 from aioboto3 import session as aioboto3_session
-import logging
 from app.core.config import settings
 from app.core.logging_config import get_component_logger
 

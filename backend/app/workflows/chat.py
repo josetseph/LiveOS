@@ -1,5 +1,3 @@
-from app.services.embedding import embedding_service
-from app.services.graph import graph_service
 from app.services.retrieval import retrieval_service
 from app.services.llm import llm_service
 from app.core.logging_config import get_component_logger

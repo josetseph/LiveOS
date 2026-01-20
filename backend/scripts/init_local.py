@@ -1,6 +1,5 @@
 import sys
 import os
-import time
 import asyncio
 import boto3
 from botocore.exceptions import ClientError
@@ -14,7 +13,6 @@ from app.core.config import settings
 from app.core.database import engine
 from app.services.graph import graph_service
 from alembic.config import Config
-from alembic import command
 
 
 # 1. Wait for Postgres

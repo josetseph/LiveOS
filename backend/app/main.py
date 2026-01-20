@@ -1,10 +1,8 @@
 import os
-import shutil
 import uuid
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 # Setup logging before any other imports
 from app.core.logging_config import setup_logging
@@ -16,9 +14,6 @@ app = FastAPI(title="LiveOS Brain API", version="0.1.0")
 # Ensure upload directory exists
 UPLOAD_DIR = os.path.join(os.getcwd(), "data", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-# Static file serving for uploads
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 # CORS setup used to allow connections from Next.js frontend
 app.add_middleware(
@@ -240,8 +235,8 @@ async def get_graph_visualization():
 from app.core.database import get_db
 from app.models.note import Note
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete
-from fastapi import Depends, HTTPException
+from sqlalchemy import select, delete
+from fastapi import Depends
 
 
 class NoteResponse(BaseModel):

@@ -1,7 +1,6 @@
 from typing import TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
 from app.services.llm import llm_service
-from app.services.graph import graph_service
 from app.services.embedding import embedding_service
 from app.services.multimedia import multimedia_service
 from app.schemas.extraction import Extraction, NoteInput

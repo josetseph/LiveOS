@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
-import { Send, User, Loader2, Sparkles, Database, Network, Cpu, Brain, X, FileText, ExternalLink, Trash2 } from "lucide-react";
+import { Send, User, Loader2, Sparkles, Database, Network, Cpu, X, FileText, ExternalLink, Trash2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";

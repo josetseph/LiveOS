@@ -1,6 +1,5 @@
 import urllib.request
 import json
-import time
 
 API_URL = "http://localhost:8000/api/v1"
 
@@ -26,7 +25,6 @@ if __name__ == "__main__":
 
     from app.services.graph import graph_service
     from app.core.database import AsyncSessionLocal
-    from app.models.note import Note
     from app.utils.bucket_storage import s3_client
     from sqlalchemy import text
     import asyncio

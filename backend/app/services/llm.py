@@ -1,8 +1,6 @@
 import os
 import re
 import torch
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
-from google import genai
 from app.core.config import settings
 from app.core.logging_config import get_component_logger
 import instructor
