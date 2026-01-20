@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect } from "react";
 import { Send, User, Loader2, Sparkles, Database, Network, Cpu, X, FileText, ExternalLink, Trash2 } from "lucide-react";
+import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -165,7 +166,7 @@ export default function ChatPage() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-pink-500">
-                <img src="/logo-black-background.png" alt="LiveOS" className="h-24 w-24 object-contain" />
+                <Image src="/logo-black-background.png" alt="LiveOS" width={96} height={96} className="h-24 w-24 object-contain" />
               </div>
               <div>
                 <h1 className="text-xl font-bold text-white">LiveOS</h1>
@@ -553,6 +554,7 @@ export default function ChatPage() {
               </div>
               <div className="overflow-y-auto p-6" style={{ maxHeight: "calc(90vh - 80px)" }}>
                 {filePreview.type === "image" && (
+                  /* eslint-disable-next-line @next/next/no-img-element */
                   <img
                     src={filePreview.url}
                     alt={filePreview.filename}

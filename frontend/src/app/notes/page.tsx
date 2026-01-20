@@ -717,6 +717,7 @@ export default function NotesPage() {
               </div>
               <div className="overflow-y-auto p-6" style={{ maxHeight: "calc(90vh - 80px)" }}>
                 {filePreview.type === "image" && (
+                  /* eslint-disable-next-line @next/next/no-img-element */
                   <img src={filePreview.url} alt={filePreview.filename} className="mx-auto max-w-full rounded-lg" />
                 )}
                 {filePreview.type === "pdf" && (

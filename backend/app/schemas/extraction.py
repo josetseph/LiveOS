@@ -68,7 +68,9 @@ class ExternalReference(BaseModel):
 
 class Extraction(BaseModel):
     summary: str = ""
-    domain: str = "Personal"  # "Personal", "Academic", "Professional", "Creative"
+    domain: str = (
+        "Personal"  # "Personal", "Academic", "Professional", "Creative", "Dreams"
+    )
     entities: List[Entity] = Field(default_factory=list)
     concepts: List[Concept] = Field(default_factory=list)
     tasks: List[Task] = Field(default_factory=list)

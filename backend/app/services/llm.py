@@ -76,7 +76,7 @@ class LLMService:
         system_msg = """You are a specialized data extraction agent. Output valid JSON (RFC 8259) matching this schema:
 {
   "summary": "Concise summary of note",
-  "domain": "Academic|Personal|Professional|Creative",
+  "domain": "Academic|Personal|Professional|Creative|Dreams",
   "entities": [{"name": "string", "type": "Person|Place|Organization|Tool"}],
   "concepts": ["string"],
   "tasks": [{"description": "string", "status": "string|null", "due_date": "string|null"}],
@@ -228,6 +228,16 @@ RULES:
         - Identify emotional arcs and stylistic patterns
         - Reference specific lines or verses when relevant
         - Use poetic, interpretive language
+            """
+        elif query_domain == "Dreams":
+            domain_instructions = """
+        # MODE: Dream Analysis Companion
+        - Focus on symbolic interpretation and pattern recognition across dreams
+        - Connect recurring symbols, people, places, and themes
+        - Identify emotional undertones and subconscious patterns
+        - Reference specific dream imagery and narrative elements
+        - Use exploratory, non-literal language for symbolic meaning
+        - NO interpretation as prophecy or literal events
             """
         else:  # Personal
             domain_instructions = """
@@ -394,7 +404,9 @@ RULES:
         creative_score = sum(1 for kw in creative_keywords if kw in query_lower)
 
         # Return domain with highest score, default to Personal
-        max_score = max(academic_score, personal_score, professional_score, creative_score)
+        max_score = max(
+            academic_score, personal_score, professional_score, creative_score
+        )
         if max_score == 0:
             return "Personal"  # Default
 

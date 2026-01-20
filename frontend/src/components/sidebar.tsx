@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { Home, MessageSquare, FileText, Network } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -20,7 +21,7 @@ export function Sidebar() {
       <div className="flex h-full flex-col items-center py-8">
         {/* Logo */}
         <div className="mb-8 flex h-12 w-12 items-center justify-center rounded-xl overflow-hidden">
-          <img src="/logo-black-background.png" alt="LiveOS" className="h-full w-full object-cover" />
+          <Image src="/logo-black-background.png" alt="LiveOS" width={48} height={48} className="h-full w-full object-cover" />
         </div>
 
         {/* Navigation */}

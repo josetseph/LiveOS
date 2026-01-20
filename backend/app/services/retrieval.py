@@ -406,13 +406,34 @@ class RetrievalService:
             "writing",
         ]
 
+        # Dreams keywords
+        dreams_keywords = [
+            "dream",
+            "dreamt",
+            "dreamed",
+            "nightmare",
+            "subconscious",
+            "recurring",
+            "symbol",
+            "sleep",
+            "woke",
+            "vision",
+        ]
+
         academic_score = sum(1 for kw in academic_keywords if kw in query_lower)
         personal_score = sum(1 for kw in personal_keywords if kw in query_lower)
         professional_score = sum(1 for kw in professional_keywords if kw in query_lower)
         creative_score = sum(1 for kw in creative_keywords if kw in query_lower)
+        dreams_score = sum(1 for kw in dreams_keywords if kw in query_lower)
 
         # Return domain with highest score, default to Personal
-        max_score = max(academic_score, personal_score, professional_score, creative_score)
+        max_score = max(
+            academic_score,
+            personal_score,
+            professional_score,
+            creative_score,
+            dreams_score,
+        )
         if max_score == 0:
             return "Personal"  # Default
 
@@ -422,6 +443,8 @@ class RetrievalService:
             return "Professional"
         elif creative_score == max_score:
             return "Creative"
+        elif dreams_score == max_score:
+            return "Dreams"
         else:
             return "Personal"
 

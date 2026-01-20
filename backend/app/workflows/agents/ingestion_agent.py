@@ -169,6 +169,13 @@ async def extraction_node(state: IngestionState):
         - title: [Original Title or Generated Essence]
         - content: [Full Text]
         - source: "User"
+
+    - "Dreams": Dream journals, nightmares, subconscious imagery, or recurring dream patterns.
+      * RULE: Extract symbolic Entities (people, places, objects) that appeared in the dream
+      * RULE: Extract Concepts for recurring themes or symbols (e.g., "flying", "water", "chase")
+      * RULE: Do NOT extract Tasks from dream narratives (dreams are not actionable)
+      * RULE: Extract Persona traits reflecting emotional states during/after the dream
+      * FOCUS: Capture symbolic imagery, emotional tone, and recurring patterns
     
     IMPORTANT: A note written in first person ("I learned about X") that explains academic concepts should be classified as Academic, not Personal. Similarly, "We decided in the meeting to use X" should be Professional, not Personal. Look at WHAT the note is about, not HOW it's written.
     

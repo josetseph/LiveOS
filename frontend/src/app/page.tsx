@@ -2,6 +2,7 @@
 
 import { motion } from "framer-motion";
 import Link from "next/link";
+import Image from "next/image";
 import { MessageSquare, FileText, Network, Brain, Database, Cpu } from "lucide-react";
 import { ShaderBackground } from "@/components/shader-background";
 
@@ -26,7 +27,7 @@ export default function Home() {
             transition={{ duration: 0.5 }}
             className="mb-8 inline-flex h-24 w-24 items-center justify-center rounded-2xl bg-gradient-to-br from-purple-500 to-pink-500 shadow-2xl shadow-purple-500/50 overflow-hidden"
           >
-            <img src="/logo.png" alt="LiveOS" className="h-24 w-24 object-contain" />
+            <Image src="/logo.png" alt="LiveOS" width={96} height={96} className="h-24 w-24 object-contain" />
           </motion.div>
 
           {/* Title */}
