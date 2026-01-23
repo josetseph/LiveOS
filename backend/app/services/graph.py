@@ -121,7 +121,7 @@ class GraphService:
         """
         Search across all distilled knowledge nodes (Concept, Entity, Task, Persona, Reference)
         using the unified :Indexable vector index.
-        
+
         Returns structured data with name, summary/description, node types, and relevance score.
         """
         query = """
@@ -143,15 +143,17 @@ class GraphService:
             query, {"vector": vector, "top_k": top_k, "min_score": min_score}
         )
 
-    def get_node_source_notes(self, node_names: list[str], node_labels: list[str]) -> list[dict]:
+    def get_node_source_notes(
+        self, node_names: list[str], node_labels: list[str]
+    ) -> list[dict]:
         """
         Trace back from knowledge nodes (Concept, Entity, Task, Persona) to the Notes that created them.
         Returns note IDs with metadata for the grounding phase.
-        
+
         Args:
             node_names: List of node names to find source notes for
             node_labels: Corresponding node labels (e.g., ['Concept', 'Entity'])
-        
+
         Returns:
             List of dicts with node_name, note_id, note_title, relationship_type
         """
@@ -170,7 +172,9 @@ class GraphService:
                value.rel_type as relationship_type
         """
         try:
-            return self.execute_query(query, {"node_names": node_names, "node_labels": node_labels})
+            return self.execute_query(
+                query, {"node_names": node_names, "node_labels": node_labels}
+            )
         except Exception as e:
             # Fallback if APOC is not available - use simpler query
             logger.warning(f"APOC query failed, using fallback: {e}")
@@ -185,7 +189,9 @@ class GraphService:
             """
             # Get unique labels from node_labels
             all_labels = list(set(node_labels))
-            return self.execute_query(fallback_query, {"node_names": node_names, "all_labels": all_labels})
+            return self.execute_query(
+                fallback_query, {"node_names": node_names, "all_labels": all_labels}
+            )
 
     def get_full_graph(self) -> dict:
         """
@@ -208,7 +214,7 @@ class GraphService:
             n.title as title,
             n.created_at as created_at
         """
-        
+
         # Get all relationships
         links_query = """
         MATCH (source)-[r]->(target)
@@ -221,42 +227,55 @@ class GraphService:
             r.status as status,
             r.created_at as created_at
         """
-        
+
         nodes_data = self.execute_query(nodes_query)
         links_data = self.execute_query(links_query)
-        
+
         # Transform nodes
         nodes = []
         for node in nodes_data:
-            node_type = [label for label in node['labels'] if label in ['Concept', 'Entity', 'Task', 'Persona', 'Reference', 'Note']][0] if node['labels'] else 'Unknown'
-            
+            node_type = (
+                [
+                    label
+                    for label in node["labels"]
+                    if label
+                    in ["Concept", "Entity", "Task", "Persona", "Reference", "Note"]
+                ][0]
+                if node["labels"]
+                else "Unknown"
+            )
+
             # Determine node display name
-            display_name = node.get('name') or node.get('title') or f"Node {node['id']}"
-            
-            nodes.append({
-                'id': node['id'],
-                'name': display_name,
-                'group': node_type,
-                'summary': node.get('summary'),
-                'description': node.get('description'),
-                'trait': node.get('trait'),
-                'status': node.get('status'),
-                'entity_type': node.get('entity_type'),
-                'created_at': node.get('created_at'),
-            })
-        
+            display_name = node.get("name") or node.get("title") or f"Node {node['id']}"
+
+            nodes.append(
+                {
+                    "id": node["id"],
+                    "name": display_name,
+                    "group": node_type,
+                    "summary": node.get("summary"),
+                    "description": node.get("description"),
+                    "trait": node.get("trait"),
+                    "status": node.get("status"),
+                    "entity_type": node.get("entity_type"),
+                    "created_at": node.get("created_at"),
+                }
+            )
+
         # Transform links (filter out inactive relationships)
         links = []
         for link in links_data:
-            if link.get('status') != 'inactive':  # Skip inactive relationships
-                links.append({
-                    'source': link['source'],
-                    'target': link['target'],
-                    'type': link['type'],
-                    'created_at': link.get('created_at'),
-                })
-        
-        return {'nodes': nodes, 'links': links}
+            if link.get("status") != "inactive":  # Skip inactive relationships
+                links.append(
+                    {
+                        "source": link["source"],
+                        "target": link["target"],
+                        "type": link["type"],
+                        "created_at": link.get("created_at"),
+                    }
+                )
+
+        return {"nodes": nodes, "links": links}
 
 
 graph_service = GraphService()

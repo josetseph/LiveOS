@@ -194,11 +194,12 @@ class IngestionWorkflow:
         if extraction.entities:
             # Generate embeddings for entities
             from app.services.embedding import embedding_service
+
             entity_embeddings = {}
             for e in extraction.entities:
                 text_to_embed = f"{e.name} ({e.type})"
                 entity_embeddings[e.name] = embedding_service.embed_query(text_to_embed)
-            
+
             query_entities = """
             MERGE (n:Note {id: $note_id})
             WITH n
@@ -214,10 +215,10 @@ class IngestionWorkflow:
             # Prepare dict list
             entity_data = [
                 {
-                    "name": e.name, 
-                    "type": e.type, 
+                    "name": e.name,
+                    "type": e.type,
                     "importance": e.importance,
-                    "embedding": entity_embeddings[e.name]
+                    "embedding": entity_embeddings[e.name],
                 }
                 for e in extraction.entities
             ]
@@ -230,11 +231,14 @@ class IngestionWorkflow:
         if extraction.concepts:
             # Generate embeddings for concepts
             from app.services.embedding import embedding_service
+
             concept_embeddings = {}
             for c in extraction.concepts:
                 text_to_embed = f"{c.name}: {c.definition or ''}"
-                concept_embeddings[c.name.title()] = embedding_service.embed_query(text_to_embed)
-            
+                concept_embeddings[c.name.title()] = embedding_service.embed_query(
+                    text_to_embed
+                )
+
             query_concepts = """
             MERGE (n:Note {id: $note_id})
             WITH n
@@ -249,9 +253,9 @@ class IngestionWorkflow:
             """
             concept_data = [
                 {
-                    "name": c.name.title(), 
+                    "name": c.name.title(),
                     "definition": c.definition,
-                    "embedding": concept_embeddings[c.name.title()]
+                    "embedding": concept_embeddings[c.name.title()],
                 }
                 for c in extraction.concepts
             ]
@@ -328,11 +332,12 @@ class IngestionWorkflow:
         if extraction.tasks:
             # Generate embeddings for tasks
             from app.services.embedding import embedding_service
+
             task_embeddings = []
             for t in extraction.tasks:
                 text_to_embed = f"Task: {t.description} (Status: {t.status})"
                 task_embeddings.append(embedding_service.embed_query(text_to_embed))
-            
+
             query_tasks = """
             MERGE (n:Note {id: $note_id})
             WITH n
@@ -356,7 +361,7 @@ class IngestionWorkflow:
                     ),
                     "status": t.status,
                     "due_date": t.due_date,
-                    "embedding": task_embeddings[i]
+                    "embedding": task_embeddings[i],
                 }
                 for i, t in enumerate(extraction.tasks)
             ]
@@ -369,11 +374,16 @@ class IngestionWorkflow:
         if extraction.persona_traits:
             # Generate embeddings for persona traits
             from app.services.embedding import embedding_service
+
             persona_embeddings = {}
             for t in extraction.persona_traits:
-                text_to_embed = f"Personality trait: {t.trait}. Evidence: {t.evidence_quote or ''}"
-                persona_embeddings[t.trait] = embedding_service.embed_query(text_to_embed)
-            
+                text_to_embed = (
+                    f"Personality trait: {t.trait}. Evidence: {t.evidence_quote or ''}"
+                )
+                persona_embeddings[t.trait] = embedding_service.embed_query(
+                    text_to_embed
+                )
+
             query_persona = """
             MERGE (n:Note {id: $note_id})
             WITH n
@@ -390,9 +400,9 @@ class IngestionWorkflow:
             """
             persona_data = [
                 {
-                    "trait": t.trait, 
+                    "trait": t.trait,
                     "quote": t.evidence_quote,
-                    "embedding": persona_embeddings[t.trait]
+                    "embedding": persona_embeddings[t.trait],
                 }
                 for t in extraction.persona_traits
             ]
@@ -405,12 +415,15 @@ class IngestionWorkflow:
         if extraction.references:
             # Generate embeddings for references
             from app.services.embedding import embedding_service
+
             reference_embeddings = {}
             for ref in extraction.references:
                 text_to_embed = f"{ref.title}: {ref.content or ''} (Source: {ref.source or 'Unknown'})"
                 ref_key = f"{ref.title}|{ref.source or 'Unknown'}"
-                reference_embeddings[ref_key] = embedding_service.embed_query(text_to_embed)
-            
+                reference_embeddings[ref_key] = embedding_service.embed_query(
+                    text_to_embed
+                )
+
             query_references = """
             MERGE (n:Note {id: $note_id})
             WITH n
@@ -429,7 +442,9 @@ class IngestionWorkflow:
                     "type": ref.type,
                     "content": ref.content,
                     "source": ref.source or "Unknown",
-                    "embedding": reference_embeddings[f"{ref.title}|{ref.source or 'Unknown'}"]
+                    "embedding": reference_embeddings[
+                        f"{ref.title}|{ref.source or 'Unknown'}"
+                    ],
                 }
                 for ref in extraction.references
             ]
@@ -534,11 +549,12 @@ class IngestionWorkflow:
 
             # 4. Generate embedding for updated summary
             from app.services.embedding import embedding_service
+
             def _generate_embedding():
                 # Use the updated summary + title for embedding
                 text_to_embed = f"{update_data['title']}: {update_data['summary']}"
                 return embedding_service.embed_query(text_to_embed)
-            
+
             new_embedding = await loop.run_in_executor(None, _generate_embedding)
 
             # 5. Save back with updated embedding

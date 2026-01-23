@@ -145,7 +145,9 @@ def init_neo4j():
     try:
         # Drop old index if exists
         try:
-            graph_service.execute_query("DROP INDEX distilled_knowledge_index IF EXISTS")
+            graph_service.execute_query(
+                "DROP INDEX distilled_knowledge_index IF EXISTS"
+            )
         except Exception:
             pass
 

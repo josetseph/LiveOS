@@ -124,12 +124,12 @@ class RetrievalService:
     async def hybrid_search(self, query: str, top_k: int = 50) -> List[str]:
         """
         Graph-First Hybrid Retrieval with 4-Phase Architecture:
-        
+
         Phase 1: Temporal Anchor - Get 5 most recent notes (Short-Term Memory)
         Phase 2: Graph Consensus - Search distilled knowledge nodes (Long-Term Wisdom)
         Phase 3: Grounding - Fetch source notes from graph nodes (Evidence)
         Phase 4: Semantic Fallback - Traditional vector search on notes (Coverage)
-        
+
         Then merge, deduplicate, rerank with domain + recency boosts.
         """
         import time
@@ -160,7 +160,9 @@ class RetrievalService:
 
         all_note_ids = set()
         all_snippets = []
-        note_phase_map = {}  # Track which phase each note came from for priority scoring
+        note_phase_map = (
+            {}
+        )  # Track which phase each note came from for priority scoring
 
         # ============ PHASE 1: TEMPORAL ANCHOR (Short-Term Memory) ============
         logger.info("  [Phase 1] Fetching Temporal Anchors (10 most recent notes)...")
@@ -169,23 +171,31 @@ class RetrievalService:
         all_note_ids.update(temporal_ids)
         for nid in temporal_ids:
             note_phase_map[nid] = "temporal"
-        
+
         t_temporal = time.perf_counter()
-        logger.info(f"  [Phase 1] Temporal Anchor: {len(temporal_ids)} notes in {t_temporal - t_embed:.4f}s")
+        logger.info(
+            f"  [Phase 1] Temporal Anchor: {len(temporal_ids)} notes in {t_temporal - t_embed:.4f}s"
+        )
 
         # ============ PHASE 2: GRAPH CONSENSUS (Long-Term Wisdom) ============
         logger.info("  [Phase 2] Searching Knowledge Graph (Distilled Summaries)...")
-        graph_nodes = graph_service.search_knowledge_graph(full_vector, top_k=25, min_score=0.6)
-        
+        graph_nodes = graph_service.search_knowledge_graph(
+            full_vector, top_k=25, min_score=0.6
+        )
+
         t_graph = time.perf_counter()
-        logger.info(f"  [Phase 2] Graph Search: {len(graph_nodes)} knowledge nodes in {t_graph - t_temporal:.4f}s")
-        
+        logger.info(
+            f"  [Phase 2] Graph Search: {len(graph_nodes)} knowledge nodes in {t_graph - t_temporal:.4f}s"
+        )
+
         # Extract graph snippets (consensus summaries)
         for node in graph_nodes:
             node_labels = node.get("labels", [])
             # Filter out :Indexable label to get actual type
-            node_type = next((label for label in node_labels if label != "Indexable"), "Unknown")
-            
+            node_type = next(
+                (label for label in node_labels if label != "Indexable"), "Unknown"
+            )
+
             # Get the appropriate text based on node type
             if "Concept" in node_labels and node.get("summary"):
                 text = f"[Concept: {node['name']}]: {node['summary']}"
@@ -206,15 +216,18 @@ class RetrievalService:
                 # Fallback for unknown types
                 text = f"[{node_type}: {node.get('name', 'Unknown')}]: {node.get('summary', node.get('description', ''))}"
                 content = node.get("summary", node.get("description", ""))
-            
+
             if content:
-                all_snippets.append({
-                    "text": text,
-                    "content": content,
-                    "type": f"graph_{node_type.lower()}",
-                    "score": node.get("score", 0) * 2.0,  # High priority for consensus knowledge
-                    "domain_boost": 1.0,  # No domain boost for graph nodes (already filtered by relevance)
-                })
+                all_snippets.append(
+                    {
+                        "text": text,
+                        "content": content,
+                        "type": f"graph_{node_type.lower()}",
+                        "score": node.get("score", 0)
+                        * 2.0,  # High priority for consensus knowledge
+                        "domain_boost": 1.0,  # No domain boost for graph nodes (already filtered by relevance)
+                    }
+                )
 
         # ============ PHASE 3: GROUNDING (Fetch Evidence Notes) ============
         logger.info("  [Phase 3] Grounding - Fetching source notes from graph nodes...")
@@ -224,42 +237,64 @@ class RetrievalService:
             for n in graph_nodes:
                 labels = n.get("labels", [])
                 # Get primary label (not Indexable)
-                primary_label = next((label for label in labels if label != "Indexable"), "Concept")
+                primary_label = next(
+                    (label for label in labels if label != "Indexable"), "Concept"
+                )
                 node_labels.append(primary_label)
-            
+
             if node_names:
-                source_notes = graph_service.get_node_source_notes(node_names, node_labels)
-                source_note_ids = [sn["note_id"] for sn in source_notes if sn.get("note_id")]
-                all_note_ids.update(source_note_ids)
-                for nid in source_note_ids:
+                source_notes = graph_service.get_node_source_notes(
+                    node_names, node_labels
+                )
+                source_note_ids = [
+                    sn["note_id"] for sn in source_notes if sn.get("note_id")
+                ]
+                # Get unique note IDs (duplicates = same note referenced by multiple graph nodes)
+                unique_source_ids = list(set(source_note_ids))
+                all_note_ids.update(unique_source_ids)
+                for nid in unique_source_ids:
                     note_phase_map[nid] = "graph_source"
-                
+
                 t_grounding = time.perf_counter()
-                logger.info(f"  [Phase 3] Grounding: {len(source_note_ids)} source notes in {t_grounding - t_graph:.4f}s")
-        
+                logger.info(
+                    f"  [Phase 3] Grounding: {len(unique_source_ids)} unique source notes ({len(source_note_ids)} total references) in {t_grounding - t_graph:.4f}s"
+                )
+
         # ============ PHASE 4: SEMANTIC FALLBACK (Safety Net) ============
         # Only run if Phases 1-3 didn't find enough context
         t_vector = time.perf_counter()
         if len(all_note_ids) < 15:
-            logger.info(f"  [Phase 4] SAFETY NET: Only {len(all_note_ids)} notes so far, running vector search fallback...")
-            vector_results = graph_service.query_vector_with_domain(full_vector, top_k=top_k)
+            logger.info(
+                f"  [Phase 4] SAFETY NET: Only {len(all_note_ids)} notes so far, running vector search fallback..."
+            )
+            vector_results = graph_service.query_vector_with_domain(
+                full_vector, top_k=top_k
+            )
             vector_note_ids = [res["id"] for res in vector_results]
             for nid in vector_note_ids:
-                if nid not in note_phase_map:  # Don't override if already found in earlier phase
+                if (
+                    nid not in note_phase_map
+                ):  # Don't override if already found in earlier phase
                     note_phase_map[nid] = "vector_fallback"
             all_note_ids.update(vector_note_ids)
-            logger.info(f"  [Phase 4] Vector Search: {len(vector_results)} notes in {time.perf_counter() - t_vector:.4f}s")
+            logger.info(
+                f"  [Phase 4] Vector Search: {len(vector_results)} notes in {time.perf_counter() - t_vector:.4f}s"
+            )
         else:
-            logger.info(f"  [Phase 4] SKIPPED: Already have {len(all_note_ids)} notes from graph-first retrieval")
+            logger.info(
+                f"  [Phase 4] SKIPPED: Already have {len(all_note_ids)} notes from graph-first retrieval"
+            )
 
         # ============ POSTGRES FETCH (Get Full Content) ============
-        logger.info(f"  [Retrieval] Fetching content for {len(all_note_ids)} unique notes from Postgres...")
+        logger.info(
+            f"  [Retrieval] Fetching content for {len(all_note_ids)} unique notes from Postgres..."
+        )
         note_ids_list = list(all_note_ids)
-        
+
         db_content_map = {}
         db_title_map = {}
         db_created_at_map = {}
-        
+
         async with AsyncSessionLocal() as session:
             stmt = select(Note.id, Note.content, Note.title, Note.created_at).where(
                 Note.id.in_(note_ids_list)
@@ -271,25 +306,31 @@ class RetrievalService:
             db_created_at_map = {row.id: row.created_at.isoformat() for row in rows}
 
         t_pg = time.perf_counter()
-        logger.info(f"  [Retrieval] Postgres Fetch: {len(db_content_map)} notes in {t_pg - t_vector:.4f}s")
+        logger.info(
+            f"  [Retrieval] Postgres Fetch: {len(db_content_map)} notes in {t_pg - t_vector:.4f}s"
+        )
 
         # ============ GRAPH CONTEXT ENRICHMENT ============
         neighborhoods = graph_service.get_note_context(note_ids_list)
         t_graph_context = time.perf_counter()
-        logger.info(f"  [Retrieval] Graph Context Expansion: {t_graph_context - t_pg:.4f}s")
+        logger.info(
+            f"  [Retrieval] Graph Context Expansion: {t_graph_context - t_pg:.4f}s"
+        )
 
         # ============ BUILD NOTE SNIPPETS ============
         for nid in note_ids_list:
             content = db_content_map.get(nid)
             if not content:
                 continue
-                
+
             title = db_title_map.get(nid, "Untitled Note")
             created_at = db_created_at_map.get(nid, "")
-            
+
             # Recency boost
-            recency_boost = self._calculate_recency_boost(created_at) if created_at else 1.0
-            
+            recency_boost = (
+                self._calculate_recency_boost(created_at) if created_at else 1.0
+            )
+
             # Phase priority boost (graph > temporal > vector fallback)
             phase = note_phase_map.get(nid, "unknown")
             if phase == "graph_source":
@@ -300,66 +341,76 @@ class RetrievalService:
                 phase_boost = 0.9  # Lowest - safety net results
             else:
                 phase_boost = 1.0  # Unknown
-            
-            all_snippets.append({
-                "text": f"[Note: {title}]: {content}",
-                "content": content,
-                "type": "note",
-                "note_id": nid,
-                "title": title,
-                "recency_boost": recency_boost,
-                "phase_boost": phase_boost,
-                "created_at": created_at,
-            })
+
+            all_snippets.append(
+                {
+                    "text": f"[Note: {title}]: {content}",
+                    "content": content,
+                    "type": "note",
+                    "note_id": nid,
+                    "title": title,
+                    "recency_boost": recency_boost,
+                    "phase_boost": phase_boost,
+                    "created_at": created_at,
+                }
+            )
 
         # ============ ADD GRAPH NEIGHBORHOOD CONTEXT ============
         neighborhood_map = {row["note_id"]: row for row in neighborhoods}
         for nid, row in neighborhood_map.items():
             n_title = db_title_map.get(nid, "Untitled Note")
-            
+
             # Concepts
             for concept in row.get("concepts", []):
                 if concept.get("name") and concept.get("summary"):
-                    all_snippets.append({
-                        "text": f"[Theme: {concept['name']}]: {concept['summary']}",
-                        "content": concept["summary"],
-                        "type": "concept",
-                        "note_id": nid,
-                        "title": n_title,
-                    })
-            
+                    all_snippets.append(
+                        {
+                            "text": f"[Theme: {concept['name']}]: {concept['summary']}",
+                            "content": concept["summary"],
+                            "type": "concept",
+                            "note_id": nid,
+                            "title": n_title,
+                        }
+                    )
+
             # Entities
             for entity in row.get("entities", []):
                 if entity.get("name"):
-                    all_snippets.append({
-                        "text": f"[Entity: {entity['name']} ({entity['type']})]",
-                        "content": f"{entity['name']} ({entity['type']})",
-                        "type": "entity",
-                        "note_id": nid,
-                        "title": n_title,
-                    })
-            
+                    all_snippets.append(
+                        {
+                            "text": f"[Entity: {entity['name']} ({entity['type']})]",
+                            "content": f"{entity['name']} ({entity['type']})",
+                            "type": "entity",
+                            "note_id": nid,
+                            "title": n_title,
+                        }
+                    )
+
             # Tasks
             for task in row.get("tasks", []):
                 if task.get("description"):
-                    all_snippets.append({
-                        "text": f"[Task: {task['description']} (Status: {task['status']})]",
-                        "content": task["description"],
-                        "type": "task",
-                        "note_id": nid,
-                        "title": n_title,
-                    })
-            
+                    all_snippets.append(
+                        {
+                            "text": f"[Task: {task['description']} (Status: {task['status']})]",
+                            "content": task["description"],
+                            "type": "task",
+                            "note_id": nid,
+                            "title": n_title,
+                        }
+                    )
+
             # Persona traits
             for persona in row.get("persona_traits", []):
                 if persona.get("trait"):
-                    all_snippets.append({
-                        "text": f"[Persona: {persona['trait']}] Evidence: \"{persona.get('quote', '')}\"",
-                        "content": f"{persona['trait']}: {persona.get('quote', '')}",
-                        "type": "persona_trait",
-                        "note_id": nid,
-                        "title": n_title,
-                    })
+                    all_snippets.append(
+                        {
+                            "text": f"[Persona: {persona['trait']}] Evidence: \"{persona.get('quote', '')}\"",
+                            "content": f"{persona['trait']}: {persona.get('quote', '')}",
+                            "type": "persona_trait",
+                            "note_id": nid,
+                            "title": n_title,
+                        }
+                    )
 
         # ============ RERANKING ============
         if not all_snippets:
@@ -367,7 +418,9 @@ class RetrievalService:
 
         # Soft cap for reranker performance
         if len(all_snippets) > 50:
-            logger.info(f"  [Retrieval] Soft-capping from {len(all_snippets)} to 50 snippets for reranker")
+            logger.info(
+                f"  [Retrieval] Soft-capping from {len(all_snippets)} to 50 snippets for reranker"
+            )
             # Sort by pre-computed scores first to keep highest quality
             all_snippets.sort(key=lambda x: x.get("score", 0), reverse=True)
             all_snippets = all_snippets[:50]
@@ -376,9 +429,10 @@ class RetrievalService:
         logger.info(f"  [Retrieval] Reranking {len(doc_texts)} snippets...")
 
         t_pre_rank = time.perf_counter()
-        
+
         # Off-thread reranking
         import asyncio
+
         loop = asyncio.get_running_loop()
         ranked_pairs = await loop.run_in_executor(None, self.rerank, query, doc_texts)
 
@@ -392,12 +446,12 @@ class RetrievalService:
         for text, rerank_score in ranked_pairs:
             if text in snippet_map:
                 s = snippet_map[text].copy()
-                
+
                 # Get all boost factors
                 recency_boost = s.get("recency_boost", 1.0)
                 phase_boost = s.get("phase_boost", 1.0)
                 pre_score = s.get("score", 0)
-                
+
                 # If snippet already has a score (from Phase 2 graph consensus), use it
                 if pre_score > 0:
                     # Graph consensus snippets get priority
@@ -405,14 +459,14 @@ class RetrievalService:
                 else:
                     # Notes get boost calculation: Recency × Phase Priority
                     s["score"] = rerank_score * recency_boost * phase_boost
-                
+
                 final_docs.append(s)
 
         # Sort by final boosted score
         final_docs.sort(key=lambda x: x.get("score", 0), reverse=True)
 
         logger.info(f"  [Retrieval] Total time: {time.perf_counter() - t_start:.4f}s")
-        
+
         # Return top 10
         return final_docs[:10]
 
@@ -593,7 +647,7 @@ class RetrievalService:
         """
         Retrieve notes based on timestamp (most recent first).
         Used for queries like "what's my latest note?" or "most recent entry".
-        
+
         Singular queries ("most recent note", "last note") return exactly 1 note.
         Plural queries ("recent notes", "latest entries") return top_k notes.
         """
@@ -616,7 +670,9 @@ class RetrievalService:
             "my last note",
         ]
         if any(kw in query_lower for kw in singular_keywords):
-            logger.info("  [Retrieval] Detected SINGULAR temporal query - limiting to 1 note")
+            logger.info(
+                "  [Retrieval] Detected SINGULAR temporal query - limiting to 1 note"
+            )
             top_k = 1
 
         # Get recent notes from Neo4j (has timestamps)

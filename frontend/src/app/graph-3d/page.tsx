@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import { Loader2, X, Info, Network, Maximize2, Minimize2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import SpriteText from "three-spritetext";
+import * as THREE from "three";
 
 // Dynamically import ForceGraph3D as it relies on window/browser APIs
 const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), {
@@ -48,6 +49,8 @@ export default function Graph3DPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const isDragging = useRef(false);
+  const initialCameraPosition = useRef<{ position: { x: number; y: number; z: number }, lookAt: { x: number; y: number; z: number } } | null>(null);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -64,24 +67,76 @@ export default function Graph3DPage() {
     fetchData();
   }, []);
 
+  // Configure camera controls to allow closer zoom
+  useEffect(() => {
+    if (graphRef.current && data.nodes.length > 0) {
+      const controls = graphRef.current.controls();
+      if (controls) {
+        controls.minDistance = 10;  // Allow zooming very close
+        controls.maxDistance = 5000; // Allow zooming very far
+      }
+    }
+  }, [data]);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleNodeDragStart = useCallback(() => {
+    isDragging.current = true;
+  }, []);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleNodeDragEnd = useCallback(() => {
+    // Small delay to prevent click from firing after drag
+    setTimeout(() => {
+      isDragging.current = false;
+    }, 100);
+  }, []);
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleNodeClick = useCallback((node: any) => {
+    // Don't select if user was dragging
+    if (isDragging.current) {
+      return;
+    }
+
     setSelectedNode(node);
-    
-    // Zoom to node
+
+    // Save initial camera position before zooming (only once)
+    if (graphRef.current && !initialCameraPosition.current) {
+      const cam = graphRef.current.camera();
+      initialCameraPosition.current = {
+        position: { x: cam.position.x, y: cam.position.y, z: cam.position.z },
+        lookAt: { x: 0, y: 0, z: 0 }
+      };
+    }
+
+    // Autofocus: Aim at node from outside it
     if (graphRef.current) {
-      const distance = 400;
-      const distRatio = 1 + distance / Math.hypot(node.x || 0, node.y || 0, node.z || 0);
-      
+      const distance = 40;
+      const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
+
+      const newPos = node.x || node.y || node.z
+        ? { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio }
+        : { x: 0, y: 0, z: distance }; // special case if node is in (0,0,0)
+
       graphRef.current.cameraPosition(
-        { 
-          x: (node.x || 0) * distRatio, 
-          y: (node.y || 0) * distRatio, 
-          z: (node.z || 0) * distRatio 
-        },
-        node, // lookAt
-        3000 // ms transition
+        newPos, // new position
+        node, // lookAt ({ x, y, z })
+        3000  // ms transition duration
       );
+    }
+  }, []);
+
+  const handleClosePanel = useCallback(() => {
+    setSelectedNode(null);
+
+    // Return to initial camera position
+    if (graphRef.current && initialCameraPosition.current) {
+      graphRef.current.cameraPosition(
+        initialCameraPosition.current.position,
+        initialCameraPosition.current.lookAt,
+        2000 // ms transition duration
+      );
+      initialCameraPosition.current = null;
     }
   }, []);
 
@@ -107,15 +162,24 @@ export default function Graph3DPage() {
   // Node color based on group type
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const getNodeColor = (node: any) => {
-    const colors: Record<string, string> = {
-      Concept: "#00c6ff",
-      Entity: "#7000ff",
-      Task: "#a78bfa",
-      Persona: "#ec4899",
-      Reference: "#10b981",
-      Note: "#64748b",
-    };
-    return colors[node.group] || "#ffffff";
+    // Reference nodes (papers, books, citations)
+    if (node.group === "Reference") return "#ffd700";
+    
+    // Domain-aware coloring for Notes
+    if (node.group === "Note") {
+      if (node.domain === "Academic") return "#10b981"; // emerald
+      if (node.domain === "Professional") return "#a855f7"; // purple
+      if (node.domain === "Creative") return "#ec4899"; // pink/rose
+      if (node.domain === "Dreams") return "#4338ca"; // indigo
+      return "#3b82f6"; // blue for Personal (default)
+    }
+    
+    // Original colors for other node types
+    if (node.group === "Concept") return "#00c6ff";
+    if (node.group === "Entity") return "#7000ff";
+    if (node.group === "Persona") return "#a78bfa";
+    if (node.group === "Task") return "#ff0055";
+    return "#ffffff";
   };
 
   // Link color - subtle gradient
@@ -161,28 +225,83 @@ export default function Graph3DPage() {
       </div>
 
       {/* Legend */}
-      <div className="absolute bottom-6 left-6 z-20 max-w-xs rounded-2xl border border-white/10 bg-black/80 p-5 shadow-2xl backdrop-blur-xl">
+      <div className="absolute bottom-6 left-6 z-20 max-w-xs rounded-2xl border border-white/10 bg-black/80 p-5 shadow-2xl backdrop-blur-xl transition-all duration-300 hover:scale-[1.02]">
         <div className="mb-4 flex items-center gap-2.5 border-b border-white/10 pb-3">
-          <Info className="h-5 w-5 text-pink-400" />
-          <h3 className="text-sm font-bold text-white">Node Types</h3>
+          <div className="rounded-lg bg-gradient-to-br from-purple-500/20 to-purple-500/5 p-2">
+            <Network className="h-5 w-5 text-pink-400" />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-white">Neural Graph</h3>
+            <p className="text-[10px] font-medium text-zinc-500">Knowledge Visualization</p>
+          </div>
         </div>
-        <div className="space-y-2">
-          {[
-            { label: "Concept", color: "#00c6ff" },
-            { label: "Entity", color: "#7000ff" },
-            { label: "Task", color: "#a78bfa" },
-            { label: "Persona", color: "#ec4899" },
-            { label: "Reference", color: "#10b981" },
-            { label: "Note", color: "#64748b" },
-          ].map(({ label, color }) => (
-            <div key={label} className="flex items-center gap-3 text-sm text-zinc-300">
-              <span
-                className="block h-3 w-3 rounded-full shadow-lg"
-                style={{ backgroundColor: color, boxShadow: `0 0 12px ${color}` }}
-              ></span>
-              <span className="font-medium">{label}</span>
+        <div className="space-y-2.5">
+          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
+            <div className="relative">
+              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#00c6ff] shadow-[0_0_12px_#00c6ff]"></span>
+              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#00c6ff] opacity-30"></span>
             </div>
-          ))}
+            <span className="font-semibold">Concept / Theme</span>
+          </div>
+          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
+            <div className="relative">
+              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#7000ff] shadow-[0_0_12px_#7000ff]"></span>
+              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#7000ff] opacity-30"></span>
+            </div>
+            <span className="font-semibold">Entity (Person/Place)</span>
+          </div>
+          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
+            <div className="relative">
+              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#a78bfa] shadow-[0_0_12px_#a78bfa]"></span>
+              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#a78bfa] opacity-30"></span>
+            </div>
+            <span className="font-semibold">Persona / Trait</span>
+          </div>
+          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
+            <div className="relative">
+              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#ff0055] shadow-[0_0_12px_#ff0055]"></span>
+              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#ff0055] opacity-30"></span>
+            </div>
+            <span className="font-semibold">Task / Goal</span>
+          </div>
+          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
+            <div className="relative">
+              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-white shadow-[0_0_12px_rgba(255,255,255,0.6)]"></span>
+              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-white opacity-20"></span>
+            </div>
+            <span className="font-semibold">Note / Memory</span>
+          </div>
+          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
+            <div className="relative">
+              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#ffd700] shadow-[0_0_12px_#ffd700]"></span>
+              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#ffd700] opacity-30"></span>
+            </div>
+            <span className="font-semibold">Reference / Citation</span>
+          </div>
+        </div>
+        <div className="mt-3 space-y-1.5 border-t border-white/10 pt-3">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Domain Colors</p>
+          <div className="flex flex-wrap gap-2">
+            <div className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-400">
+              Academic
+            </div>
+            <div className="rounded-md border border-blue-500/20 bg-blue-500/10 px-2 py-1 text-[10px] font-semibold text-blue-400">
+              Personal
+            </div>
+            <div className="rounded-md border border-purple-500/20 bg-purple-500/10 px-2 py-1 text-[10px] font-semibold text-purple-400">
+              Professional
+            </div>
+            <div className="rounded-md border border-pink-500/20 bg-pink-500/10 px-2 py-1 text-[10px] font-semibold text-pink-400">
+              Creative
+            </div>
+            <div className="rounded-md border border-indigo-600/20 bg-indigo-600/10 px-2 py-1 text-[10px] font-semibold text-indigo-400">
+              Dreams
+            </div>
+          </div>
+        </div>
+        <div className="mt-3 flex items-center justify-center gap-2 border-t border-white/10 pt-3 text-[10px] text-zinc-600">
+          <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"></div>
+          <span className="font-mono font-semibold">LIVE GRAPH</span>
         </div>
       </div>
 
@@ -211,7 +330,7 @@ export default function Graph3DPage() {
                   </div>
                 </div>
                 <button
-                  onClick={() => setSelectedNode(null)}
+                  onClick={handleClosePanel}
                   className="rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-white/5 hover:text-white"
                   title="Close panel"
                 >
@@ -298,10 +417,27 @@ export default function Graph3DPage() {
         linkOpacity={0.6}
         linkDirectionalParticles={4}
         linkDirectionalParticleWidth={1.5}
+        onNodeDrag={handleNodeDragStart}
+        onNodeDragEnd={handleNodeDragEnd}
         linkDirectionalParticleSpeed={0.008}
-        linkCurvature={0.2}
-        linkDirectionalArrowLength={6}
+        linkCurvature={0.5}
+        linkDirectionalArrowLength={3}
         linkDirectionalArrowRelPos={1}
+        linkThreeObjectExtend={true}
+        linkThreeObject={(link: any) => {
+          const sprite = new SpriteText(link.type, 3);
+          sprite.color = "rgba(255, 255, 255, 0.6)";
+          sprite.textHeight = 2;
+          return sprite;
+        }}
+        linkPositionUpdate={(sprite: any, { start, end }: any) => {
+          const middlePos = Object.assign({},
+            ...['x', 'y', 'z'].map(c => ({
+              [c]: start[c] + (end[c] - start[c]) / 2
+            }))
+          );
+          Object.assign(sprite.position, middlePos);
+        }}
         onNodeClick={handleNodeClick}
         enableNodeDrag={true}
         enableNavigationControls={true}
@@ -312,7 +448,7 @@ export default function Graph3DPage() {
           // @ts-expect-error - depthWrite exists but not in types
           sprite.material.depthWrite = false;
           sprite.color = getNodeColor(node);
-          sprite.textHeight = 5;
+          sprite.textHeight = 2;
           sprite.center.set(0, -1.5, 0); // Position text below node
           return sprite;
         }}
