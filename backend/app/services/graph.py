@@ -203,14 +203,14 @@ class GraphService:
         MATCH (n)
         WHERE n:Concept OR n:Entity OR n:Task OR n:Persona OR n:Reference OR n:Note
         RETURN 
-            id(n) as id,
+            elementId(n) as id,
             n.name as name,
             labels(n) as labels,
             n.summary as summary,
             n.description as description,
             n.trait as trait,
             n.status as status,
-            n.entity_type as entity_type,
+            n.type as entity_type,
             n.title as title,
             n.created_at as created_at
         """
@@ -221,8 +221,8 @@ class GraphService:
         WHERE (source:Concept OR source:Entity OR source:Task OR source:Persona OR source:Reference OR source:Note)
           AND (target:Concept OR target:Entity OR target:Task OR target:Persona OR target:Reference OR target:Note)
         RETURN 
-            id(source) as source,
-            id(target) as target,
+            elementId(source) as source,
+            elementId(target) as target,
             type(r) as type,
             r.status as status,
             r.created_at as created_at

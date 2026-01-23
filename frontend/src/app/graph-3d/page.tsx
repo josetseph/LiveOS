@@ -2,10 +2,9 @@
 
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import dynamic from "next/dynamic";
-import { Loader2, X, Info, Network, Maximize2, Minimize2 } from "lucide-react";
+import { Loader2, X, Network, Maximize2, Minimize2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import SpriteText from "three-spritetext";
-import * as THREE from "three";
 
 // Dynamically import ForceGraph3D as it relies on window/browser APIs
 const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), {
@@ -49,7 +48,6 @@ export default function Graph3DPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const isDragging = useRef(false);
   const initialCameraPosition = useRef<{ position: { x: number; y: number; z: number }, lookAt: { x: number; y: number; z: number } } | null>(null);
 
   useEffect(() => {
@@ -67,37 +65,8 @@ export default function Graph3DPage() {
     fetchData();
   }, []);
 
-  // Configure camera controls to allow closer zoom
-  useEffect(() => {
-    if (graphRef.current && data.nodes.length > 0) {
-      const controls = graphRef.current.controls();
-      if (controls) {
-        controls.minDistance = 10;  // Allow zooming very close
-        controls.maxDistance = 5000; // Allow zooming very far
-      }
-    }
-  }, [data]);
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const handleNodeDragStart = useCallback(() => {
-    isDragging.current = true;
-  }, []);
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const handleNodeDragEnd = useCallback(() => {
-    // Small delay to prevent click from firing after drag
-    setTimeout(() => {
-      isDragging.current = false;
-    }, 100);
-  }, []);
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleNodeClick = useCallback((node: any) => {
-    // Don't select if user was dragging
-    if (isDragging.current) {
-      return;
-    }
-
     setSelectedNode(node);
 
     // Save initial camera position before zooming (only once)
@@ -181,9 +150,6 @@ export default function Graph3DPage() {
     if (node.group === "Task") return "#ff0055";
     return "#ffffff";
   };
-
-  // Link color - subtle gradient
-  const getLinkColor = () => "#ffffff20";
 
   if (loading) {
     return (
@@ -417,8 +383,6 @@ export default function Graph3DPage() {
         linkOpacity={0.6}
         linkDirectionalParticles={4}
         linkDirectionalParticleWidth={1.5}
-        onNodeDrag={handleNodeDragStart}
-        onNodeDragEnd={handleNodeDragEnd}
         linkDirectionalParticleSpeed={0.008}
         linkCurvature={0.5}
         linkDirectionalArrowLength={3}
@@ -440,8 +404,7 @@ export default function Graph3DPage() {
         }}
         onNodeClick={handleNodeClick}
         enableNodeDrag={true}
-        enableNavigationControls={true}
-        showNavInfo={false}
+        showNavInfo={true}
         backgroundColor="#000000"
         nodeThreeObject={(node: any) => {
           const sprite = new SpriteText(node.name, 8);
@@ -449,7 +412,8 @@ export default function Graph3DPage() {
           sprite.material.depthWrite = false;
           sprite.color = getNodeColor(node);
           sprite.textHeight = 2;
-          sprite.center.set(0, -1.5, 0); // Position text below node
+          // @ts-expect-error - position exists but not in types
+          sprite.position.set(0, -5, 0); // Position text below node
           return sprite;
         }}
         nodeThreeObjectExtend={true}
