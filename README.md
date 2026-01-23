@@ -214,13 +214,13 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 ## 2. The Retrieval System ("The Voice")
 
-1.  **Double-Fetch Hybrid RAG with Domain Awareness**:
-    *   **Step 0**: Query domain detection (Academic/Personal/Professional) via keyword heuristics.
-    *   **Step 1**: Vector Search in Neo4j with 1.5x domain boost for matching notes.
-    *   **Step 2**: Full content is fetched from Postgres (Single Source of Truth).
-    *   **Step 3**: Graph Context expansion (Entities, Concepts, Tasks, Persona Traits, References with evidence quotes).
-    *   **Step 4**: Soft cap at 50 snippets for reranker performance (3-5s response time).
-2.  **Reranking**: `mxbai-rerank-large-v2-seq` (Generative Reranker).
+1.  **Graph-First Hybrid RAG (4-Phase Architecture)**:
+    *   **Phase 1: Temporal Anchor** (Short-Term Memory): Always fetch 10 most recent notes for current context.
+    *   **Phase 2: Graph Consensus** (Long-Term Wisdom): Search unified knowledge graph index (25 distilled Concepts, Entities, Tasks, Personas, References).
+    *   **Phase 3: Grounding** (Evidence): Trace back from graph nodes to source notes that formed them.
+    *   **Phase 4: Semantic Fallback** (Safety Net): Only runs if Phases 1-3 return < 15 notes. Traditional vector search on note embeddings.
+    *   **Priority Scoring**: Graph consensus (2.0×) > Source notes (1.5×) > Temporal (1.2×) > Domain match (1.5×) > Recency (1.0-2.0×) > Vector fallback (0.9×)
+2.  **Reranking**: `mxbai-rerank-large-v2-seq` (Generative Reranker) with 50-snippet cap for 3-5s response.
 3.  **Domain-Aware Synthesis**: **Gemma3 12B** with adaptive system prompts:
     *   **Academic**: Pedagogical, conceptual explanations with prerequisites and citations
     *   **Personal**: Empathetic insights connecting experiences and feelings

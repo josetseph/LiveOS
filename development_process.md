@@ -226,12 +226,74 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 
 ---
 
-## 📋 Current Model Stack (Phase 15)
+## � Phase 18: The "Graph-First" Retrieval Revolution
+**Goal**: Transform retrieval from "search documents" to "query distilled knowledge, then ground in evidence."
+
+*   **Architectural Philosophy Shift**:
+    *   **Old**: Notes are the entry point → Search note embeddings → Get graph context as metadata.
+    *   **New**: Graph is the entry point → Search distilled knowledge nodes → Trace to source notes for evidence.
+    *   **Why**: Graph summaries represent consensus wisdom (2 years of "Chris" mentions → single definitive summary), while notes are temporal snapshots. Searching the graph first ensures the LLM gets the "Global View" before the "Fine Print."
+*   **Unified Knowledge Graph Index**:
+    *   **Implementation**: Created `distilled_knowledge_index` vector index for all `:Indexable` nodes (Concepts, Entities, Tasks, Personas, References).
+    *   **Embeddings for All Nodes**: During ingestion, every knowledge node now gets:
+        *   Embedding generated from name + summary/description
+        *   `:Indexable` label for unified search
+        *   Updated embeddings when summaries are refreshed
+    *   **Schema Update**: Modified `_write_ontology` and `_update_node_summary` to generate and store embeddings for all node types.
+*   **4-Phase Graph-First Retrieval**:
+    *   **Phase 1: Temporal Anchor** (Short-Term Memory):
+        *   Always fetches 10 most recent notes regardless of query.
+        *   Provides "what's happening now" context.
+        *   Gets 1.2× phase priority boost.
+    *   **Phase 2: Graph Consensus** (Long-Term Wisdom):
+        *   Searches unified knowledge graph index (25 nodes).
+        *   Returns distilled summaries of Concepts, Entities, Tasks, Personas.
+        *   Gets 2.0× priority boost (highest - this is the consensus).
+    *   **Phase 3: Grounding** (Evidence):
+        *   Traces from graph nodes back to source notes via relationships.
+        *   Provides full context for distilled knowledge.
+        *   Gets 1.5× phase priority boost.
+    *   **Phase 4: Semantic Fallback** (Safety Net):
+        *   **Conditional**: Only runs if Phases 1-3 return < 15 notes.
+        *   Traditional vector search on note embeddings.
+        *   Gets 0.9× penalty (lowest priority).
+*   **Graph Service Enhancements**:
+    *   **`search_knowledge_graph()`**: New method to query unified index, returns name, summary, labels, and score.
+    *   **`get_node_source_notes()`**: Traces relationships from knowledge nodes to notes that formed them.
+    *   **Increased Limits**: Graph nodes (10→25), Recent notes (5→10) for better coverage.
+*   **Priority Scoring System**:
+    *   **Formula**: `Final Score = Reranker Score × Domain Boost × Recency Boost × Phase Boost`
+    *   **Hierarchy**: Graph consensus (2.0×) > Source notes (1.5×) > Temporal (1.2×) > Domain match (1.5×) > Recency (1.0-2.0×) > Vector fallback (0.9×)
+    *   **Phase Tracking**: System tracks which phase each note came from to apply appropriate multipliers.
+*   **Recency-Weighted Ranking**:
+    *   **Time-Decay Boost**: Notes get recency multiplier based on age:
+        *   Today: 2.0× boost
+        *   1 month ago: ~1.5× boost
+        *   1 year ago: ~1.1× boost
+    *   **Formula**: `boost = 1.0 + (1.0 / (1.0 + days_old/30))`
+    *   **Purpose**: Ensures newer notes float to top when semantically tied with older ones.
+*   **Benefits**:
+    *   **Graph-First Priority**: Distilled consensus knowledge takes precedence over raw notes.
+    *   **Evidence Grounding**: Source notes provide context for how the consensus was formed.
+    *   **Temporal Awareness**: Recent notes anchor the system in present context.
+    *   **Conditional Fallback**: Vector search only runs when needed (< 15 notes), preventing dilution.
+    *   **Cleaner Results**: No more 2024 notes polluting 2026 queries - recency boost ensures current trajectory is visible.
+*   **Example Query Flow** ("How is Ceruba going?"):
+    1.  Phase 1: Get 10 most recent notes (today's standup, yesterday's code review)
+    2.  Phase 2: Search graph → Find "Ceruba" Concept node → Get consensus summary (2.0× boost)
+    3.  Phase 3: Trace → Find 15 notes that formed the summary (1.5× boost)
+    4.  Phase 4: SKIPPED (already have 25 notes)
+    5.  Rerank → Top 10 snippets (consensus summary first, then recent notes, then historical context)
+    6.  LLM sees: What Ceruba IS (consensus) → Current status (recent) → How we got here (historical)
+
+---
+
+## 📋 Current Model Stack (Phase 18)
 | Component | Model | Role |
 | :--- | :--- | :--- |
 | **Chat / Synthesis** | `gemma3:12b` | The "Brain". Concise, reliable instruction following with strong JSON adherence. |
 | **Extraction** | `knowledge-architect` (Gemma3 12B) | The "Senses". Custom-tuned for structured data extraction. |
-| **Embedding** | `qwen3-embedding:8b` | Semantic vector search (4096-dim). |
+| **Embedding** | `qwen3-embedding:8b` | Semantic vector search (4096-dim) for Notes AND Knowledge Nodes. |
 | **Reranking** | `mxbai-rerank-large-v2-seq` | Fast context relevance scoring with 50-snippet cap. |
 | **Vision** | `microsoft/Florence-2-large` | Local Transformer model for detailed image description. |
 | **Audio** | `openai/whisper-large-v3` | Local audio transcription. |
@@ -299,9 +361,10 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 
 1.  **Local-First**: All data and processing stays on the user's machine.
 2.  **Polyglot Persistence**: Right tool for the right job (Postgres for content, Neo4j for relationships, MinIO for files).
-3.  **Tiered Intelligence**: Fast models for ingestion, powerful models for synthesis.
-4.  **Graceful Degradation**: JSON repair pipelines and retry logic ensure reliability.
-5.  **Entity-Level Consistency**: Locking mechanisms prevent race conditions during concurrent updates.
-6.  **Performance Caps**: Soft limits (50 snippets) ensure predictable response times.
-7.  **Transparency**: Real-time system info displays all active services and models.
-8.  **Multi-Domain Design**: Single system serves personal, academic, professional, and creative needs with domain-aware intelligence.
+3.  **Graph-First Retrieval**: Distilled knowledge nodes (consensus) take precedence over raw notes (evidence), with temporal anchoring for current awareness.
+4.  **Tiered Intelligence**: Fast models for ingestion, powerful models for synthesis.
+5.  **Graceful Degradation**: JSON repair pipelines and retry logic ensure reliability.
+6.  **Entity-Level Consistency**: Locking mechanisms prevent race conditions during concurrent updates.
+7.  **Performance Caps**: Soft limits (50 snippets) ensure predictable response times.
+8.  **Transparency**: Real-time system info displays all active services and models.
+9.  **Multi-Domain Design**: Single system serves personal, academic, professional, and creative needs with domain-aware intelligence.

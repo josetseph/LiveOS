@@ -116,3 +116,4 @@ class Extraction(BaseModel):
 class NoteInput(BaseModel):
     content: str
     created_at: Optional[str] = None
+    skip_ingestion: bool = False  # If True, save to DB but don't process in brain

@@ -15,6 +15,7 @@ interface Note {
   content: string;
   created_at: string;
   updated_at: string;
+  processed?: boolean;
 }
 
 interface FilePreview {
@@ -23,10 +24,13 @@ interface FilePreview {
   type: "image" | "pdf" | "audio" | "other";
 }
 
+type ProcessedFilter = "all" | "ingested" | "not-ingested";
+
 export default function NotesPage() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedNote, setSelectedNote] = useState<Note | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [processedFilter, setProcessedFilter] = useState<ProcessedFilter>("all");
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -56,17 +60,17 @@ export default function NotesPage() {
         localStorage.removeItem('note-draft');
       }
     }
-    fetchNotes();
+    fetchNotes(undefined, processedFilter);
   }, []);
 
-  // Debounced search
+  // Debounced search and filter
   useEffect(() => {
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
     }
 
     searchTimeoutRef.current = setTimeout(() => {
-      fetchNotes(searchQuery);
+      fetchNotes(searchQuery, processedFilter);
     }, 300);
 
     return () => {
@@ -74,7 +78,7 @@ export default function NotesPage() {
         clearTimeout(searchTimeoutRef.current);
       }
     };
-  }, [searchQuery]);
+  }, [searchQuery, processedFilter]);
 
   // Save locally on page unload
   useEffect(() => {
@@ -88,10 +92,11 @@ export default function NotesPage() {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [selectedNote]);
 
-  const fetchNotes = async (search?: string) => {
+  const fetchNotes = async (search?: string, filter?: ProcessedFilter) => {
     try {
       setIsLoading(true);
-      const data = await api.getNotes(search);
+      const processed = filter === "ingested" ? true : filter === "not-ingested" ? false : undefined;
+      const data = await api.getNotes(search, processed);
       setNotes(data);
     } catch (error) {
       console.error("Error fetching notes:", error);
@@ -101,36 +106,36 @@ export default function NotesPage() {
   };
 
   const handleNoteSelect = (note: Note) => {
-    // Save previous note locally if it has changes
+    // Save previous note if it has changes
     if (selectedNote && contentBeforeEditRef.current !== selectedNote.content) {
       handleSaveNote(selectedNote);
     }
     
     setSelectedNote(note);
-    // Open existing notes in preview mode, new notes in edit mode
-    setIsPreviewMode(!note.id.startsWith("temp-"));
+    // Open notes in preview mode by default
+    setIsPreviewMode(true);
     contentBeforeEditRef.current = note.content;
   };
 
-  const handleCreateNote = () => {
-    // Save current note locally if it has changes
+  const handleCreateNote = async () => {
+    // Save current note if it has changes
     if (selectedNote && contentBeforeEditRef.current !== selectedNote.content) {
-      handleSaveNote(selectedNote);
+      await handleSaveNote(selectedNote);
     }
 
-    // Create temporary local note (not saved to backend yet)
-    const tempNote: Note = {
-      id: `temp-${Date.now()}`,
-      title: "Untitled",
-      content: "",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    
-    setNotes([tempNote, ...notes]);
-    setSelectedNote(tempNote);
-    setIsPreviewMode(false);
-    contentBeforeEditRef.current = "";
+    try {
+      // Create note immediately in database (with processed=False)
+      const newNote = await api.createNote("", new Date().toISOString());
+      
+      // Refresh notes list and select the new note
+      await fetchNotes(searchQuery, processedFilter);
+      setSelectedNote(newNote);
+      setIsPreviewMode(false);
+      contentBeforeEditRef.current = "";
+    } catch (error) {
+      console.error("Error creating note:", error);
+      alert("Failed to create note. Please try again.");
+    }
   };
 
   const handleIngestNote = async () => {
@@ -142,32 +147,14 @@ export default function NotesPage() {
     try {
       setIsSaving(true);
       
-      if (selectedNote.id.startsWith("temp-")) {
-        // New note - create on backend
-        const newNote = await api.createNote(selectedNote.content, selectedNote.created_at);
-        await fetchNotes(searchQuery);
-        
-        // Update with real ID
-        const createdNote = await api.getNote(newNote.note_id);
-        
-        // Remove temp note from list
-        setNotes((prevNotes) => prevNotes.filter((n) => n.id !== selectedNote.id));
-        
-        // Clear draft from localStorage
-        localStorage.removeItem('note-draft');
-        
-        setSelectedNote(createdNote);
-        contentBeforeEditRef.current = createdNote.content;
-      } else {
-        // Existing note - update on backend (re-ingest)
-        await api.updateNote(selectedNote.id, selectedNote.content);
-        contentBeforeEditRef.current = selectedNote.content;
-        
-        // Refresh to get updated metadata
-        await fetchNotes(searchQuery);
-        const updatedNote = await api.getNote(selectedNote.id);
-        setSelectedNote(updatedNote);
-      }
+      // Trigger ingestion for the note
+      await api.ingestNote(selectedNote.id);
+      
+      // Refresh to get updated metadata (processed=true)
+      await fetchNotes(searchQuery, processedFilter);
+      const updatedNote = await api.getNote(selectedNote.id);
+      setSelectedNote(updatedNote);
+      contentBeforeEditRef.current = updatedNote.content;
     } catch (error) {
       console.error("Error ingesting note:", error);
       alert("Failed to ingest note. Please try again.");
@@ -177,30 +164,25 @@ export default function NotesPage() {
   };
 
   const handleSaveNote = useCallback(async (note: Note) => {
-    // Don't save if content hasn't changed or is empty
-    if (!note || note.content === contentBeforeEditRef.current || !note.content.trim()) return;
+    // Don't save if content hasn't changed
+    if (!note || note.content === contentBeforeEditRef.current) return;
     
     try {
       setIsSaving(true);
       await api.updateNote(note.id, note.content);
       contentBeforeEditRef.current = note.content;
-      await fetchNotes(searchQuery);
+      // Don't refresh list on autosave to avoid interrupting typing
     } catch (error) {
       console.error("Error saving note:", error);
     } finally {
       setIsSaving(false);
     }
-  }, [searchQuery]);
+  }, []);
 
   const handleContentChange = (content: string) => {
     if (!selectedNote) return;
     const updatedNote = { ...selectedNote, content };
     setSelectedNote(updatedNote);
-    
-    // Autosave to localStorage for temp notes
-    if (selectedNote.id.startsWith('temp-')) {
-      localStorage.setItem('note-draft', JSON.stringify(updatedNote));
-    }
   };
 
   const handleBlur = () => {
@@ -218,7 +200,7 @@ export default function NotesPage() {
     try {
       await api.deleteNote(selectedNote.id);
       setSelectedNote(null);
-      await fetchNotes(searchQuery);
+      await fetchNotes(searchQuery, processedFilter);
     } catch (error) {
       console.error("Error deleting note:", error);
     }
@@ -400,6 +382,43 @@ export default function NotesPage() {
               className="w-full rounded-xl border border-white/10 bg-white/5 py-2 pl-10 pr-4 text-sm text-white placeholder-white/40 backdrop-blur-xl focus:border-purple-500/50 focus:outline-none"
             />
           </div>
+          
+          {/* Filter Buttons */}
+          <div className="flex gap-1 px-2 mt-2">
+            <button
+              onClick={() => setProcessedFilter("all")}
+              className={cn(
+                "flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all",
+                processedFilter === "all"
+                  ? "bg-white/10 text-white border border-white/20"
+                  : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
+              )}
+            >
+              All
+            </button>
+            <button
+              onClick={() => setProcessedFilter("ingested")}
+              className={cn(
+                "flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all",
+                processedFilter === "ingested"
+                  ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                  : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
+              )}
+            >
+              Ingested
+            </button>
+            <button
+              onClick={() => setProcessedFilter("not-ingested")}
+              className={cn(
+                "flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all",
+                processedFilter === "not-ingested"
+                  ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                  : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
+              )}
+            >
+              Drafts
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto">
@@ -421,13 +440,21 @@ export default function NotesPage() {
                   key={note.id}
                   onClick={() => handleNoteSelect(note)}
                   className={cn(
-                    "w-full rounded-xl p-3 text-left transition-all",
+                    "w-full rounded-xl p-3 text-left transition-all relative",
                     selectedNote?.id === note.id
                       ? "bg-gradient-to-br from-purple-500/20 to-pink-500/20 border border-purple-500/30"
                       : "hover:bg-white/5 border border-transparent"
                   )}
                 >
-                  <h3 className="mb-1 truncate font-medium text-white">{note.title || "Untitled"}</h3>
+                  {/* Ingestion Status Indicator */}
+                  <div className="absolute top-3 right-3">
+                    {note.processed ? (
+                      <div className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]" title="Ingested into brain" />
+                    ) : (
+                      <div className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]" title="Draft - not ingested" />
+                    )}
+                  </div>
+                  <h3 className="mb-1 truncate font-medium text-white pr-6">{note.title || "Untitled"}</h3>
                   <p className="truncate text-sm text-white/60">
                     {note.content || "Empty note"}
                   </p>

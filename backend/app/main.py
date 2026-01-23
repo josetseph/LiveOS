@@ -112,40 +112,6 @@ async def get_graph_visualization():
     Fetch nodes and edges for 2D Force Graph.
     Now INCLUDES Notes to ensure the graph is populated.
     """
-    query = """
-    MATCH (n)-[r]->(m)
-    RETURN n.name as source_name, labels(n)[0] as source_label, id(n) as source_id,
-           m.name as target_name, labels(m)[0] as target_label, id(m) as target_id,
-           type(r) as type
-    LIMIT 500
-    UNION
-    MATCH (n:Note)
-    RETURN "Note" as source_name, "Note" as source_label, id(n) as source_id,
-           n.summary as target_name, "Summary" as target_label, id(n) as target_id,
-           "SELF" as type
-    LIMIT 100
-    """
-    # Simplified query to just get all connections including Notes
-    query = """
-    MATCH (n)-[r]->(m)
-    RETURN n.name as source_name, labels(n)[0] as source_label, id(n) as source_id,
-           m.name as target_name, labels(m)[0] as target_label, id(m) as target_id,
-           type(r) as type
-    LIMIT 500
-    """
-    # Actually, for Notes that might not have connections yet, we might want to just show them?
-    # But usually ForceGraph needs links. Let's stick to the original query but REMOVE the Note exclusion.
-    # And maybe add a separate match for Notes to ensure they appear even if disconnected (force graph can handle disconnected nodes if we pass them in nodes list).
-
-    query = """
-    MATCH (n)
-    WHERE labels(n)[0] IN ['Note', 'Concept', 'Entity', 'Task']
-    OPTIONAL MATCH (n)-[r]->(m)
-    RETURN n.id as source_id, n.summary as source_name, labels(n)[0] as source_label,
-           m.id as target_id, m.name as target_name, labels(m)[0] as target_label,
-           type(r) as type
-    LIMIT 300
-    """
 
     # Let's use a cleaner query that gets everything.
     query = """
@@ -230,6 +196,17 @@ async def get_graph_visualization():
     return {"nodes": list(nodes.values()), "links": links}
 
 
+@app.get("/api/v1/graph/export")
+async def export_graph_for_3d():
+    """
+    Export full graph data for 3D visualization.
+    Returns all nodes (Concepts, Entities, Tasks, Personas, References, Notes)
+    and their relationships in 3d-force-graph format.
+    """
+    graph_data = graph_service.get_full_graph()
+    return graph_data
+
+
 # --- Notes API ---
 
 from app.core.database import get_db
@@ -245,9 +222,90 @@ class NoteResponse(BaseModel):
     created_at: str | None = None
     title: str | None = None
     summary: str | None = None
+    processed: bool = False
 
     class Config:
         from_attributes = True
+
+
+class CreateNoteInput(BaseModel):
+    content: str
+    created_at: str | None = None
+
+
+@app.post("/api/v1/notes")
+async def create_note(
+    note_input: CreateNoteInput,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create a new note in Postgres WITHOUT ingestion.
+    Note will have processed=False until explicitly ingested via POST /api/v1/notes/{id}/ingest.
+    """
+    note_id = str(uuid.uuid4())
+
+    c_at = datetime.utcnow()
+    if note_input.created_at:
+        try:
+            import dateparser
+
+            dt = dateparser.parse(note_input.created_at)
+            if dt:
+                c_at = dt
+        except:
+            pass
+
+    new_note = Note(
+        id=note_id,
+        content=note_input.content,
+        created_at=c_at,
+        processed=False,  # Not ingested yet
+    )
+    db.add(new_note)
+    await db.commit()
+    await db.refresh(new_note)
+
+    return new_note
+
+
+@app.post("/api/v1/notes/{note_id}/ingest")
+async def ingest_existing_note(
+    note_id: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Trigger ingestion for an existing note.
+    This will process the note in the background and set processed=True when complete.
+    """
+    # Fetch the note
+    result = await db.execute(select(Note).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+
+    if not note:
+        return {"error": "Note not found"}, 404
+
+    if note.processed:
+        return {
+            "note_id": note_id,
+            "status": "already_processed",
+            "message": "Note has already been ingested",
+        }
+
+    # Create NoteInput for the ingestion workflow
+    note_data = NoteInput(
+        content=note.content,
+        created_at=note.created_at.isoformat() if note.created_at else None,
+    )
+
+    # Trigger background ingestion
+    background_tasks.add_task(ingestion_workflow.process_note, note_data, note_id)
+
+    return {
+        "note_id": note_id,
+        "status": "processing_started",
+        "message": "Note ingestion has been queued",
+    }
 
 
 @app.post("/api/v1/ingest")
@@ -257,65 +315,75 @@ async def ingest_note(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Ingest a new note:
-    1. Save to Postgres (Body).
-    2. Background: Extract metadata -> Save to Graph (Mind).
+    Create and ingest a new note (legacy combined endpoint for batch scripts).
+    For manual note creation, prefer POST /api/v1/notes then POST /api/v1/notes/{id}/ingest.
     """
     note_id = str(uuid.uuid4())
 
     # 1. Save to Postgres
-    # Use provided created_at if available (for historical notes), else default to now.
-    # We parse the ISO string if provided.
     c_at = datetime.utcnow()
     if note_data.created_at:
         try:
-            # Try parsing common formats if not strict ISO
             import dateparser
 
             dt = dateparser.parse(note_data.created_at)
             if dt:
                 c_at = dt
         except:
-            pass  # Fallback to now
+            pass
 
-    new_note = Note(id=note_id, content=note_data.content, created_at=c_at)
+    # Create note with processed=False initially
+    new_note = Note(
+        id=note_id, content=note_data.content, created_at=c_at, processed=False
+    )
     db.add(new_note)
     await db.commit()
 
-    # 2. Trigger Graph Ingestion
-    # Pass created_at along so the agent knows about it too
-    if note_data.created_at is None:
-        note_data.created_at = c_at.isoformat()
-
-    background_tasks.add_task(ingestion_workflow.process_note, note_data, note_id)
+    # 2. Trigger ingestion unless skip_ingestion=True
+    if not note_data.skip_ingestion:
+        if note_data.created_at is None:
+            note_data.created_at = c_at.isoformat()
+        background_tasks.add_task(ingestion_workflow.process_note, note_data, note_id)
+        status = "processing_started"
+    else:
+        status = "saved_without_ingestion"
 
     return {
         "note_id": note_id,
-        "status": "processing_started",
+        "status": status,
         "content": note_data.content,
         "created_at": c_at.isoformat(),
+        "processed": False,  # Will be set to True after background task completes
     }
 
 
 @app.get("/api/v1/notes")
-async def get_notes(search: str | None = None, db: AsyncSession = Depends(get_db)):
+async def get_notes(
+    search: str | None = None,
+    processed: bool | None = None,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Get all notes sorted by creation date (newest first).
+    Optionally filter by processed status (ingested vs non-ingested).
     """
+    base_query = select(Note)
+
+    # Apply filters
+    filters = []
     if search:
         term = f"%{search}%"
-        query = (
-            select(Note)
-            .where((Note.title.ilike(term)) | (Note.content.ilike(term)))
-            .order_by(Note.created_at.desc())
-            .limit(100)
-        )
-    else:
-        query = select(Note).order_by(Note.created_at.desc()).limit(100)
+        filters.append((Note.title.ilike(term)) | (Note.content.ilike(term)))
 
+    if processed is not None:
+        filters.append(Note.processed == processed)
+
+    if filters:
+        base_query = base_query.where(*filters)
+
+    query = base_query.order_by(Note.created_at.desc())
     result = await db.execute(query)
     notes = result.scalars().all()
-    # Normalize created_at to string for JSON serialization if needed, or rely on Pydantic
     return notes
 
 
@@ -335,59 +403,40 @@ async def get_note(note_id: str, db: AsyncSession = Depends(get_db)):
 @app.put("/api/v1/notes/{note_id}")
 async def update_note(
     note_id: str,
-    note_data: NoteInput,
-    background_tasks: BackgroundTasks,
+    note_input: CreateNoteInput,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Update a note:
-    1. Check if content changed.
-    2. If changed => Update Postgres (processed=False) -> Trigger Background Ingestion.
-    3. If same => Do nothing.
+    Update an existing note's content.
+    Does NOT trigger re-ingestion or change processed status.
+    Use POST /api/v1/notes/{id}/ingest to re-ingest after updating.
     """
-    # 1. Fetch existing note to compare
     result = await db.execute(select(Note).where(Note.id == note_id))
     existing_note = result.scalar_one_or_none()
 
     if not existing_note:
-        return {"error": "Note not found", "status": "failed"}
+        return {"error": "Note not found"}
 
-    # 2. Idempotency Check
-    if existing_note.content == note_data.content:
-        # If content is identical and it's already processed, skip.
-        # If it's identical but somehow processed=False (failed prev run?), we might want to re-run.
-        # For strict user requirement: "If exactly the same, nothing happens."
-        if existing_note.processed:
-            return {"status": "skipped_no_change", "id": note_id}
+    # Update content only, preserve processed status
+    existing_note.content = note_input.content
 
-        # If processed=False, we fall through to trigger ingestion again (retry)
-
-    # 3. Update Postgres
-    # Reset processed = False because we are changing it
-    existing_note.content = note_data.content
-    existing_note.processed = False
-
-    # Update created_at if provided (for correcting dates)
-    if note_data.created_at:
+    # Update created_at if provided
+    if note_input.created_at:
         try:
             import dateparser
 
-            dt = dateparser.parse(note_data.created_at)
+            dt = dateparser.parse(note_input.created_at)
             if dt:
                 existing_note.created_at = dt
         except:
             pass
 
-    # updated_at will auto-update if config allows, or we set it manually:
     existing_note.updated_at = datetime.utcnow()
 
     await db.commit()
     await db.refresh(existing_note)
 
-    # 4. Trigger Re-Ingestion (Background)
-    background_tasks.add_task(ingestion_workflow.process_note, note_data, note_id)
-
-    return {"status": "updated_and_processing", "id": note_id}
+    return existing_note
 
 
 @app.delete("/api/v1/notes/{note_id}")

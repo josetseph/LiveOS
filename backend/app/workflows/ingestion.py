@@ -192,12 +192,20 @@ class IngestionWorkflow:
 
         # 1. ENTITIES (Batch)
         if extraction.entities:
+            # Generate embeddings for entities
+            from app.services.embedding import embedding_service
+            entity_embeddings = {}
+            for e in extraction.entities:
+                text_to_embed = f"{e.name} ({e.type})"
+                entity_embeddings[e.name] = embedding_service.embed_query(text_to_embed)
+            
             query_entities = """
             MERGE (n:Note {id: $note_id})
             WITH n
             UNWIND $data AS item
             MERGE (e:Entity {name: item.name})
             ON CREATE SET e.type = item.type, e.importance = item.importance
+            SET e:Indexable, e.embedding = item.embedding
             MERGE (n)-[r:MENTIONS]->(e)
             SET r.created_at = $created_at,
                 r.valid_from = $created_at,
@@ -205,7 +213,12 @@ class IngestionWorkflow:
             """
             # Prepare dict list
             entity_data = [
-                {"name": e.name, "type": e.type, "importance": e.importance}
+                {
+                    "name": e.name, 
+                    "type": e.type, 
+                    "importance": e.importance,
+                    "embedding": entity_embeddings[e.name]
+                }
                 for e in extraction.entities
             ]
             graph_service.execute_query(
@@ -215,19 +228,31 @@ class IngestionWorkflow:
 
         # 2. CONCEPTS (Batch with Academic Relationships)
         if extraction.concepts:
+            # Generate embeddings for concepts
+            from app.services.embedding import embedding_service
+            concept_embeddings = {}
+            for c in extraction.concepts:
+                text_to_embed = f"{c.name}: {c.definition or ''}"
+                concept_embeddings[c.name.title()] = embedding_service.embed_query(text_to_embed)
+            
             query_concepts = """
             MERGE (n:Note {id: $note_id})
             WITH n
             UNWIND $data AS item
             MERGE (c:Concept {name: item.name})
             ON CREATE SET c.definition = item.definition
+            SET c:Indexable, c.embedding = item.embedding
             MERGE (n)-[r:CONTRIBUTES_TO]->(c)
             SET r.created_at = $created_at,
                 r.valid_from = $created_at,
                 r.status = 'active'
             """
             concept_data = [
-                {"name": c.name.title(), "definition": c.definition}
+                {
+                    "name": c.name.title(), 
+                    "definition": c.definition,
+                    "embedding": concept_embeddings[c.name.title()]
+                }
                 for c in extraction.concepts
             ]
             graph_service.execute_query(
@@ -301,12 +326,19 @@ class IngestionWorkflow:
 
         # 3. TASKS (Batch)
         if extraction.tasks:
+            # Generate embeddings for tasks
+            from app.services.embedding import embedding_service
+            task_embeddings = []
+            for t in extraction.tasks:
+                text_to_embed = f"Task: {t.description} (Status: {t.status})"
+                task_embeddings.append(embedding_service.embed_query(text_to_embed))
+            
             query_tasks = """
             MERGE (n:Note {id: $note_id})
             WITH n
             UNWIND $data AS item
             // Create Task with 'name' for generic visualization fallback
-            CREATE (t:Task {id: item.task_id, description: item.desc, name: item.name, status: item.status, due_date: item.due_date, created_at: $created_at})
+            CREATE (t:Task:Indexable {id: item.task_id, description: item.desc, name: item.name, status: item.status, due_date: item.due_date, created_at: $created_at, embedding: item.embedding})
             MERGE (n)-[r:PRODUCES_TASK]->(t)
             SET r.created_at = $created_at,
                 r.valid_from = $created_at,
@@ -324,8 +356,9 @@ class IngestionWorkflow:
                     ),
                     "status": t.status,
                     "due_date": t.due_date,
+                    "embedding": task_embeddings[i]
                 }
-                for t in extraction.tasks
+                for i, t in enumerate(extraction.tasks)
             ]
             graph_service.execute_query(
                 query_tasks,
@@ -334,6 +367,13 @@ class IngestionWorkflow:
 
         # 4. PERSONA (Batch)
         if extraction.persona_traits:
+            # Generate embeddings for persona traits
+            from app.services.embedding import embedding_service
+            persona_embeddings = {}
+            for t in extraction.persona_traits:
+                text_to_embed = f"Personality trait: {t.trait}. Evidence: {t.evidence_quote or ''}"
+                persona_embeddings[t.trait] = embedding_service.embed_query(text_to_embed)
+            
             query_persona = """
             MERGE (n:Note {id: $note_id})
             WITH n
@@ -341,6 +381,7 @@ class IngestionWorkflow:
             // Generic visualization uses 'name'
             MERGE (p:Persona {trait: item.trait})
             ON CREATE SET p.name = item.trait
+            SET p:Indexable, p.embedding = item.embedding
             MERGE (p)-[r:REVEALED_BY]->(n)
             SET r.quote = item.quote, 
                 r.created_at = $created_at,
@@ -348,7 +389,11 @@ class IngestionWorkflow:
                 r.status = 'active'
             """
             persona_data = [
-                {"trait": t.trait, "quote": t.evidence_quote}
+                {
+                    "trait": t.trait, 
+                    "quote": t.evidence_quote,
+                    "embedding": persona_embeddings[t.trait]
+                }
                 for t in extraction.persona_traits
             ]
             graph_service.execute_query(
@@ -358,12 +403,21 @@ class IngestionWorkflow:
 
         # 5. EXTERNAL REFERENCES (New for Academic/Professional domains)
         if extraction.references:
+            # Generate embeddings for references
+            from app.services.embedding import embedding_service
+            reference_embeddings = {}
+            for ref in extraction.references:
+                text_to_embed = f"{ref.title}: {ref.content or ''} (Source: {ref.source or 'Unknown'})"
+                ref_key = f"{ref.title}|{ref.source or 'Unknown'}"
+                reference_embeddings[ref_key] = embedding_service.embed_query(text_to_embed)
+            
             query_references = """
             MERGE (n:Note {id: $note_id})
             WITH n
             UNWIND $data AS item
             MERGE (r:Reference {title: item.title, source: item.source})
             ON CREATE SET r.type = item.type, r.content = item.content
+            SET r:Indexable, r.embedding = item.embedding, r.name = item.title
             MERGE (n)-[rel:CITES]->(r)
             SET rel.created_at = $created_at,
                 rel.valid_from = $created_at,
@@ -375,6 +429,7 @@ class IngestionWorkflow:
                     "type": ref.type,
                     "content": ref.content,
                     "source": ref.source or "Unknown",
+                    "embedding": reference_embeddings[f"{ref.title}|{ref.source or 'Unknown'}"]
                 }
                 for ref in extraction.references
             ]
@@ -477,14 +532,24 @@ class IngestionWorkflow:
 
             update_data = await loop.run_in_executor(None, _call_llm)
 
-            # 4. Save back
+            # 4. Generate embedding for updated summary
+            from app.services.embedding import embedding_service
+            def _generate_embedding():
+                # Use the updated summary + title for embedding
+                text_to_embed = f"{update_data['title']}: {update_data['summary']}"
+                return embedding_service.embed_query(text_to_embed)
+            
+            new_embedding = await loop.run_in_executor(None, _generate_embedding)
+
+            # 5. Save back with updated embedding
             def _save_update():
                 graph_service.execute_query(
-                    f"MATCH (n:{label} {{{identifier_key}: $name}}) SET n.summary = $summary, n.title = $title",
+                    f"MATCH (n:{label} {{{identifier_key}: $name}}) SET n.summary = $summary, n.title = $title, n.embedding = $embedding, n:Indexable",
                     {
                         "name": name,
                         "summary": update_data["summary"],
                         "title": update_data["title"],
+                        "embedding": new_embedding,
                     },
                 )
 

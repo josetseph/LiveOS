@@ -19,7 +19,7 @@ export const api = {
         return response.data;
     },
 
-    async ingest(data: { content: string; created_at?: string }) {
+    async ingest(data: { content: string; created_at?: string; skip_ingestion?: boolean }) {
         const response = await axios.post(`${API_BASE_URL}/ingest`, data);
         return response.data;
     },
@@ -34,8 +34,10 @@ export const api = {
         return response.data;
     },
 
-    async getNotes(search?: string) {
-        const params = search ? { search } : {};
+    async getNotes(search?: string, processed?: boolean) {
+        const params: any = {};
+        if (search) params.search = search;
+        if (processed !== undefined) params.processed = processed;
         const response = await axios.get(`${API_BASE_URL}/notes`, { params });
         return response.data;
     },
@@ -46,13 +48,20 @@ export const api = {
     },
 
     async createNote(content: string, created_at?: string) {
-        // Uses the ingest endpoint but formats it as a note
-        const response = await axios.post(`${API_BASE_URL}/ingest`, { content, created_at });
+        // Create note WITHOUT ingestion (POST /api/v1/notes)
+        const response = await axios.post(`${API_BASE_URL}/notes`, { content, created_at });
         return response.data;
     },
 
     async updateNote(id: string, content: string, created_at?: string) {
+        // Update note WITHOUT re-ingestion  
         const response = await axios.put(`${API_BASE_URL}/notes/${id}`, { content, created_at });
+        return response.data;
+    },
+
+    async ingestNote(id: string) {
+        // Trigger ingestion for an existing note (POST /api/v1/notes/{id}/ingest)
+        const response = await axios.post(`${API_BASE_URL}/notes/${id}/ingest`);
         return response.data;
     },
 

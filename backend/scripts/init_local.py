@@ -121,7 +121,7 @@ def init_neo4j():
         print(f"   (No old index to drop: {e})")
 
     # Create vector index with configured dimensions
-    print(f"🔄 Creating {settings.EMBEDDING_DIMENSIONS}-dim Vector Index...")
+    print(f"🔄 Creating {settings.EMBEDDING_DIMENSIONS}-dim Vector Index for Notes...")
     try:
         query_index = f"""
         CREATE VECTOR INDEX note_vector_index IF NOT EXISTS
@@ -134,10 +134,36 @@ def init_neo4j():
         """
         graph_service.execute_query(query_index)
         print(
-            f"✅ Vector Index created with {settings.EMBEDDING_DIMENSIONS} dimensions."
+            f"✅ Note Vector Index created with {settings.EMBEDDING_DIMENSIONS} dimensions."
         )
     except Exception as e:
-        print(f"❌ Vector Index creation failed: {e}")
+        print(f"❌ Note Vector Index creation failed: {e}")
+        raise
+
+    # Create unified knowledge graph vector index for Concepts, Entities, Tasks, Personas, References
+    print(f"🔄 Creating Unified Knowledge Graph Vector Index...")
+    try:
+        # Drop old index if exists
+        try:
+            graph_service.execute_query("DROP INDEX distilled_knowledge_index IF EXISTS")
+        except Exception:
+            pass
+
+        query_knowledge_index = f"""
+        CREATE VECTOR INDEX distilled_knowledge_index IF NOT EXISTS
+        FOR (n:Indexable)
+        ON (n.embedding)
+        OPTIONS {{indexConfig: {{
+         `vector.dimensions`: {settings.EMBEDDING_DIMENSIONS},
+         `vector.similarity_function`: 'cosine'
+        }}}}
+        """
+        graph_service.execute_query(query_knowledge_index)
+        print(
+            f"✅ Knowledge Graph Vector Index created for :Indexable nodes (Concept, Entity, Task, Persona, Reference)."
+        )
+    except Exception as e:
+        print(f"❌ Knowledge Graph Vector Index creation failed: {e}")
         raise
 
 

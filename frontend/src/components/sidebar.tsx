@@ -3,14 +3,15 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { Home, MessageSquare, FileText, Network } from "lucide-react";
+import { Home, MessageSquare, FileText, Network, Box } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navigation = [
   { name: "Home", href: "/", icon: Home },
   { name: "Chat", href: "/chat", icon: MessageSquare },
   { name: "Notes", href: "/notes", icon: FileText },
-  { name: "Graph", href: "/graph", icon: Network },
+  { name: "Graph 2D", href: "/graph", icon: Network },
+  { name: "Graph 3D", href: "/graph-3d", icon: Box },
 ];
 
 export function Sidebar() {

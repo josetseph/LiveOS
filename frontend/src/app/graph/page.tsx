@@ -135,6 +135,12 @@ export default function GraphPage() {
             <div className="rounded-md border border-purple-500/20 bg-purple-500/10 px-2 py-1 text-[10px] font-semibold text-purple-400">
               Professional
             </div>
+            <div className="rounded-md border border-pink-500/20 bg-pink-500/10 px-2 py-1 text-[10px] font-semibold text-pink-400">
+              Creative
+            </div>
+            <div className="rounded-md border border-indigo-600/20 bg-indigo-600/10 px-2 py-1 text-[10px] font-semibold text-indigo-400">
+              Dreams
+            </div>
           </div>
         </div>
         <div className="mt-3 flex items-center justify-center gap-2 border-t border-white/10 pt-3 text-[10px] text-zinc-600">
