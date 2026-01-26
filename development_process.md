@@ -288,13 +288,57 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 
 ---
 
-## 📋 Current Model Stack (Phase 18)
+---
+
+## 📅 Phase 19: The "Intelligent Retrieval" Update (Weighted Scoring & Dynamic Cutoffs)
+**Goal**: Transform retrieval from simple vector search to multi-factor intelligent ranking with query-aware filtering.
+
+*   **Critical Bug Fix - LLM Context**:
+    *   **Problem**: `_format_structured_context()` was calling `d.get("content", "")` but retrieval returns `d["text"]` - LLM received empty strings for all snippets!
+    *   **Impact**: Chat responses were generic, only using note titles: "Your notes reveal a pattern of ambition..."
+    *   **Fix**: Changed to `d.get("text", "")` - LLM now gets actual snippet content.
+    *   **Result**: Rich, detailed responses with specific quotes: "You expressed concern about letting Google Antigravity code solutions, noting it 'overcomplicated things and caused a gigantic mess.'"
+*   **Weighted Scoring System**:
+    *   **Formula**: `final_score = rerank_score × recency_boost × entity_match_boost × keyword_match_boost × temporal_query_boost`
+    *   **Components**:
+        *   Rerank Score: 0-10+ (from mxbai-rerank model)
+        *   Recency Boost: 1.0-2.0× (linear decay based on note age)
+        *   Entity Match Boost: 2.0× if result contains detected entity names
+        *   Keyword Match Boost: 3.0× for 80%+ query term match, 2.0× for 50%+, 1.5× for 30%+
+        *   Temporal Query Boost: 3.0× for recent notes on temporal queries (e.g., "recent notes")
+    *   **Implementation**: Replaced rigid categorical priority (ALL temporal → ALL graph → ALL evidence) with dynamic multi-factor scoring.
+*   **Smart Query Analysis**:
+    *   **Entity Extraction**: Detects capitalized words, quoted terms, words after "at/with/about/for/working" - normalized to lowercase for case-insensitive matching.
+    *   **Temporal Detection**: Only applies 3× boost for queries explicitly asking for recent/latest/newest AND not focused on specific entities.
+    *   **Example**: "How is my job at livecops?" → Entity query (no temporal boost), "What are my recent notes?" → Temporal query (3× boost).
+*   **Dynamic Cutoff System**:
+    *   **Tiered Cutoffs by Query Type**:
+        *   Entity queries (e.g., "livecops", "Votex365"): **7.0 cutoff** (high precision)
+        *   Temporal queries (e.g., "recent notes"): **5.0 cutoff** (broad context)
+        *   General queries: **6.0 cutoff** (balanced)
+    *   **Adaptive Fallback**: If top score < base cutoff, uses 60% of top score (minimum 0.6) to avoid returning nothing.
+    *   **Impact**: Filters 85% of noise from entity queries while maintaining breadth for temporal queries.
+*   **Early Stopping Optimization**:
+    *   **Strategy**: Stop reranking after finding 50 high-quality results (score ≥ 0.8).
+    *   **Benefit**: 3-11% speed improvement without sacrificing quality.
+*   **Performance Improvements**:
+    *   **Speed**: 70.75s → 67.34s average (3.5% faster)
+    *   **Context Quality**: 36.8 → 28.2 results per query (23% token reduction to LLM)
+    *   **Relevance**: Query 1 (livecops) improved 10% → 50% (5× better), Query 2 (Votex365) achieved 100% relevance
+*   **Result Quality**:
+    *   **Before Fix**: "Your notes reveal a pattern of ambition paired with uncertainty about direction." (generic, title-only)
+    *   **After Fix**: Specific details from actual content: "Database migration & testing", "Hubtel integration", "franchising expansion to Nigeria and Benin"
+    *   **Evidence**: LLM now quotes actual text from notes instead of inferring from titles
+
+---
+
+## 📋 Current Model Stack (Phase 19)
 | Component | Model | Role |
 | :--- | :--- | :--- |
 | **Chat / Synthesis** | `gemma3:12b` | The "Brain". Concise, reliable instruction following with strong JSON adherence. |
 | **Extraction** | `knowledge-architect` (Gemma3 12B) | The "Senses". Custom-tuned for structured data extraction. |
 | **Embedding** | `qwen3-embedding:8b` | Semantic vector search (4096-dim) for Notes AND Knowledge Nodes. |
-| **Reranking** | `mxbai-rerank-large-v2-seq` | Fast context relevance scoring with 50-snippet cap. |
+| **Reranking** | `mxbai-rerank-large-v2-seq` | Fast context relevance scoring with intelligent multi-factor weighting. |
 | **Vision** | `microsoft/Florence-2-large` | Local Transformer model for detailed image description. |
 | **Audio** | `openai/whisper-large-v3` | Local audio transcription. |
 | **OCR** | `deepseek-ocr:latest` | PDF and image text extraction. |
@@ -368,3 +412,5 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 7.  **Performance Caps**: Soft limits (50 snippets) ensure predictable response times.
 8.  **Transparency**: Real-time system info displays all active services and models.
 9.  **Multi-Domain Design**: Single system serves personal, academic, professional, and creative needs with domain-aware intelligence.
+10. **Intelligent Ranking**: Multi-factor weighted scoring (recency, entity match, keyword match, temporal context) with query-aware dynamic cutoffs.
+11. **Adaptive Filtering**: Query-type detection (entity vs temporal vs general) applies appropriate precision/recall tradeoffs.

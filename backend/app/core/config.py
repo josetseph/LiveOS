@@ -16,11 +16,11 @@ class Settings(BaseSettings):
 
     # LLM (Local)
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    MODEL_EXTRACTION: str = "gemma3:4b"
-    MODEL_ARCHITECT: str = "gemma3:4b"
-    MODEL_SUMMARIZATION: str = "gemma3:4b"
-    MODEL_BRAIN: str = "gemma3:4b"
-    MODEL_REASONING: str = "gemma3:4b"
+    MODEL_EXTRACTION: str = "gemma3:27b-cloud"
+    MODEL_ARCHITECT: str = "gemma3:27b-cloud"
+    MODEL_SUMMARIZATION: str = "gemma3:27b-cloud"
+    MODEL_BRAIN: str = "gemma3:27b-cloud"
+    MODEL_REASONING: str = "gemma3:27b-cloud"
     MODEL_EMBEDDING: str = "qwen3-embedding:0.6b"
     EMBEDDING_DIMENSIONS: int = 1024
     MODEL_VISION: str = "deepseek-ocr:latest"

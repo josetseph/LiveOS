@@ -31,6 +31,27 @@ entity_lock_manager = EntityLockManager()
 
 
 class IngestionWorkflow:
+    async def _update_note_domain_postgres(self, note_id: str, domain: str):
+        """
+        Syncs the extracted domain to Postgres.
+        """
+        from app.core.database import AsyncSessionLocal
+        from app.models.note import Note
+        from sqlalchemy import update
+
+        async with AsyncSessionLocal() as session:
+            try:
+                await session.execute(
+                    update(Note).where(Note.id == note_id).values(domain=domain)
+                )
+                await session.commit()
+                logger.info(
+                    f"[Ingestion] Updated Postgres Domain for Note {note_id}: '{domain}'"
+                )
+            except Exception as e:
+                logger.error(f"Error updating Postgres domain: {e}")
+                raise e
+
     async def process_note(self, note_input: NoteInput, note_id: str = None):
         if not note_id:
             note_id = str(uuid.uuid4())
@@ -342,24 +363,22 @@ class IngestionWorkflow:
             MERGE (n:Note {id: $note_id})
             WITH n
             UNWIND $data AS item
-            // Create Task with 'name' for generic visualization fallback
+            // Create Task with unique 'name' (description_uuid format)
             CREATE (t:Task:Indexable {id: item.task_id, description: item.desc, name: item.name, status: item.status, due_date: item.due_date, created_at: $created_at, embedding: item.embedding})
             MERGE (n)-[r:PRODUCES_TASK]->(t)
             SET r.created_at = $created_at,
                 r.valid_from = $created_at,
                 r.status = 'active'
             """
+            # Generate unique task names using validation utility
+            from app.utils.data_validation import generate_unique_task_name
+
             task_data = [
-                # Truncate description for 'name' visualization (50 chars)
                 {
                     "task_id": str(uuid.uuid4()),
                     "desc": t.description,
-                    "name": (
-                        (t.description[:47] + "...")
-                        if len(t.description) > 50
-                        else t.description
-                    ),
-                    "status": t.status,
+                    "name": generate_unique_task_name(t.description, str(uuid.uuid4())),
+                    "status": t.status,  # Already standardized in extraction_node
                     "due_date": t.due_date,
                     "embedding": task_embeddings[i],
                 }

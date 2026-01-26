@@ -31,7 +31,7 @@ class Concept(BaseModel):
 
 class Task(BaseModel):
     description: str = ""
-    status: str = "Pending"
+    status: str = "Todo"  # Standardized default (was "Pending")
     due_date: Optional[str] = None
 
     @field_validator("*", mode="before")
@@ -39,7 +39,7 @@ class Task(BaseModel):
     def handle_none(cls, v: Any, info) -> Any:
         if v is None:
             if info.field_name == "status":
-                return "Pending"
+                return "Todo"  # Use standardized default
             return None if info.field_name == "due_date" else ""
         return v
 

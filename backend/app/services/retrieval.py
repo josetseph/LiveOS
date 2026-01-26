@@ -91,6 +91,8 @@ class RetrievalService:
         """
         Reranks a list of documents based on relevance to the query.
         Returns pairs of (document, score), sorted by score desc.
+
+        Memory-optimized for MPS backend with aggressive batching and cleanup.
         """
         if not documents:
             return []
@@ -99,38 +101,84 @@ class RetrievalService:
             # Just return documents with score 0
             return [(doc, 0.0) for doc in documents]
 
-        try:
-            # UPGRADE: Added batch_size=5 to prevent memory buffer errors
-            # This ensures the GPU processes snippets in manageable chunks.
-            results = self.reranker.rank(query=query, docs=documents, batch_size=5)
+        # Hard limit to prevent extreme memory usage (Increased for Snippet Search)
+        if len(documents) > 250:
+            logger.warning(
+                f"Reranker input capped from {len(documents)} to 250 snippets for memory safety"
+            )
+            documents = documents[:250]
 
-            # Convert to list of (doc, score)
-            # results is iteratable of Result(doc_id, text, score, rank)
+        try:
+            results = self.reranker.rank(query=query, docs=documents, batch_size=5)
             ranked_pairs = [(res.text, res.score) for res in results]
+
+            # Clear MPS cache after successful batch
+            self._clear_mps_cache()
             return ranked_pairs
 
         except Exception as e:
-            logger.warning(f"Reranking batch failed (likely VRAM pressure): {e}")
-            logger.info("Falling back to sequential processing (Slow Path)")
+            logger.warning(f"Reranking batch failed (VRAM pressure): {e}")
+            logger.info("Falling back to micro-batches (batch_size=1)")
+
+            # Clear cache before fallback
+            self._clear_mps_cache()
+
             try:
-                # Fallback: Process one by one
+                # Ultra-conservative fallback
                 results = self.reranker.rank(query=query, docs=documents, batch_size=1)
                 ranked_pairs = [(res.text, res.score) for res in results]
+                self._clear_mps_cache()
                 return ranked_pairs
+
             except Exception as e2:
-                logger.error(f"Reranking error (Single): {e2}")
+                logger.error(f"Reranking failed even with batch_size=1: {e2}")
+                logger.warning("Returning documents with neutral scores (no reranking)")
                 return [(doc, 0.0) for doc in documents]
 
-    async def hybrid_search(self, query: str, top_k: int = 50) -> List[str]:
+    def _clear_mps_cache(self):
+        """Clear MPS memory cache to prevent fragmentation."""
+        try:
+            import torch
+
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        except Exception:
+            pass  # Silent fail if torch not available or MPS not supported
+
+    def _chunk_text(
+        self, text: str, chunk_size: int = 400, overlap: int = 100
+    ) -> List[str]:
         """
-        Graph-First Hybrid Retrieval with 4-Phase Architecture:
+        Split text into overlapping chunks for granular retrieval.
+        Using character-based windowing for simplicity.
+        """
+        if not text:
+            return []
+        if len(text) <= chunk_size:
+            return [text]
 
-        Phase 1: Temporal Anchor - Get 5 most recent notes (Short-Term Memory)
-        Phase 2: Graph Consensus - Search distilled knowledge nodes (Long-Term Wisdom)
-        Phase 3: Grounding - Fetch source notes from graph nodes (Evidence)
-        Phase 4: Semantic Fallback - Traditional vector search on notes (Coverage)
+        chunks = []
+        for i in range(0, len(text), chunk_size - overlap):
+            chunk = text[i : i + chunk_size]
+            if len(chunk) > 50:  # Ignore tiny scraps
+                chunks.append(chunk)
+            if i + chunk_size >= len(text):
+                break
+        return chunks
 
-        Then merge, deduplicate, rerank with domain + recency boosts.
+    async def hybrid_search(self, query: str, top_k: int = 25) -> List[dict]:
+        """
+        Semantic Snippet Retrieval Pipeline with Weighted Scoring:
+        1. Fetch Graph Nodes (The Mind)
+        2. Fetch Extended Recent Notes (The Anchor) - e.g., last 20
+        3. Fetch Linked Evidence Notes (The Body)
+        4. Chunk ALL Note content into Snippets.
+        5. Rerank EVERYTHING (Nodes + Snippets).
+        6. Filter by Score > 0.6 (lowered threshold).
+        7. Apply Weighted Scoring:
+           - Base rerank score × recency boost × entity match boost
+           - Sort by final weighted score (not rigid categories)
+           - Temporal queries get extreme priority; entity queries get semantic priority
         """
         import time
         from app.services.embedding import embedding_service
@@ -139,336 +187,250 @@ class RetrievalService:
         from app.models.note import Note
         from sqlalchemy import select
 
-        logger.info(f"  [Retrieval] Graph-First Hybrid Search for: '{query}'")
+        logger.info(f"  [Retrieval] Semantic Snippet Search for: '{query}'")
         t_start = time.perf_counter()
 
-        # Check if this is a temporal query (recent/latest/newest)
-        if self._is_temporal_query(query):
-            logger.info(
-                "  [Retrieval] Detected TEMPORAL query - using timestamp-based retrieval"
-            )
-            return await self._temporal_search(query, top_k=min(top_k, 10))
+        # Detect query characteristics
+        is_temporal_query = self._is_temporal_query(query)
+        query_entities = self._extract_query_entities(query)
+        logger.info(
+            f"  [Retrieval] Query Analysis - Temporal: {is_temporal_query}, Entities: {query_entities}"
+        )
 
-        # Generate query embedding once (used in Phases 2 & 4)
+        # Generate query embedding
         full_vector = embedding_service.embed_query(query)
-        t_embed = time.perf_counter()
-        logger.info(f"  [Retrieval] Embedding took: {t_embed - t_start:.4f}s")
 
-        # Detect Query Domain for boosting
-        query_domain = self._detect_query_domain(query)
-        logger.info(f"  [Retrieval] Detected Query Domain: {query_domain}")
+        # ============ FETCH CANDIDATES ============
 
-        all_note_ids = set()
-        all_snippets = []
-        note_phase_map = (
-            {}
-        )  # Track which phase each note came from for priority scoring
-
-        # ============ PHASE 1: TEMPORAL ANCHOR (Short-Term Memory) ============
-        logger.info("  [Phase 1] Fetching Temporal Anchors (10 most recent notes)...")
-        temporal_notes = graph_service.get_recent_notes(limit=10)
-        temporal_ids = [n["id"] for n in temporal_notes]
-        all_note_ids.update(temporal_ids)
-        for nid in temporal_ids:
-            note_phase_map[nid] = "temporal"
-
-        t_temporal = time.perf_counter()
-        logger.info(
-            f"  [Phase 1] Temporal Anchor: {len(temporal_ids)} notes in {t_temporal - t_embed:.4f}s"
-        )
-
-        # ============ PHASE 2: GRAPH CONSENSUS (Long-Term Wisdom) ============
-        logger.info("  [Phase 2] Searching Knowledge Graph (Distilled Summaries)...")
+        # 1. Graph Nodes
         graph_nodes = graph_service.search_knowledge_graph(
-            full_vector, top_k=25, min_score=0.6
+            full_vector, top_k=20, min_score=0.6
         )
 
-        t_graph = time.perf_counter()
-        logger.info(
-            f"  [Phase 2] Graph Search: {len(graph_nodes)} knowledge nodes in {t_graph - t_temporal:.4f}s"
-        )
+        # 2. Recent Notes (Expanded Window)
+        recent_notes_meta = graph_service.get_recent_notes(limit=20)
+        recent_note_ids = {n["id"] for n in recent_notes_meta}
 
-        # Extract graph snippets (consensus summaries)
-        for node in graph_nodes:
-            node_labels = node.get("labels", [])
-            # Filter out :Indexable label to get actual type
-            node_type = next(
-                (label for label in node_labels if label != "Indexable"), "Unknown"
+        # 3. Linked Evidence
+        node_names = [n["name"] for n in graph_nodes]
+        evidence_note_ids = set()
+        if node_names:
+            evidence_results = graph_service.get_linked_evidence(
+                node_names, limit_per_node=3
             )
+            for row in evidence_results:
+                for note in row.get("evidence", []):
+                    evidence_note_ids.add(note["id"])
 
-            # Get the appropriate text based on node type
-            if "Concept" in node_labels and node.get("summary"):
-                text = f"[Concept: {node['name']}]: {node['summary']}"
-                content = node["summary"]
-            elif "Entity" in node_labels and node.get("summary"):
-                text = f"[Entity: {node['name']} ({node.get('entity_type', 'Unknown')})]: {node['summary']}"
-                content = node["summary"]
-            elif "Task" in node_labels:
-                text = f"[Task: {node.get('description', node.get('name', ''))} (Status: {node.get('status', 'Unknown')})]"
-                content = node.get("description", node.get("name", ""))
-            elif "Persona" in node_labels and node.get("summary"):
-                text = f"[Personality: {node.get('trait', node.get('name', ''))}]: {node['summary']}"
-                content = node["summary"]
-            elif "Reference" in node_labels:
-                text = f"[Reference: {node['name']}]: {node.get('summary', node.get('content', ''))}"
-                content = node.get("summary", node.get("content", ""))
-            else:
-                # Fallback for unknown types
-                text = f"[{node_type}: {node.get('name', 'Unknown')}]: {node.get('summary', node.get('description', ''))}"
-                content = node.get("summary", node.get("description", ""))
+        # Combine Note IDs
+        all_note_ids = recent_note_ids.union(evidence_note_ids)
 
-            if content:
-                all_snippets.append(
-                    {
-                        "text": text,
-                        "content": content,
-                        "type": f"graph_{node_type.lower()}",
-                        "score": node.get("score", 0)
-                        * 2.0,  # High priority for consensus knowledge
-                        "domain_boost": 1.0,  # No domain boost for graph nodes (already filtered by relevance)
+        # Fetch Full Content
+        note_content_map = {}
+        note_meta_map = {}
+
+        if all_note_ids:
+            async with AsyncSessionLocal() as session:
+                stmt = select(Note.id, Note.content, Note.title, Note.created_at).where(
+                    Note.id.in_(list(all_note_ids))
+                )
+                result = await session.execute(stmt)
+                for row in result:
+                    note_content_map[row.id] = row.content
+                    note_meta_map[row.id] = {
+                        "title": row.title or "Untitled",
+                        "created_at": (
+                            row.created_at.isoformat() if row.created_at else ""
+                        ),
                     }
-                )
 
-        # ============ PHASE 3: GROUNDING (Fetch Evidence Notes) ============
-        logger.info("  [Phase 3] Grounding - Fetching source notes from graph nodes...")
-        if graph_nodes:
-            node_names = [n["name"] for n in graph_nodes if n.get("name")]
-            node_labels = []
-            for n in graph_nodes:
-                labels = n.get("labels", [])
-                # Get primary label (not Indexable)
-                primary_label = next(
-                    (label for label in labels if label != "Indexable"), "Concept"
-                )
-                node_labels.append(primary_label)
+        # ============ PREPARE CANDIDATES ============
+        candidates = []
 
-            if node_names:
-                source_notes = graph_service.get_node_source_notes(
-                    node_names, node_labels
-                )
-                source_note_ids = [
-                    sn["note_id"] for sn in source_notes if sn.get("note_id")
-                ]
-                # Get unique note IDs (duplicates = same note referenced by multiple graph nodes)
-                unique_source_ids = list(set(source_note_ids))
-                all_note_ids.update(unique_source_ids)
-                for nid in unique_source_ids:
-                    note_phase_map[nid] = "graph_source"
-
-                t_grounding = time.perf_counter()
-                logger.info(
-                    f"  [Phase 3] Grounding: {len(unique_source_ids)} unique source notes ({len(source_note_ids)} total references) in {t_grounding - t_graph:.4f}s"
-                )
-
-        # ============ PHASE 4: SEMANTIC FALLBACK (Safety Net) ============
-        # Only run if Phases 1-3 didn't find enough context
-        t_vector = time.perf_counter()
-        if len(all_note_ids) < 15:
-            logger.info(
-                f"  [Phase 4] SAFETY NET: Only {len(all_note_ids)} notes so far, running vector search fallback..."
-            )
-            vector_results = graph_service.query_vector_with_domain(
-                full_vector, top_k=top_k
-            )
-            vector_note_ids = [res["id"] for res in vector_results]
-            for nid in vector_note_ids:
-                if (
-                    nid not in note_phase_map
-                ):  # Don't override if already found in earlier phase
-                    note_phase_map[nid] = "vector_fallback"
-            all_note_ids.update(vector_note_ids)
-            logger.info(
-                f"  [Phase 4] Vector Search: {len(vector_results)} notes in {time.perf_counter() - t_vector:.4f}s"
-            )
-        else:
-            logger.info(
-                f"  [Phase 4] SKIPPED: Already have {len(all_note_ids)} notes from graph-first retrieval"
-            )
-
-        # ============ POSTGRES FETCH (Get Full Content) ============
-        logger.info(
-            f"  [Retrieval] Fetching content for {len(all_note_ids)} unique notes from Postgres..."
-        )
-        note_ids_list = list(all_note_ids)
-
-        db_content_map = {}
-        db_title_map = {}
-        db_created_at_map = {}
-
-        async with AsyncSessionLocal() as session:
-            stmt = select(Note.id, Note.content, Note.title, Note.created_at).where(
-                Note.id.in_(note_ids_list)
-            )
-            result = await session.execute(stmt)
-            rows = result.all()
-            db_content_map = {row.id: row.content for row in rows}
-            db_title_map = {row.id: (row.title or "Untitled Note") for row in rows}
-            db_created_at_map = {row.id: row.created_at.isoformat() for row in rows}
-
-        t_pg = time.perf_counter()
-        logger.info(
-            f"  [Retrieval] Postgres Fetch: {len(db_content_map)} notes in {t_pg - t_vector:.4f}s"
-        )
-
-        # ============ GRAPH CONTEXT ENRICHMENT ============
-        neighborhoods = graph_service.get_note_context(note_ids_list)
-        t_graph_context = time.perf_counter()
-        logger.info(
-            f"  [Retrieval] Graph Context Expansion: {t_graph_context - t_pg:.4f}s"
-        )
-
-        # ============ BUILD NOTE SNIPPETS ============
-        for nid in note_ids_list:
-            content = db_content_map.get(nid)
-            if not content:
-                continue
-
-            title = db_title_map.get(nid, "Untitled Note")
-            created_at = db_created_at_map.get(nid, "")
-
-            # Recency boost
-            recency_boost = (
-                self._calculate_recency_boost(created_at) if created_at else 1.0
-            )
-
-            # Phase priority boost (graph > temporal > vector fallback)
-            phase = note_phase_map.get(nid, "unknown")
-            if phase == "graph_source":
-                phase_boost = 1.5  # Highest - notes that formed graph consensus
-            elif phase == "temporal":
-                phase_boost = 1.2  # Medium - recent context
-            elif phase == "vector_fallback":
-                phase_boost = 0.9  # Lowest - safety net results
-            else:
-                phase_boost = 1.0  # Unknown
-
-            all_snippets.append(
+        # A. Graph Nodes
+        for node in graph_nodes:
+            # Reconstruct text
+            text = f"[{node.get('labels', ['Unknown'])[0]}: {node['name']}]: {node.get('summary') or node.get('description', '')}"
+            candidates.append(
                 {
-                    "text": f"[Note: {title}]: {content}",
-                    "content": content,
-                    "type": "note",
-                    "note_id": nid,
-                    "title": title,
-                    "recency_boost": recency_boost,
-                    "phase_boost": phase_boost,
-                    "created_at": created_at,
+                    "text": text,
+                    "type": "graph_consensus",
+                    "original_obj": node,
+                    "is_recent": False,
                 }
             )
 
-        # ============ ADD GRAPH NEIGHBORHOOD CONTEXT ============
-        neighborhood_map = {row["note_id"]: row for row in neighborhoods}
-        for nid, row in neighborhood_map.items():
-            n_title = db_title_map.get(nid, "Untitled Note")
+        # B. Note Snippets
+        for nid in all_note_ids:
+            content = note_content_map.get(nid)
+            if not content:
+                continue
 
-            # Concepts
-            for concept in row.get("concepts", []):
-                if concept.get("name") and concept.get("summary"):
-                    all_snippets.append(
-                        {
-                            "text": f"[Theme: {concept['name']}]: {concept['summary']}",
-                            "content": concept["summary"],
-                            "type": "concept",
-                            "note_id": nid,
-                            "title": n_title,
-                        }
-                    )
+            meta = note_meta_map.get(nid, {})
+            title = meta.get("title", "Untitled")
+            created_at = meta.get("created_at", "")
+            is_recent = nid in recent_note_ids
 
-            # Entities
-            for entity in row.get("entities", []):
-                if entity.get("name"):
-                    all_snippets.append(
-                        {
-                            "text": f"[Entity: {entity['name']} ({entity['type']})]",
-                            "content": f"{entity['name']} ({entity['type']})",
-                            "type": "entity",
-                            "note_id": nid,
-                            "title": n_title,
-                        }
-                    )
+            # Chunking
+            chunks = self._chunk_text(content)
+            for chunk in chunks:
+                candidates.append(
+                    {
+                        "text": chunk,
+                        "type": "note",
+                        "title": title,
+                        "created_at": created_at,
+                        "note_id": nid,
+                        "is_recent": is_recent,
+                    }
+                )
 
-            # Tasks
-            for task in row.get("tasks", []):
-                if task.get("description"):
-                    all_snippets.append(
-                        {
-                            "text": f"[Task: {task['description']} (Status: {task['status']})]",
-                            "content": task["description"],
-                            "type": "task",
-                            "note_id": nid,
-                            "title": n_title,
-                        }
-                    )
-
-            # Persona traits
-            for persona in row.get("persona_traits", []):
-                if persona.get("trait"):
-                    all_snippets.append(
-                        {
-                            "text": f"[Persona: {persona['trait']}] Evidence: \"{persona.get('quote', '')}\"",
-                            "content": f"{persona['trait']}: {persona.get('quote', '')}",
-                            "type": "persona_trait",
-                            "note_id": nid,
-                            "title": n_title,
-                        }
-                    )
+        logger.info(
+            f"  [Retrieval] Reranking {len(candidates)} candidates (Nodes + Snippets)..."
+        )
 
         # ============ RERANKING ============
-        if not all_snippets:
+        if not candidates:
             return []
 
-        # Soft cap for reranker performance
-        if len(all_snippets) > 50:
-            logger.info(
-                f"  [Retrieval] Soft-capping from {len(all_snippets)} to 50 snippets for reranker"
-            )
-            # Sort by pre-computed scores first to keep highest quality
-            all_snippets.sort(key=lambda x: x.get("score", 0), reverse=True)
-            all_snippets = all_snippets[:50]
-
-        doc_texts = [s["text"] for s in all_snippets]
-        logger.info(f"  [Retrieval] Reranking {len(doc_texts)} snippets...")
-
-        t_pre_rank = time.perf_counter()
+        candidate_texts = [c["text"] for c in candidates]
 
         # Off-thread reranking
         import asyncio
 
         loop = asyncio.get_running_loop()
-        ranked_pairs = await loop.run_in_executor(None, self.rerank, query, doc_texts)
+        ranked_pairs = await loop.run_in_executor(
+            None, self.rerank, query, candidate_texts
+        )
 
-        t_rank = time.perf_counter()
-        logger.info(f"  [Retrieval] Reranking took: {t_rank - t_pre_rank:.4f}s")
+        # Map back to objects
+        # Note: ranked_pairs is list of (text, score)
+        # We need to efficienty lookup. Text usually unique enough, but let's be safe.
+        # Actually, since we generated the text list from candidates, we can just use a dict mapping text -> list[candidate]
+        # to handle duplicates (unlikely to have exact duplicate chunks from different notes, but possible).
 
-        # ============ FINAL SCORING & RANKING ============
-        final_docs = []
-        snippet_map = {s["text"]: s for s in all_snippets}
+        text_to_candidates = {}
+        for c in candidates:
+            t = c["text"]
+            if t not in text_to_candidates:
+                text_to_candidates[t] = []
+            text_to_candidates[t].append(c)
 
-        for text, rerank_score in ranked_pairs:
-            if text in snippet_map:
-                s = snippet_map[text].copy()
+        # ============ WEIGHTED SCORING ============
+        all_results = []
+        processed_candidates_set = set()
 
-                # Get all boost factors
-                recency_boost = s.get("recency_boost", 1.0)
-                phase_boost = s.get("phase_boost", 1.0)
-                pre_score = s.get("score", 0)
+        # Lower threshold for better recall
+        score_threshold = 0.6
 
-                # If snippet already has a score (from Phase 2 graph consensus), use it
-                if pre_score > 0:
-                    # Graph consensus snippets get priority
-                    s["score"] = pre_score * rerank_score
-                else:
-                    # Notes get boost calculation: Recency × Phase Priority
-                    s["score"] = rerank_score * recency_boost * phase_boost
+        # Early stopping: stop after finding N high-quality results
+        high_quality_threshold = 0.8
+        high_quality_count = 0
+        early_stop_target = 50
 
-                final_docs.append(s)
+        for text, score in ranked_pairs:
+            # EARLY STOPPING: If we have enough high-quality results, stop reranking
+            if high_quality_count >= early_stop_target:
+                logger.info(
+                    f"  [Retrieval] Early stopping: Found {high_quality_count} high-quality results"
+                )
+                break
 
-        # Sort by final boosted score
-        final_docs.sort(key=lambda x: x.get("score", 0), reverse=True)
+            # SEMANTIC GATEKEEPER: Score > 0.6 (lowered from 0.75)
+            if score < score_threshold:
+                continue
 
-        logger.info(f"  [Retrieval] Total time: {time.perf_counter() - t_start:.4f}s")
+            matched_cands = text_to_candidates.get(text, [])
+            for cand in matched_cands:
+                cand_id = id(cand)
+                if cand_id in processed_candidates_set:
+                    continue
+                processed_candidates_set.add(cand_id)
 
-        # Return top 10
-        return final_docs[:10]
+                # Attach base rerank score
+                cand["rerank_score"] = score
+                cand["score"] = score  # Keep for backward compatibility
+
+                # Calculate weighted final score
+                final_score = score
+
+                # 1. Recency Boost (1.0 - 2.0x for recent notes)
+                recency_boost = 1.0
+                if cand.get("created_at"):
+                    recency_boost = self._calculate_recency_boost(cand["created_at"])
+                    final_score *= recency_boost
+
+                # 2. Entity Match Boost (2.0x if result mentions query entities)
+                entity_boost = 1.0
+                if query_entities:
+                    text_lower = cand["text"].lower()
+                    if any(entity.lower() in text_lower for entity in query_entities):
+                        entity_boost = 2.0
+                        final_score *= entity_boost
+
+                # 3. Keyword/Exact Match Boost (3.0x if exact query terms appear)
+                keyword_boost = 1.0
+                keyword_boost = self._calculate_keyword_boost(query, cand["text"])
+                if keyword_boost > 1.0:
+                    final_score *= keyword_boost
+
+                # 4. Temporal Query Extreme Boost (3.0x for recent notes on temporal queries)
+                temporal_boost = 1.0
+                if is_temporal_query and cand.get("is_recent", False):
+                    temporal_boost = 3.0
+                    final_score *= temporal_boost
+
+                # Store all boost factors for debugging
+                cand["final_score"] = final_score
+                cand["boosts"] = {
+                    "recency": recency_boost,
+                    "entity_match": entity_boost,
+                    "keyword_match": keyword_boost,
+                    "temporal_query": temporal_boost,
+                }
+
+                all_results.append(cand)
+
+                # Track high-quality results for early stopping
+                if score >= high_quality_threshold:
+                    high_quality_count += 1
+
+        logger.info(
+            f"  [Retrieval] Filtered > {score_threshold}: {len(all_results)} total results"
+        )
+
+        # ============ FINAL RANKING ============
+        # Sort by final weighted score (not rigid categories)
+        all_results.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+
+        # Apply dynamic cutoff to filter low-quality results before feeding to LLM
+        cutoff_score = self._get_cutoff_score(
+            query, is_temporal_query, query_entities, all_results
+        )
+        filtered_results = [
+            r for r in all_results if r.get("final_score", 0) >= cutoff_score
+        ]
+
+        logger.info(
+            f"  [Retrieval] Applied cutoff {cutoff_score:.2f}: {len(all_results)} → {len(filtered_results)} results"
+        )
+
+        # Apply diversity constraint: limit snippets per note in top results
+        final_list = self._apply_diversity_constraint(filtered_results, max_per_note=3)
+
+        # Log Top Results with detailed scoring
+        logger.info(f"  [Retrieval] Final Selection (Total {len(final_list)}):")
+        for i, doc in enumerate(final_list[:20]):
+            display_text = doc["text"][:80].replace("\n", " ")
+            boosts = doc.get("boosts", {})
+            logger.info(
+                f"    {i+1}. [Score: {doc.get('final_score', 0):.4f}] (Rerank: {doc.get('rerank_score', 0):.2f} × R:{boosts.get('recency', 1.0):.2f} × E:{boosts.get('entity_match', 1.0):.1f} × K:{boosts.get('keyword_match', 1.0):.1f} × T:{boosts.get('temporal_query', 1.0):.1f}) {display_text}..."
+            )
+
+        logger.info(
+            f"  [Retrieval] Total Pipeline Time: {time.perf_counter() - t_start:.4f}s"
+        )
+        return final_list
 
     def _calculate_recency_boost(self, created_at_str: str) -> float:
         """
@@ -491,23 +453,258 @@ class RetrievalService:
             logger.warning(f"Failed to parse timestamp '{created_at_str}': {e}")
             return 1.5  # Default fallback
 
+    def _calculate_keyword_boost(self, query: str, text: str) -> float:
+        """
+        Calculate keyword match boost for exact/close matches.
+        Returns 3.0x boost if exact query terms appear in text.
+        Handles case-insensitive matching and word variations.
+        """
+        import re
+
+        # Normalize both query and text
+        query_lower = query.lower()
+        text_lower = text.lower()
+
+        # Remove common stopwords from query to focus on meaningful terms
+        stopwords = {
+            "what",
+            "how",
+            "where",
+            "when",
+            "why",
+            "who",
+            "which",
+            "is",
+            "are",
+            "the",
+            "and",
+            "or",
+            "my",
+            "your",
+            "their",
+            "a",
+            "an",
+            "in",
+            "on",
+            "at",
+        }
+
+        # Extract meaningful words from query (3+ chars, not stopwords)
+        query_words = [w.strip(".,!?;:\"'") for w in query_lower.split()]
+        meaningful_words = [
+            w for w in query_words if len(w) >= 3 and w not in stopwords
+        ]
+
+        if not meaningful_words:
+            return 1.0
+
+        # Count how many meaningful query words appear in text
+        matches = 0
+        for word in meaningful_words:
+            # Use word boundary regex for better matching
+            pattern = rf"\b{re.escape(word)}"
+            if re.search(pattern, text_lower):
+                matches += 1
+
+        # Calculate boost based on match ratio
+        match_ratio = matches / len(meaningful_words)
+
+        # 3.0x boost if 80%+ of query terms match
+        if match_ratio >= 0.8:
+            return 3.0
+        # 2.0x boost if 50%+ match
+        elif match_ratio >= 0.5:
+            return 2.0
+        # 1.5x boost if 30%+ match
+        elif match_ratio >= 0.3:
+            return 1.5
+        else:
+            return 1.0
+
     def _is_temporal_query(self, query: str) -> bool:
         """
-        Detect if query is asking for recent/latest/newest notes.
+        Detect if query is explicitly asking for recent/latest/newest notes.
+        Only returns True for queries that clearly want temporal priority.
         """
         query_lower = query.lower()
         temporal_keywords = [
-            "most recent",
+            "recent",
             "latest",
             "newest",
-            "last note",
-            "recent note",
-            "new note",
+            "last",
+            "new",
             "today",
             "yesterday",
             "this week",
+            "this month",
+            "lately",
+            "currently",
         ]
-        return any(kw in query_lower for kw in temporal_keywords)
+        # Must contain temporal keyword AND not be asking about specific entities
+        has_temporal_keyword = any(kw in query_lower for kw in temporal_keywords)
+
+        # Don't treat as temporal if asking about specific work/projects
+        entity_indicators = ["at", "with", "about", "regarding", "concerning"]
+        has_entity_focus = any(ind in query_lower for ind in entity_indicators)
+
+        # Temporal query = has temporal keyword AND either no entity focus OR explicitly asks "what are my recent..."
+        if has_temporal_keyword:
+            if "what are my recent" in query_lower or "what have i" in query_lower:
+                return True
+            if not has_entity_focus:
+                return True
+
+        return False
+
+    def _get_cutoff_score(
+        self,
+        query: str,
+        is_temporal_query: bool,
+        query_entities: List[str],
+        results: List[dict],
+    ) -> float:
+        """
+        Determine dynamic cutoff score based on query type and result distribution.
+
+        Strategy:
+        - Entity queries: Higher cutoff (7.0) for precision
+        - Temporal queries: Lower cutoff (5.0) for broader context
+        - General queries: Balanced cutoff (6.0)
+        - Adaptive: If top score is low, lower the bar proportionally
+
+        Returns cutoff score (minimum 0.6)
+        """
+        if not results:
+            return 0.6  # Minimum threshold
+
+        top_score = results[0].get("final_score", 0)
+
+        # Tiered cutoffs based on query type
+        if query_entities:
+            # Entity queries: High precision needed
+            base_cutoff = 7.0
+        elif is_temporal_query:
+            # Temporal queries: Broader context is better
+            base_cutoff = 5.0
+        else:
+            # General queries: Balanced approach
+            base_cutoff = 6.0
+
+        # Adaptive: If top score is low, lower the bar to avoid returning nothing
+        if top_score < base_cutoff:
+            adaptive_cutoff = max(0.6, top_score * 0.6)  # 60% of top score, minimum 0.6
+            return adaptive_cutoff
+
+        return base_cutoff
+
+    def _extract_query_entities(self, query: str) -> List[str]:
+        """
+        Extract potential entity names from query for entity-match boosting.
+        Improved heuristic with case-insensitive matching and variation handling.
+        """
+        import re
+
+        entities = []
+
+        # Extract quoted terms
+        quoted = re.findall(r'["\']([^"\'\n]+)["\']', query)
+        entities.extend(quoted)
+
+        # Extract capitalized words (likely proper nouns)
+        # But exclude common words at sentence start
+        words = query.split()
+        common_starts = {
+            "what",
+            "how",
+            "where",
+            "when",
+            "why",
+            "who",
+            "which",
+            "is",
+            "are",
+            "can",
+            "do",
+            "does",
+        }
+
+        for i, word in enumerate(words):
+            # Remove punctuation for checking
+            clean_word = re.sub(r"[^a-zA-Z0-9]", "", word)
+            if clean_word and clean_word[0].isupper():
+                # Skip if it's the first word and a common question starter
+                if i == 0 and clean_word.lower() in common_starts:
+                    continue
+                entities.append(clean_word)
+
+        # Also look for words after "at", "with", "about" as they're likely entities
+        entity_markers = [
+            "at",
+            "with",
+            "about",
+            "for",
+            "regarding",
+            "concerning",
+            "working",
+        ]
+        for marker in entity_markers:
+            pattern = rf"\b{marker}\s+(\w+)"
+            matches = re.findall(pattern, query, re.IGNORECASE)
+            entities.extend([m for m in matches if len(m) > 2])
+
+        # Remove duplicates and common words
+        stopwords = {
+            "the",
+            "and",
+            "or",
+            "but",
+            "my",
+            "your",
+            "their",
+            "this",
+            "that",
+            "these",
+            "those",
+            "work",
+            "job",
+        }
+        entities = list(set([e for e in entities if e.lower() not in stopwords]))
+
+        # Normalize to lowercase for case-insensitive matching later
+        # Store both original and lowercase versions to handle variations
+        normalized_entities = []
+        for e in entities:
+            normalized_entities.append(e.lower())
+
+        return normalized_entities
+
+    def _apply_diversity_constraint(
+        self, results: List[dict], max_per_note: int = 3
+    ) -> List[dict]:
+        """
+        Ensure no single note dominates top results.
+        Limit snippets per note while maintaining score order.
+        """
+        note_counts = {}
+        diverse_results = []
+
+        for result in results:
+            # Graph nodes don't have note_id, always include
+            if result.get("type") == "graph_consensus":
+                diverse_results.append(result)
+                continue
+
+            # For notes, track count per note_id
+            note_id = result.get("note_id")
+            if note_id:
+                count = note_counts.get(note_id, 0)
+                if count < max_per_note:
+                    diverse_results.append(result)
+                    note_counts[note_id] = count + 1
+            else:
+                diverse_results.append(result)
+
+        return diverse_results
 
     def _detect_query_domain(self, query: str) -> str:
         """

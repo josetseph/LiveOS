@@ -193,6 +193,44 @@ class GraphService:
                 fallback_query, {"node_names": node_names, "all_labels": all_labels}
             )
 
+    def get_linked_evidence(
+        self, node_names: list[str], limit_per_node: int = 3
+    ) -> list[dict]:
+        """
+        Fetches the N most recent notes linked to specific graph nodes.
+
+        This method provides semantic traceability by retrieving evidence notes
+        that are directly connected to discovered graph topics, prioritizing
+        recent context to show the user's latest thoughts on each topic.
+
+        Args:
+            node_names: List of graph node names to find linked notes for
+            limit_per_node: Maximum number of recent notes to return per node (default: 3)
+
+        Returns:
+            List of dicts with node_name and evidence (list of note objects with id, content, title, created_at)
+        """
+        query = """
+        UNWIND $node_names as node_name
+        MATCH (n:Indexable {name: node_name})
+        MATCH (note:Note)-[r]-(n)
+        WHERE r.status = 'active' 
+          AND type(r) IN ['MENTIONS', 'CONTRIBUTES_TO', 'PRODUCES_TASK', 'REVEALED_BY']
+        WITH n, note 
+        ORDER BY note.created_at DESC
+        WITH n.name as node_name, 
+             collect(distinct {
+                 id: note.id, 
+                 content: note.content, 
+                 title: note.title, 
+                 created_at: note.created_at
+             })[0..$limit] as evidence
+        RETURN node_name, evidence
+        """
+        return self.execute_query(
+            query, {"node_names": node_names, "limit": limit_per_node}
+        )
+
     def get_full_graph(self) -> dict:
         """
         Fetch all nodes and relationships for graph visualization.

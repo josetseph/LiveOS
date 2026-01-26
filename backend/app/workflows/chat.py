@@ -21,18 +21,18 @@ class ChatWorkflow:
         )
 
         # 2. Synthesis
-        context = "\n\n".join([d["text"] for d in top_docs])  # Extract text field
+        # context = "\n\n".join([d["text"] for d in top_docs])  # DEPRECATED: Now passing structured docs
 
         answer = ""
-        if not context:
+        if not top_docs:
             answer = (
                 "I couldn't find any relevant context in your brain to answer that."
             )
             logger.info("[Chat] No context found. Skipping generation.")
         else:
             t2 = time.perf_counter()
-            # Pass only text context to LLM
-            answer = await llm_service.synthesize(context, user_query)
+            # Pass FULL structured docs to LLM for smart formatting
+            answer = await llm_service.synthesize(top_docs, user_query)
             t3 = time.perf_counter()
             logger.info(f"[Chat] Generation took: {t3 - t2:.4f}s")
 

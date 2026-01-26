@@ -184,10 +184,13 @@ async def extraction_node(state: IngestionState):
     2. ENTITY TYPES: Person, Place, Tool, Organization.
     3. CONCEPT: Abstract themes, topics, or emotional states. EXAMPLES: "Health", "Work", "Productivity", "Stochastic Processes", "Machine Learning".
     4. TASK: Specific actionable goals mentioned.
+       - STATUS: Use ONLY these standardized values: "Todo", "Complete", "In Progress", "Cancelled"
+       - Do NOT use: "done", "pending", "finished", "open", or any other variations
+       - If status is unclear, use "Todo"
     5. PERSONA: Traits about the user's state (for Personal domain only).
     6. REFERENCES: For Academic/Professional domains - extract external citations, quotes, papers, books.
        - type: "Paper", "Book", "Quote", "Video", "Song"
-       - title: Full title of the work
+       - title: REQUIRED - Full title of the work (cannot be empty)
        - content: The actual quote or key excerpt (if applicable)
        - source: Author/Artist/Creator name
     7. CRITICAL: Extract text snippets exactly as they appear. Do NOT wrap values in extra quotes. 
@@ -219,6 +222,11 @@ async def extraction_node(state: IngestionState):
             if c.name
             and c.name.strip().lower() not in ["untitled", "none", "unknown", ""]
         ]
+
+        # VALIDATION: Standardize extracted data to prevent quality issues
+        from app.utils.data_validation import standardize_extraction
+
+        extraction = standardize_extraction(extraction)
 
         logger.info(
             f"Extracted: {len(extraction.entities)} entities, {len(extraction.concepts)} concepts, {len(extraction.references)} references."
@@ -260,19 +268,17 @@ async def storage_node(state: IngestionState):
     logs.append(
         f"[{datetime.now().strftime('%H:%M:%S')}] STORE: Writing to Graph & Postgres..."
     )
+
     import time
 
     t_start = time.perf_counter()
-    logger.info("Storing in Neo4j (Ontology)...")
     note_id = state.get("note_id") or str(uuid.uuid4())
-
-    # Prioritize: 1. Input Created At (from upload/picker), 2. Now
     created_at = state.get("input").created_at or datetime.now().isoformat()
 
-    # We use a simplified internal method for the actual write logic
     from app.workflows.ingestion import ingestion_workflow
 
     try:
+        # 1. Write to Neo4j (The Mind)
         title = await asyncio.to_thread(
             ingestion_workflow._write_ontology,
             note_id,
@@ -282,9 +288,16 @@ async def storage_node(state: IngestionState):
             created_at,
         )
 
-        # Sync Title to Postgres (Async)
+        # 2. Sync to Postgres (The Body)
+        # Sync Title
         if title:
             await ingestion_workflow._update_note_title_postgres(note_id, title)
+
+        # Sync Domain
+        if state["extraction"].domain:
+            await ingestion_workflow._update_note_domain_postgres(
+                note_id, state["extraction"].domain
+            )
 
         t_end = time.perf_counter()
         logger.info(f"  [Perf] Graph Storage took: {t_end - t_start:.4f}s")

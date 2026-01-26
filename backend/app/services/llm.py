@@ -150,31 +150,13 @@ RULES:
         )
         return response.choices[0].message.content
 
-    def generate_title(self, content: str) -> str:
+    def generate_title(self, text: str) -> str:
         """
-        Generates a short, essence-capturing title for a note.
+        Generates a concise 3-5 word title for a note.
         """
-        model = settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_ARCHITECT
-        extra_body = {} if self.is_gemini else {"keep_alive": -1}
+        if not text or not text.strip():
+            return "Untitled Note"
 
-        response = self.chat_client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a title generator. Generate a concise (3-6 words), descriptive title that captures the essence of the text. Do not use quotes.",
-                },
-                {"role": "user", "content": f"Text: {content}\nTitle:"},
-            ],
-            extra_body=extra_body,
-        )
-        return response.choices[0].message.content.strip().replace('"', "")
-
-    def summarize(self, text: str) -> str:
-        """
-        Generates a summary using the 'You' persona.
-        STRICT GROUNDING: No outside info.
-        """
         model = (
             settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_SUMMARIZATION
         )
@@ -185,7 +167,33 @@ RULES:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a personal knowledge assistant. Summarize the user's note based ONLY on the provided text. Do not add outside information. Keep sentences EXTREMELY short (max 15 words) and simple. Use multiple sentences if needed. Address the user as 'You'. Example: 'You went hiking in Yosemite. You felt small connecting to nature.'",
+                    "content": "You are a helpful assistant. Generate a concise, descriptive title (3-6 words) for the provided note content. Do not use quotes.",
+                },
+                {"role": "user", "content": f"Note content:\n{text}\n\nTitle:"},
+            ],
+            extra_body=extra_body,
+        )
+        return response.choices[0].message.content.strip().replace('"', "")
+
+    def summarize(self, text: str) -> str:
+        """
+        Generates a summary using the 'You' persona.
+        STRICT GROUNDING: No outside info.
+        """
+        if not text or not text.strip():
+            return "No content provided."
+
+        model = (
+            settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_SUMMARIZATION
+        )
+        extra_body = {} if self.is_gemini else {"keep_alive": -1}
+
+        response = self.chat_client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a personal knowledge assistant. Summarize the user's note based ONLY on the provided text. Keep sentences EXTREMELY short (max 15 words) and simple. Address the user as 'You'. If the note is just a link (e.g. [[...]]) or very short, simply state what it references. Do NOT ask for more content. Example: 'You referenced a meeting about Ceruba.'",
                 },
                 {"role": "user", "content": f"Note content:\n{text}\n\nSummary:"},
             ],
@@ -193,14 +201,18 @@ RULES:
         )
         return response.choices[0].message.content.strip()
 
-    async def synthesize(self, context: str, query: str) -> str:
+    async def synthesize(self, top_docs: list[dict], query: str) -> str:
         """
         Uses reasoning model for Synthesis with domain-aware prompting.
+        Accepts structured Top Docs (not just string).
         STRICT: No Advice, Only Insights.
         Non-blocking (runs in thread).
         """
         # Detect query domain for tailored system prompt
         query_domain = self._detect_query_domain(query)
+
+        # Build Structured Context
+        structured_context_str = self._format_structured_context(top_docs, query)
 
         # Domain-specific system instructions
         if query_domain == "Academic":
@@ -251,7 +263,7 @@ RULES:
         prompt = f"""
         # SYSTEM INSTRUCTIONS
         You are the User's "Second Brain" and intelligent personal assistant.
-        Your goal is to provide INSIGHTS by linking the provided notes.
+        Your goal is to provide INSIGHTS by linking graph consensus summaries and supporting notes.
         
         {domain_instructions}
         
@@ -277,7 +289,7 @@ RULES:
            - ALLOWED: "Your notes reveal a pattern of ambition paired with uncertainty about direction."
         
         # CONTEXT
-        {context}
+        {structured_context_str}
         
         # USER QUESTION
         {query}
@@ -312,7 +324,7 @@ RULES:
 
     def _detect_query_domain(self, query: str) -> str:
         """
-        Heuristic to detect if query is Academic, Personal, Professional, or Creative.
+        Heuristic to detect if query is Academic, Personal, Professional, Creative, or Dreams.
         Uses same logic as retrieval service for consistency.
         """
         query_lower = query.lower()
@@ -356,7 +368,6 @@ RULES:
             "yesterday",
             "personal",
             "goal",
-            "dream",
             "hope",
             "fear",
             "love",
@@ -398,14 +409,33 @@ RULES:
             "writing",
         ]
 
+        # Dreams keywords
+        dreams_keywords = [
+            "dream",
+            "dreamt",
+            "dreamed",
+            "nightmare",
+            "subconscious",
+            "recurring",
+            "symbol",
+            "sleep",
+            "woke",
+            "vision",
+        ]
+
         academic_score = sum(1 for kw in academic_keywords if kw in query_lower)
         personal_score = sum(1 for kw in personal_keywords if kw in query_lower)
         professional_score = sum(1 for kw in professional_keywords if kw in query_lower)
         creative_score = sum(1 for kw in creative_keywords if kw in query_lower)
+        dreams_score = sum(1 for kw in dreams_keywords if kw in query_lower)
 
         # Return domain with highest score, default to Personal
         max_score = max(
-            academic_score, personal_score, professional_score, creative_score
+            academic_score,
+            personal_score,
+            professional_score,
+            creative_score,
+            dreams_score,
         )
         if max_score == 0:
             return "Personal"  # Default
@@ -416,6 +446,8 @@ RULES:
             return "Professional"
         elif creative_score == max_score:
             return "Creative"
+        elif dreams_score == max_score:
+            return "Dreams"
         else:
             return "Personal"
 
@@ -488,6 +520,94 @@ Double-quote all keys.""",
         except Exception as e:
             logger.error(f"Summary Update Failed: {e}")
             return {"title": entity_name, "summary": existing_summary}
+
+    def _format_structured_context(self, docs: list[dict], query: str) -> str:
+        """
+        Organizes docs into:
+        1. Mind (Concepts/Tasks)
+        2. Evidence (Linked Notes)
+        3. Anchor (Recent Notes)
+
+        Applies Smart Snippet Extraction to notes.
+        """
+        query_terms = set(query.lower().split())
+
+        # 1. Separate by Type
+        mind_nodes = [d for d in docs if d.get("type") == "graph_consensus"]
+        # Recent notes = anchor, older notes = evidence
+        anchor_notes = [
+            d for d in docs if d.get("type") == "note" and d.get("is_recent", False)
+        ]
+        evidence_notes = [
+            d for d in docs if d.get("type") == "note" and not d.get("is_recent", False)
+        ]
+
+        parts = []
+
+        # SECTION 1: THE MIND
+        if mind_nodes:
+            parts.append("### SECTION 1: KNOWLEDGE GRAPH (The Mind)")
+            parts.append("High-level concepts and tasks related to the query:")
+            for d in mind_nodes:
+                parts.append(f"- {d.get('text')}")
+            parts.append("")
+
+        # SECTION 2: EVIDENCE (Linked Details)
+        if evidence_notes:
+            parts.append("### SECTION 2: LINKED EVIDENCE (Specific Details)")
+            parts.append(
+                "Key excerpts from notes directly linked to the above concepts:"
+            )
+            for d in evidence_notes:
+                # Use 'text' field which contains the actual snippet from retrieval
+                snippet = d.get("text", "")
+                if snippet:
+                    parts.append(f"- [From Note: {d.get('title')}]: {snippet}")
+            parts.append("")
+
+        # SECTION 3: ANCHOR (Recent Context)
+        if anchor_notes:
+            parts.append("### SECTION 3: RECENT CONTEXT (The Anchor)")
+            parts.append("Snippets from your most recent notes:")
+            for d in anchor_notes:
+                # Use 'text' field which contains the actual snippet from retrieval
+                snippet = d.get("text", "")
+                if snippet:
+                    parts.append(f"- [From Note: {d.get('title')}]: {snippet}")
+            parts.append("")
+
+        return "\n".join(parts)
+
+    def _extract_relevant_snippet(
+        self, content: str, query_terms: set, window_size: int = 300
+    ) -> str:
+        """
+        Finds the 300-char window with the highest density of query terms.
+        If no terms found, returns the first 300 chars.
+        """
+        if not content:
+            return ""
+
+        content_lower = content.lower()
+        if len(content) <= window_size:
+            return content.replace("\n", " ")
+
+        best_window = content[:window_size]
+        max_score = 0
+
+        # Simple sliding window (step 50)
+        for i in range(0, len(content) - window_size, 50):
+            window = content_lower[i : i + window_size]
+            score = 0
+            for term in query_terms:
+                if term in window:
+                    score += 1
+
+            if score > max_score:
+                max_score = score
+                best_window = content[i : i + window_size]
+
+        return best_window.replace("\n", " ")
 
 
 llm_service = LLMService()

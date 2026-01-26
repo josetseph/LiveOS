@@ -14,7 +14,7 @@ import requests
 import json
 import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Configuration
 API_URL = "http://localhost:8000/api/v1/ingest"
@@ -100,7 +100,7 @@ def send_note(
         return {
             "note_id": "DRY-RUN",
             "status": "would_ingest",
-            "created_at": created_at or datetime.utcnow().isoformat(),
+            "created_at": created_at or datetime.now(timezone.utc).isoformat(),
         }, None
 
     try:
@@ -194,7 +194,7 @@ def save_progress(filename: str, note_id: str):
             {
                 "last_processed_file": filename,
                 "last_note_id": note_id,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             },
             f,
             indent=2,

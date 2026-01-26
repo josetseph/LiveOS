@@ -1,6 +1,6 @@
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -244,7 +244,7 @@ async def create_note(
     """
     note_id = str(uuid.uuid4())
 
-    c_at = datetime.utcnow()
+    c_at = datetime.now(timezone.utc)
     if note_input.created_at:
         try:
             import dateparser
@@ -321,7 +321,7 @@ async def ingest_note(
     note_id = str(uuid.uuid4())
 
     # 1. Save to Postgres
-    c_at = datetime.utcnow()
+    c_at = datetime.now(timezone.utc)
     if note_data.created_at:
         try:
             import dateparser
@@ -431,7 +431,7 @@ async def update_note(
         except:
             pass
 
-    existing_note.updated_at = datetime.utcnow()
+    existing_note.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(existing_note)

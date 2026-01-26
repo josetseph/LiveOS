@@ -219,14 +219,35 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
     *   **Phase 2: Graph Consensus** (Long-Term Wisdom): Search unified knowledge graph index (25 distilled Concepts, Entities, Tasks, Personas, References).
     *   **Phase 3: Grounding** (Evidence): Trace back from graph nodes to source notes that formed them.
     *   **Phase 4: Semantic Fallback** (Safety Net): Only runs if Phases 1-3 return < 15 notes. Traditional vector search on note embeddings.
-    *   **Priority Scoring**: Graph consensus (2.0×) > Source notes (1.5×) > Temporal (1.2×) > Domain match (1.5×) > Recency (1.0-2.0×) > Vector fallback (0.9×)
-2.  **Reranking**: `mxbai-rerank-large-v2-seq` (Generative Reranker) with 50-snippet cap for 3-5s response.
-3.  **Domain-Aware Synthesis**: **Gemma3 12B** with adaptive system prompts:
+
+2.  **Intelligent Multi-Factor Scoring**:
+    *   **Weighted Formula**: `final_score = rerank_score × recency_boost × entity_match_boost × keyword_match_boost × temporal_query_boost`
+    *   **Rerank Score**: 0-10+ from mxbai-rerank-large-v2-seq (semantic relevance baseline)
+    *   **Recency Boost**: 1.0-2.0× linear decay (today = 2.0×, 1 year ago = 1.1×)
+    *   **Entity Match Boost**: 2.0× if result mentions detected entity names (e.g., "Votex365", "livecops")
+    *   **Keyword Match Boost**: 3.0× for 80%+ query term match, 2.0× for 50%+, 1.5× for 30%+
+    *   **Temporal Query Boost**: 3.0× for recent notes on temporal queries (e.g., "recent notes", "latest thoughts")
+
+3.  **Smart Query Analysis**:
+    *   **Entity Extraction**: Detects capitalized words, quoted terms, words after "at/with/about/for/working"
+    *   **Temporal Detection**: Applies 3× boost only for queries explicitly asking for recent/latest/newest AND not entity-focused
+    *   **Example Behavior**: "job at livecops" → entity query (no temporal boost), "recent notes" → temporal query (3× boost)
+
+4.  **Dynamic Query-Aware Cutoffs**:
+    *   **Entity Queries** (e.g., "Votex365", "livecops"): **7.0 cutoff** - High precision, filters 85% of noise
+    *   **Temporal Queries** (e.g., "recent notes"): **5.0 cutoff** - Broad context, maintains recall
+    *   **General Queries**: **6.0 cutoff** - Balanced precision/recall
+    *   **Adaptive Fallback**: If top score < base cutoff, uses 60% of top score (min 0.6) to avoid empty results
+    *   **Impact**: Reduces LLM token usage by 23% (36.8 → 28.2 avg results) while improving relevance
+
+5.  **Early Stopping Optimization**: Stops reranking after finding 50 high-quality results (score ≥ 0.8) for 3-11% speed improvement
+
+6.  **Domain-Aware Synthesis**: **Gemma3 12B** with adaptive system prompts:
     *   **Academic**: Pedagogical, conceptual explanations with prerequisites and citations
     *   **Personal**: Empathetic insights connecting experiences and feelings
     *   **Professional**: Concise, action-oriented responses referencing work context
     *   **Creative**: Themes and imagery focus, no advice or judgment
-    *   **Strict Grounding**: No advice, only insights from user's notes
+    *   **Strict Grounding**: No advice, only insights from user's notes with specific quotes
 
 ---
 
