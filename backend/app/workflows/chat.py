@@ -12,7 +12,7 @@ class ChatWorkflow:
         start_time = time.perf_counter()
         logger.info(f"\n[Chat] Started processing query: '{user_query}'")
 
-        # 1. Hybrid Retrieval
+        # 1. Hybrid Retrieval (includes relationship expansion before reranking)
         t0 = time.perf_counter()
         top_docs = await retrieval_service.hybrid_search(user_query)
         t1 = time.perf_counter()

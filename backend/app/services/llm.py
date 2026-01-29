@@ -6,6 +6,7 @@ from app.core.logging_config import get_component_logger
 import instructor
 from openai import OpenAI
 from pydantic import BaseModel
+from typing import Optional, Type
 
 logger = get_component_logger("LLMService")
 
@@ -17,34 +18,79 @@ class LLMService:
             os.path.join(os.path.dirname(__file__), "../../models")
         )
 
-        # Determine Provider
-        if settings.GEMINI_API_KEY:
-            logger.info(f"Using Gemini Provider (Model: {settings.GEMINI_MODEL})")
-            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-            api_key = settings.GEMINI_API_KEY
-            self.is_gemini = True
-        else:
-            logger.info(f"Using Local Provider (Ollama: {settings.OLLAMA_BASE_URL})")
+        # Determine Primary Provider
+        self.provider = settings.LLM_PROVIDER.lower()
+        self.fallback_provider = settings.LLM_FALLBACK_PROVIDER
+
+        logger.info(f"Primary LLM Provider: {self.provider.upper()}")
+        if self.fallback_provider:
+            logger.info(f"Fallback LLM Provider: {self.fallback_provider.upper()}")
+
+        # Initialize provider-specific clients
+        self._init_clients()
+
+        # Legacy compatibility flags
+        self.is_gemini = self.provider == "gemini"
+
+    def _init_clients(self):
+        """Initialize clients for the configured provider."""
+        if self.provider == "ollama":
+            logger.info(f"Initializing Ollama (URL: {settings.OLLAMA_BASE_URL})")
             base_url = f"{settings.OLLAMA_BASE_URL}/v1"
             api_key = "ollama"
-            self.is_gemini = False
 
-        # 1. Unified Client
-        self.extraction_client = instructor.patch(
-            OpenAI(
-                base_url=base_url,
-                api_key=api_key,
-                timeout=300.0,
-            ),
-            mode=instructor.Mode.MD_JSON,
-        )
+            self.extraction_client = instructor.patch(
+                OpenAI(base_url=base_url, api_key=api_key, timeout=300.0),
+                mode=instructor.Mode.MD_JSON,
+            )
+            self.chat_client = OpenAI(base_url=base_url, api_key=api_key, timeout=300.0)
 
-        # 2. Synthesis Client
-        self.chat_client = OpenAI(
-            base_url=base_url,
-            api_key=api_key,
-            timeout=300.0,
-        )
+        elif self.provider == "openai":
+            if not settings.OPENAI_API_KEY:
+                raise ValueError("OPENAI_API_KEY not set in configuration")
+            logger.info(f"Initializing OpenAI (Model: {settings.OPENAI_MODEL})")
+
+            self.extraction_client = instructor.patch(
+                OpenAI(api_key=settings.OPENAI_API_KEY, timeout=300.0)
+            )
+            self.chat_client = OpenAI(api_key=settings.OPENAI_API_KEY, timeout=300.0)
+
+        elif self.provider == "gemini":
+            if not settings.GEMINI_API_KEY:
+                raise ValueError("GEMINI_API_KEY not set in configuration")
+            logger.info(f"Initializing Gemini (Model: {settings.GEMINI_MODEL})")
+
+            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            self.extraction_client = instructor.patch(
+                OpenAI(
+                    base_url=base_url, api_key=settings.GEMINI_API_KEY, timeout=300.0
+                ),
+                mode=instructor.Mode.MD_JSON,
+            )
+            self.chat_client = OpenAI(
+                base_url=base_url, api_key=settings.GEMINI_API_KEY, timeout=300.0
+            )
+
+        elif self.provider == "anthropic":
+            if not settings.ANTHROPIC_API_KEY:
+                raise ValueError("ANTHROPIC_API_KEY not set in configuration")
+            logger.info(f"Initializing Anthropic (Model: {settings.ANTHROPIC_MODEL})")
+
+            # Anthropic uses instructor for structured outputs (prompt engineering mode)
+            from anthropic import Anthropic
+
+            self.anthropic_client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+            # Create OpenAI-compatible wrapper for backward compatibility
+            # Note: Anthropic doesn't have native structured outputs, so we use instructor
+            self.extraction_client = instructor.from_anthropic(
+                self.anthropic_client,
+                mode=instructor.Mode.ANTHROPIC_JSON,
+            )
+            self.chat_client = self.anthropic_client
+
+        else:
+            raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
     def _clean_json(self, json_str: str) -> str:
         """
@@ -66,76 +112,154 @@ class LLMService:
             return json_str
 
     def extract_structured(
-        self, prompt: str, response_model: type[BaseModel]
-    ) -> BaseModel:
+        self, prompt: str, response_model: Type[BaseModel], temperature: float = 0.1
+    ) -> Optional[BaseModel]:
         """
-        Uses Architect model with Manual Repair.
-        Instructor is bypassed for the outer loop to allow custom string cleanup.
+        Provider-agnostic structured extraction with native schema enforcement.
+        Supports: Ollama, OpenAI, Gemini, Anthropic (with fallback).
         """
-
-        system_msg = """You are a specialized data extraction agent. Output valid JSON (RFC 8259) matching this schema:
-{
-  "summary": "Concise summary of note",
-  "domain": "Academic|Personal|Professional|Creative|Dreams",
-  "entities": [{"name": "string", "type": "Person|Place|Organization|Tool"}],
-  "concepts": ["string"],
-  "tasks": [{"description": "string", "status": "string|null", "due_date": "string|null"}],
-  "persona_traits": [{"trait": "string", "evidence_quote": "string"}],
-  "references": [{"title": "string", "type": "Paper|Book|Quote|Video|Song", "content": "string", "source": "string"}]
-}
-
-RULES:
-1. NO comments.
-2. ALL keys must be double-quoted.
-3. NO "OR" options.
-4. Return ONLY valid JSON found in the schema.
-5. ENGLISH ONLY: Do not use non-English characters."""
-
         try:
-            model = (
-                settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_ARCHITECT
-            )
-            logger.info(f"extract_structured calling model: {model}")
-            extra_body = {} if self.is_gemini else {"keep_alive": -1, "format": "json"}
-
-            # We use the raw client to get the string, ignoring instructor's validation loop
-            response = self.extraction_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": prompt},
-                ],
-                max_retries=1,  # We handle retries or just accept 1st attempt with cleanup
-                extra_body=extra_body,
-            )
-
-            raw_content = response.choices[0].message.content
-            cleaned_content = self._clean_json(raw_content)
-
-            # Manual Validation
-            return response_model.model_validate_json(cleaned_content)
+            if self.provider == "ollama":
+                return self._extract_ollama(prompt, response_model, temperature)
+            elif self.provider == "openai":
+                return self._extract_openai(prompt, response_model, temperature)
+            elif self.provider == "gemini":
+                return self._extract_gemini(prompt, response_model, temperature)
+            elif self.provider == "anthropic":
+                return self._extract_anthropic(prompt, response_model, temperature)
+            else:
+                raise ValueError(f"Unsupported provider: {self.provider}")
 
         except Exception as e:
-            logger.error(f"Extraction Failed: {e}")
-            if "raw_content" in locals():
-                logger.info(f"FAILED RAW CONTENT:\n{raw_content}")
-            if "cleaned_content" in locals():
-                logger.info(f"FAILED JSON (Cleaned):\n{cleaned_content}")
+            logger.error(f"Extraction failed with {self.provider}: {e}")
 
-            # Fallback: Return empty/default if possible or re-raise
-            # For now, we return empty to not crash the pipeline
+            # Try fallback provider if configured
+            if self.fallback_provider:
+                logger.info(f"Attempting fallback to {self.fallback_provider}")
+                try:
+                    original_provider = self.provider
+                    self.provider = self.fallback_provider
+                    self._init_clients()
+                    result = self.extract_structured(
+                        prompt, response_model, temperature
+                    )
+                    # Restore original provider
+                    self.provider = original_provider
+                    self._init_clients()
+                    return result
+                except Exception as fallback_error:
+                    logger.error(f"Fallback extraction failed: {fallback_error}")
+                    # Restore original provider
+                    self.provider = original_provider
+                    self._init_clients()
+
+            # Final fallback: return empty model
             try:
                 return response_model()
-            except:
+            except Exception:
                 return None
+
+    def _extract_ollama(
+        self, prompt: str, response_model: Type[BaseModel], temperature: float
+    ) -> BaseModel:
+        """Ollama extraction with native structured outputs."""
+        model = settings.MODEL_ARCHITECT
+        logger.info(f"[Ollama] Extracting with {model} (schema enforced)")
+
+        extra_body = {
+            "keep_alive": -1,
+            "format": response_model.model_json_schema(),  # Native schema enforcement!
+        }
+
+        response = self.chat_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            extra_body=extra_body,
+            temperature=temperature,
+        )
+
+        return response_model.model_validate_json(response.choices[0].message.content)
+
+    def _extract_openai(
+        self, prompt: str, response_model: Type[BaseModel], temperature: float
+    ) -> BaseModel:
+        """OpenAI extraction with native structured outputs."""
+        model = settings.OPENAI_MODEL
+        logger.info(f"[OpenAI] Extracting with {model} (structured outputs)")
+
+        # OpenAI's beta structured outputs API
+        response = self.chat_client.beta.chat.completions.parse(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format=response_model,
+            temperature=temperature,
+        )
+
+        return response.choices[0].message.parsed  # Already validated!
+
+    def _extract_gemini(
+        self, prompt: str, response_model: Type[BaseModel], temperature: float
+    ) -> BaseModel:
+        """Gemini extraction with JSON schema enforcement."""
+        model = settings.GEMINI_MODEL
+        logger.info(f"[Gemini] Extracting with {model} (schema enforced)")
+
+        # Use instructor for Gemini (works well with their API)
+        response = self.extraction_client.chat.completions.create(
+            model=model,
+            response_model=response_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_retries=2,
+        )
+
+        return response
+
+    def _extract_anthropic(
+        self, prompt: str, response_model: Type[BaseModel], temperature: float
+    ) -> BaseModel:
+        """Anthropic extraction with prompt engineering + validation."""
+        model = settings.ANTHROPIC_MODEL
+        logger.info(f"[Anthropic] Extracting with {model} (prompt-based)")
+
+        # Anthropic doesn't have native schema enforcement, use instructor
+        response = self.extraction_client.messages.create(
+            model=model,
+            max_tokens=4096,
+            temperature=temperature,
+            messages=[{"role": "user", "content": prompt}],
+            response_model=response_model,
+        )
+
+        return response
 
     def reason(self, prompt: str) -> str:
         """
-        Uses the Reasoning Model (phi4-mini-reasoning) for complex logic/refinement.
+        Uses the Reasoning Model for complex logic/refinement.
         Returns raw text (Chain-of-Thought + Answer).
         """
-        model = settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_REASONING
-        extra_body = {} if self.is_gemini else {"keep_alive": -1}
+        # Select reasoning model based on provider
+        if self.provider == "ollama":
+            model = settings.MODEL_REASONING
+            extra_body = {"keep_alive": -1}
+        elif self.provider == "openai":
+            model = settings.OPENAI_MODEL_REASONING  # o1-mini for reasoning
+            extra_body = {}
+        elif self.provider == "gemini":
+            model = settings.GEMINI_MODEL
+            extra_body = {}
+        elif self.provider == "anthropic":
+            model = settings.ANTHROPIC_MODEL
+            # Anthropic uses different API
+            response = self.chat_client.messages.create(
+                model=model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text
+        else:
+            model = settings.MODEL_REASONING
+            extra_body = {}
 
         response = self.chat_client.chat.completions.create(
             model=model,
@@ -157,10 +281,33 @@ RULES:
         if not text or not text.strip():
             return "Untitled Note"
 
-        model = (
-            settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_SUMMARIZATION
-        )
-        extra_body = {} if self.is_gemini else {"keep_alive": -1}
+        # Select model based on provider
+        if self.provider == "ollama":
+            model = settings.MODEL_SUMMARIZATION
+            extra_body = {"keep_alive": -1}
+        elif self.provider == "openai":
+            model = settings.OPENAI_MODEL
+            extra_body = {}
+        elif self.provider == "gemini":
+            model = settings.GEMINI_MODEL
+            extra_body = {}
+        elif self.provider == "anthropic":
+            model = settings.ANTHROPIC_MODEL
+            # Anthropic uses different API
+            response = self.chat_client.messages.create(
+                model=model,
+                max_tokens=100,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"Generate a concise, descriptive title (3-6 words) for this note. Do not use quotes.\n\nNote content:\n{text}\n\nTitle:",
+                    }
+                ],
+            )
+            return response.content[0].text.strip().replace('"', "")
+        else:
+            model = settings.MODEL_SUMMARIZATION
+            extra_body = {}
 
         response = self.chat_client.chat.completions.create(
             model=model,
@@ -175,6 +322,98 @@ RULES:
         )
         return response.choices[0].message.content.strip().replace('"', "")
 
+    def analyze_query(self, query: str) -> dict:
+        """
+        Analyzes user query with structured outputs for better retrieval.
+        Returns intent, entities, temporal info, etc.
+        """
+        from pydantic import Field
+        from typing import Literal, Optional
+
+        class QueryAnalysis(BaseModel):
+            intent: Literal[
+                "search", "summarize", "compare", "explain", "list", "recent"
+            ] = Field(description="Primary intent of the query")
+            is_temporal: bool = Field(
+                description="Whether query asks for recent/latest/newest content"
+            )
+            time_range: Optional[str] = Field(
+                default=None,
+                description="Time range if specified: 'today', 'yesterday', 'last week', 'last month'",
+            )
+            entities: list[str] = Field(
+                default_factory=list,
+                description="Named entities mentioned (people, places, organizations, tools)",
+            )
+            concepts: list[str] = Field(
+                default_factory=list,
+                description="Abstract concepts or topics mentioned",
+            )
+            keywords: list[str] = Field(
+                default_factory=list,
+                description="Important keywords for semantic search",
+            )
+            requires_recent_context: bool = Field(
+                description="Whether answer requires recent notes/events"
+            )
+
+        try:
+            model = (
+                settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_ARCHITECT
+            )
+
+            prompt = f"""Analyze this user query and extract structured information:
+
+Query: "{query}"
+
+Extract:
+- Intent (search, summarize, compare, explain, list, or recent)
+- Whether it's asking for recent/latest/newest content
+- Time range if mentioned
+- Named entities (people, places, organizations, tools)
+- Abstract concepts or topics
+- Important keywords
+- Whether answer requires recent notes/events
+"""
+
+            if self.is_gemini:
+                response = self.extraction_client.chat.completions.create(
+                    model=model,
+                    response_model=QueryAnalysis,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return response.model_dump()
+            else:
+                extra_body = {
+                    "keep_alive": -1,
+                    "format": QueryAnalysis.model_json_schema(),
+                }
+
+                response = self.chat_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    extra_body=extra_body,
+                    temperature=0,  # Deterministic analysis
+                )
+
+                analysis = QueryAnalysis.model_validate_json(
+                    response.choices[0].message.content
+                )
+                return analysis.model_dump()
+
+        except Exception as e:
+            logger.error(f"Query analysis failed: {e}")
+            # Return safe defaults
+            return {
+                "intent": "search",
+                "is_temporal": False,
+                "time_range": None,
+                "entities": [],
+                "concepts": [],
+                "keywords": query.split(),
+                "requires_recent_context": False,
+            }
+
     def summarize(self, text: str) -> str:
         """
         Generates a summary using the 'You' persona.
@@ -183,10 +422,33 @@ RULES:
         if not text or not text.strip():
             return "No content provided."
 
-        model = (
-            settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_SUMMARIZATION
-        )
-        extra_body = {} if self.is_gemini else {"keep_alive": -1}
+        # Select model based on provider
+        if self.provider == "ollama":
+            model = settings.MODEL_SUMMARIZATION
+            extra_body = {"keep_alive": -1}
+        elif self.provider == "openai":
+            model = settings.OPENAI_MODEL
+            extra_body = {}
+        elif self.provider == "gemini":
+            model = settings.GEMINI_MODEL
+            extra_body = {}
+        elif self.provider == "anthropic":
+            model = settings.ANTHROPIC_MODEL
+            # Anthropic uses different API
+            response = self.chat_client.messages.create(
+                model=model,
+                max_tokens=500,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"You are a personal knowledge assistant. Summarize the user's note based ONLY on the provided text. Keep sentences EXTREMELY short (max 15 words) and simple. Address the user as 'You'. If the note is just a link (e.g. [[...]]) or very short, simply state what it references. Do NOT ask for more content. Example: 'You referenced a meeting about Ceruba.'\n\nNote content:\n{text}\n\nSummary:",
+                    }
+                ],
+            )
+            return response.content[0].text.strip()
+        else:
+            model = settings.MODEL_SUMMARIZATION
+            extra_body = {}
 
         response = self.chat_client.chat.completions.create(
             model=model,
@@ -320,7 +582,34 @@ RULES:
         logger.info(f"synthesize calling model: {model}")
 
         response = await loop.run_in_executor(None, _call_model)
+
+        # Handle Anthropic response wrapper
+        if hasattr(response, "__class__") and "ResponseWrapper" in str(
+            response.__class__
+        ):
+            return response.choices[0].message.content
+
         return response.choices[0].message.content
+
+    def _get_model_for_task(self, task: str) -> str:
+        """Get the appropriate model name for a given task based on provider."""
+        if self.provider == "ollama":
+            task_models = {
+                "extraction": settings.MODEL_ARCHITECT,
+                "summarization": settings.MODEL_SUMMARIZATION,
+                "reasoning": settings.MODEL_REASONING,
+                "brain": settings.MODEL_BRAIN,
+            }
+            return task_models.get(task, settings.MODEL_ARCHITECT)
+        elif self.provider == "openai":
+            if task == "reasoning":
+                return settings.OPENAI_MODEL_REASONING
+            return settings.OPENAI_MODEL
+        elif self.provider == "gemini":
+            return settings.GEMINI_MODEL
+        elif self.provider == "anthropic":
+            return settings.ANTHROPIC_MODEL
+        return settings.MODEL_ARCHITECT
 
     def _detect_query_domain(self, query: str) -> str:
         """
@@ -530,8 +819,6 @@ Double-quote all keys.""",
 
         Applies Smart Snippet Extraction to notes.
         """
-        query_terms = set(query.lower().split())
-
         # 1. Separate by Type
         mind_nodes = [d for d in docs if d.get("type") == "graph_consensus"]
         # Recent notes = anchor, older notes = evidence
@@ -549,7 +836,21 @@ Double-quote all keys.""",
             parts.append("### SECTION 1: KNOWLEDGE GRAPH (The Mind)")
             parts.append("High-level concepts and tasks related to the query:")
             for d in mind_nodes:
-                parts.append(f"- {d.get('text')}")
+                node_text = d.get("text")
+                parts.append(f"- {node_text}")
+
+                # Add related nodes if available (from relationship enrichment)
+                related_nodes = d.get("related_nodes", [])
+                if related_nodes:
+                    parts.append("  Related:")
+                    for rn in related_nodes:
+                        rel_path = " → ".join(rn.get("relationship_path", []))
+                        rel_summary = rn.get("summary", "")[
+                            :100
+                        ]  # Truncate to 100 chars
+                        parts.append(
+                            f"    • {rn.get('name')} ({rn.get('label')}) [{rel_path}]: {rel_summary}"
+                        )
             parts.append("")
 
         # SECTION 2: EVIDENCE (Linked Details)

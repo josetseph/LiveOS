@@ -143,7 +143,7 @@ Deploy the entire stack with a single command (requires Ollama running on host).
 2.  **Download Hugging Face Models** (pre-bundled in repo):
     *   **Florence-2-Large** (Vision): [`microsoft/Florence-2-large`](https://huggingface.co/microsoft/Florence-2-large)
     *   **MxBai Reranker** (Context Scoring): [`michaelfeil/mxbai-rerank-large-v2-seq`](https://huggingface.co/michaelfeil/mxbai-rerank-large-v2-seq)
-    *   **Whisper V3** (Audio Transcription): [`openai/whisper-large-v3`](https://huggingface.co/openai/whisper-large-v3)
+    *   **Whisper V3 Turbo** (Audio Transcription): [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo)
     
     These models will need to be downoaded into the `backend/models/` folder and will be copied into the Docker image during build.
 
@@ -192,7 +192,7 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 1.  **Multimedia Processing**:
     *   **Unified Pipeline**: Detects file links `[📎 Filename](URL)` and processes them.
-    *   **Audio**: `.webm`/`.mp3`/`.m4a` are transcribed via **Whisper Large V3** (local). Transcripts sync to Postgres.
+    *   **Audio**: `.webm`/`.mp3`/`.m4a` are transcribed via **Whisper Large V3 Turbo** (local). Transcripts sync to Postgres.
     *   **Images**: Described via **Florence-2-Large** (Local Transformer).
     *   **PDFs**: OCR'd via **DeepSeek OCR** (Ollama).
     *   **Historical Dates**: Backdate notes using the **Date Picker** in the toolbar. The system uses `dateparser` for robust parsing of user-selected dates.
@@ -234,11 +234,12 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
     *   **Example Behavior**: "job at livecops" → entity query (no temporal boost), "recent notes" → temporal query (3× boost)
 
 4.  **Dynamic Query-Aware Cutoffs**:
-    *   **Entity Queries** (e.g., "Votex365", "livecops"): **7.0 cutoff** - High precision, filters 85% of noise
+    *   **Entity Queries** (e.g., "Votex365", "livecops"): **7.0 cutoff** - Aggressive precision filter (typically 2-5 results from 30-40 candidates)
     *   **Temporal Queries** (e.g., "recent notes"): **5.0 cutoff** - Broad context, maintains recall
     *   **General Queries**: **6.0 cutoff** - Balanced precision/recall
     *   **Adaptive Fallback**: If top score < base cutoff, uses 60% of top score (min 0.6) to avoid empty results
-    *   **Impact**: Reduces LLM token usage by 23% (36.8 → 28.2 avg results) while improving relevance
+    *   **Design Philosophy**: Prioritizes precision over recall - system feeds LLM with 2-5 highly relevant snippets rather than 20+ mixed-quality results
+    *   **Impact**: Reduces LLM token usage by 23% (36.8 → 28.2 avg results) while improving relevance. For entity queries, achieves 85-95% noise reduction.
 
 5.  **Early Stopping Optimization**: Stops reranking after finding 50 high-quality results (score ≥ 0.8) for 3-11% speed improvement
 
@@ -261,12 +262,48 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
     *   **Neo4j**: Knowledge Graph & Vectors (Port 7474)
     *   **MinIO**: Local S3-compatible storage (Port 9000/9001)
 *   **LLM Stack** (Ollama):
-    *   **Main LLM**: Gemma3 12B (Extraction, Summarization, Chat)
-    *   **Embedding**: Qwen3 Embedding 8B
-    *   **Reranking**: MxBai Rerank Large V2 (Seq-Cls)
+    *   **Main LLM**: Gemma3 4B (Extraction, Summarization, Chat)
+    *   **Embedding**: Qwen3 Embedding 0.6B (1024-dim)
+    *   **Reranking**: Qwen3 Reranker 0.6B (Seq-Cls)
     *   **Vision**: Florence-2-Large (Transformers)
-    *   **Audio**: Whisper Large V3 (Transformers)
-    *   **OCR**: DeepSeek OCR (Ollama)
+    *   **Audio**: Whisper Large V3 Turbo (Transformers)
+    *   **OCR**: PaddleOCR-VL 0.9B (Ollama) - Optimized for resource efficiency
+
+### Audio Model Selection
+
+**Whisper-Large-V3-Turbo vs Whisper-Large-V3 Testing:**
+
+| Metric | Whisper V3 Turbo | Whisper V3 |
+|--------|-------------------|------------|
+| **Duration (1 min audio)** | **12.17s** | 34.96s |
+| **Speed** | **325 words/min** | 100 words/min |
+| **Accuracy** | High (66 words) | High (58 words) |
+
+**Decision:** Switched to **Whisper Large V3 Turbo** for production.
+- **3× Faster transcription speed** (12s vs 35s)
+- **Higher word recovery** (detected 14% more words in test samples)
+- **Reduced latency** for real-time voice interaction
+
+### OCR Model Selection
+
+**PaddleOCR-VL vs DeepSeek-OCR Testing:**
+
+| Metric | PaddleOCR-VL 0.9B | DeepSeek-OCR Latest |
+|--------|-------------------|---------------------|
+| **Model Size** | 935 MB | 6.7 GB |
+| **Speed (CV)** | 0.48s | 0.01s |
+| **Speed (Book - 300 pages)** | 2.17s | 1.98s |
+| **Quality** | ✅ Identical | ✅ Identical |
+| **Resource Usage** | 🟢 Low VRAM | 🟡 High VRAM |
+
+**Decision:** Using **PaddleOCR-VL** for production due to:
+- **7× smaller model size** (935 MB vs 6.7 GB)
+- **Identical OCR quality** (tested on CV and technical books)
+- **Comparable speed** on multi-page documents (2.17s vs 1.98s)
+- **Resource efficiency** - Critical for local deployment on consumer hardware
+- **Multi-language support** - Better internationalization than DeepSeek-OCR
+
+While DeepSeek-OCR is faster on single pages (0.01s vs 0.48s), the difference becomes negligible on real-world documents with multiple pages. The 7× reduction in model size makes PaddleOCR-VL the optimal choice for LiveOS's local-first architecture.
 
 ---
 
@@ -464,3 +501,91 @@ The backend uses a comprehensive file-based logging system with automatic rotati
 ### Test Results (`findings/`)
 
 Local test results, benchmarks, and system validation reports are stored in the `Findings/` directory. This includes performance metrics, accuracy tests, and experimental results during development.
+
+---
+
+## 📖 Additional Documentation
+
+### Multi-Provider LLM Support
+
+LiveOS supports multiple LLM providers beyond Ollama. See [MULTI_PROVIDER.md](MULTI_PROVIDER.md) for:
+- **Provider comparison** (Ollama, OpenAI, Gemini, Anthropic)
+- **Structured outputs** implementation across providers
+- **Automatic fallback** configuration
+- **Cost optimization** strategies
+- **Migration guides** from single-provider setups
+
+**Quick Start:**
+```bash
+# Switch to OpenAI
+export LLM_PROVIDER=openai
+export OPENAI_API_KEY=sk-proj-...
+export OPENAI_MODEL=gpt-4o-2024-08-06
+
+# With automatic fallback
+export LLM_FALLBACK_PROVIDER=ollama
+```
+
+### Retrieval System Deep Dive
+
+**Key Concepts:**
+- **Neighborhood Summaries**: Each graph node (Concept, Entity, Task) maintains an incrementally updated summary that aggregates information across all notes that mention it
+- **Graph-First Strategy**: Searches distilled knowledge nodes (25 max) before falling back to note-level vector search
+- **Dynamic Cutoffs**: Query-aware filtering (7.0 for entities, 5.0 for temporal, 6.0 general) ensures precision over recall
+- **Multi-Factor Scoring**: Combines rerank score, recency, entity match, keyword match, and temporal boosts
+
+**Testing the System:**
+```bash
+# Test retrieval with specific queries
+cd backend
+python -m pytest tests/test_vector_search.py -v
+
+# Check retrieval logs
+tail -f logs/retrieval.log
+```
+
+See [RETRIEVAL_FAQ.md](backend/RETRIEVAL_FAQ.md) for detailed explanations of:
+- How neighborhood summaries work and update
+- Graph-first retrieval architecture
+- Multi-factor scoring formulas
+- Dynamic cutoff strategies
+- Performance optimization techniques
+
+### Knowledge Graph Relationships
+
+**Inter-Node Relationships** (extracted from note content):
+- Social: `knows`, `friends_with`, `works_with`
+- Hierarchy: `manages`, `reports_to`
+- Dependencies: `prerequisite_for`, `depends_on`
+- Conflicts: `contradicts`, `blocks`
+- Similarities: `similar_to`, `related_to`
+- Ownership: `assigned_to`, `created_by`
+
+**Academic Relationships** (domain-specific):
+- `PREREQUISITE_FOR`: Concept A builds on Concept B
+- `CONTRADICTS`: Concept A opposes Concept B
+- `CITES`: Note references external source
+
+**Visualization:**
+- 2D/3D graphs show color-coded relationship links
+- Directional particles indicate flow (dependencies, prerequisites)
+- Relationship types visible on hover
+
+See [RELATIONSHIPS_IMPLEMENTATION.md](backend/RELATIONSHIPS_IMPLEMENTATION.md) for implementation details.
+
+### Performance & Optimization
+
+**Recent Optimizations:**
+- **Retrieval Speed**: 70.75s → 67.34s (3.5% faster) with early stopping
+- **Context Quality**: 36.8 → 28.2 results per query (23% token reduction)
+- **Relevance**: Entity queries improved 10% → 50% (5× better precision)
+- **Resource Usage**: PaddleOCR-VL saves 6GB VRAM vs DeepSeek-OCR
+
+**Key Results:**
+- **Cutoff System**: Filters 85-95% noise from entity queries
+- **Reranking**: Soft-capped at 50 snippets for consistent 3-5s response
+- **Embedding Models**: Qwen3 0.6B provides 90%+ quality at 8× smaller size vs 8B models
+
+See [OPTIMIZATION_RESULTS.md](backend/OPTIMIZATION_RESULTS.md) and [DYNAMIC_CUTOFF_RESULTS.md](backend/DYNAMIC_CUTOFF_RESULTS.md) for benchmarks.
+
+---

@@ -38,28 +38,16 @@ export default function NotesPage() {
   const [isRecording, setIsRecording] = useState(false);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [pendingDateChange, setPendingDateChange] = useState<string | null>(null);
   const contentBeforeEditRef = useRef<string>("");
   const searchTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const autoSaveTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
-  // Load draft from localStorage on mount
+  // Fetch notes on mount
   useEffect(() => {
-    const savedDraft = localStorage.getItem('note-draft');
-    if (savedDraft) {
-      try {
-        const draft = JSON.parse(savedDraft);
-        // Add draft to notes list and select it
-        setNotes((prevNotes) => [draft, ...prevNotes]);
-        setSelectedNote(draft);
-        setIsPreviewMode(false);
-        contentBeforeEditRef.current = draft.content;
-      } catch (error) {
-        console.error('Error loading draft:', error);
-        localStorage.removeItem('note-draft');
-      }
-    }
     fetchNotes(undefined, processedFilter);
   }, []);
 
@@ -80,7 +68,46 @@ export default function NotesPage() {
     };
   }, [searchQuery, processedFilter]);
 
-  // Save locally on page unload
+  const handleSaveNote = useCallback(async (note: Note) => {
+    // Don't save if content hasn't changed
+    if (!note || note.content === contentBeforeEditRef.current) return;
+    
+    try {
+      setIsSaving(true);
+      await api.updateNote(note.id, note.content);
+      contentBeforeEditRef.current = note.content;
+      // Don't refresh list on autosave to avoid interrupting typing
+    } catch (error) {
+      console.error("Error saving note:", error);
+    } finally {
+      setIsSaving(false);
+    }
+  }, []);
+
+  // Auto-save: Debounced save 1.5 seconds after user stops typing
+  useEffect(() => {
+    if (!selectedNote) return;
+    
+    // Clear any existing timeout
+    if (autoSaveTimeoutRef.current) {
+      clearTimeout(autoSaveTimeoutRef.current);
+    }
+
+    // Only auto-save if content has changed
+    if (selectedNote.content !== contentBeforeEditRef.current) {
+      autoSaveTimeoutRef.current = setTimeout(() => {
+        handleSaveNote(selectedNote);
+      }, 1500); // Save 1.5 seconds after user stops typing
+    }
+
+    return () => {
+      if (autoSaveTimeoutRef.current) {
+        clearTimeout(autoSaveTimeoutRef.current);
+      }
+    };
+  }, [selectedNote, handleSaveNote]);
+
+  // Save locally on page unload (backup)
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (selectedNote && contentBeforeEditRef.current !== selectedNote.content) {
@@ -163,33 +190,13 @@ export default function NotesPage() {
     }
   };
 
-  const handleSaveNote = useCallback(async (note: Note) => {
-    // Don't save if content hasn't changed
-    if (!note || note.content === contentBeforeEditRef.current) return;
-    
-    try {
-      setIsSaving(true);
-      await api.updateNote(note.id, note.content);
-      contentBeforeEditRef.current = note.content;
-      // Don't refresh list on autosave to avoid interrupting typing
-    } catch (error) {
-      console.error("Error saving note:", error);
-    } finally {
-      setIsSaving(false);
-    }
-  }, []);
-
   const handleContentChange = (content: string) => {
     if (!selectedNote) return;
     const updatedNote = { ...selectedNote, content };
     setSelectedNote(updatedNote);
   };
 
-  const handleBlur = () => {
-    if (selectedNote && selectedNote.content !== contentBeforeEditRef.current) {
-      handleSaveNote(selectedNote);
-    }
-  };
+
 
   const handleDeleteNote = async () => {
     if (!selectedNote) return;
@@ -224,11 +231,6 @@ export default function NotesPage() {
         
         const updatedNote = { ...selectedNote, content: newContent };
         setSelectedNote(updatedNote);
-        
-        // Autosave to localStorage for temp notes
-        if (selectedNote.id.startsWith('temp-')) {
-          localStorage.setItem('note-draft', JSON.stringify(updatedNote));
-        }
         
         setTimeout(() => {
           textarea.focus();
@@ -274,11 +276,6 @@ export default function NotesPage() {
             
             const updatedNote = { ...selectedNote, content: newContent };
             setSelectedNote(updatedNote);
-            
-            // Autosave to localStorage for temp notes
-            if (selectedNote.id.startsWith('temp-')) {
-              localStorage.setItem('note-draft', JSON.stringify(updatedNote));
-            }
             
             setTimeout(() => {
               textarea.focus();
@@ -329,19 +326,39 @@ export default function NotesPage() {
   const handleDateChange = async (dateString: string) => {
     if (!selectedNote) return;
     
+    console.log('handleDateChange called with:', dateString);
     try {
-      // Update note with new created_at date
-      const updatedNote = { ...selectedNote, created_at: dateString };
-      setSelectedNote(updatedNote);
-      setShowDatePicker(false);
+      setIsSaving(true);
       
-      // Autosave to localStorage for temp notes
-      if (selectedNote.id.startsWith('temp-')) {
-        localStorage.setItem('note-draft', JSON.stringify(updatedNote));
-      }
+      // Save to backend with the new date
+      console.log('Sending PUT request to update note date...');
+      await api.updateNote(selectedNote.id, selectedNote.content, dateString);
+      console.log('PUT request successful');
+      
+      // Refresh the note from backend to get the updated data
+      const updatedNote = await api.getNote(selectedNote.id);
+      console.log('Refreshed note from backend:', updatedNote);
+      setSelectedNote(updatedNote);
+      contentBeforeEditRef.current = updatedNote.content;
+      
+      // Refresh notes list to reflect the new date in sidebar
+      await fetchNotes(searchQuery, processedFilter);
     } catch (error) {
       console.error("Error updating date:", error);
+      alert("Failed to update note date. Please try again.");
+    } finally {
+      setIsSaving(false);
     }
+  };
+
+  const handleCloseDatePicker = async () => {
+    // Save the date if it was changed
+    if (pendingDateChange && selectedNote) {
+      console.log('Saving date change:', pendingDateChange);
+      await handleDateChange(pendingDateChange);
+    }
+    setPendingDateChange(null);
+    setShowDatePicker(false);
   };
 
   const formatDate = (dateString: string) => {
@@ -509,6 +526,7 @@ export default function NotesPage() {
                 )}
               </div>
               <div className="flex items-center gap-2">
+                {/* Edit Controls - Only visible in Edit Mode */}
                 {!isPreviewMode && (
                   <>
                     <button
@@ -522,6 +540,13 @@ export default function NotesPage() {
                         <Database className="h-4 w-4" />
                       )}
                       {isSaving ? "Ingesting..." : "Ingest Note"}
+                    </button>
+                    <button
+                      onClick={() => setShowDatePicker(!showDatePicker)}
+                      className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white/80 transition-all hover:bg-white/10"
+                    >
+                      <Calendar className="h-4 w-4" />
+                      Date
                     </button>
                     <div className="h-6 w-px bg-white/10" />
                     <input
@@ -556,13 +581,6 @@ export default function NotesPage() {
                     </button>
                   </>
                 )}
-                <button
-                  onClick={() => setShowDatePicker(!showDatePicker)}
-                  className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white/80 transition-all hover:bg-white/10"
-                >
-                  <Calendar className="h-4 w-4" />
-                  Date
-                </button>
                 <button
                   onClick={() => setIsPreviewMode(!isPreviewMode)}
                   className={cn(
@@ -666,6 +684,12 @@ export default function NotesPage() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+            onClick={(e) => {
+              // Only close if clicking the backdrop itself
+              if (e.target === e.currentTarget) {
+                handleCloseDatePicker();
+              }
+            }}
           >
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
@@ -676,7 +700,7 @@ export default function NotesPage() {
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-xl font-bold text-white">Set Note Date</h2>
                 <button
-                  onClick={() => setShowDatePicker(false)}
+                  onClick={handleCloseDatePicker}
                   className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/5 text-white/60 transition-all hover:bg-white/10 hover:text-white"
                 >
                   <X className="h-5 w-5" />
@@ -685,9 +709,11 @@ export default function NotesPage() {
               <input
                 type="datetime-local"
                 defaultValue={new Date(selectedNote.created_at).toISOString().slice(0, 16)}
-                onBlur={(e) => {
+                onChange={(e) => {
                   if (e.target.value) {
-                    handleDateChange(new Date(e.target.value).toISOString());
+                    const isoDate = new Date(e.target.value).toISOString();
+                    console.log('Date changed to:', isoDate);
+                    setPendingDateChange(isoDate);
                   }
                 }}
                 className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white backdrop-blur-xl focus:border-purple-500/50 focus:outline-none"
@@ -695,10 +721,10 @@ export default function NotesPage() {
               />
               <div className="mt-4 flex justify-end gap-2">
                 <button
-                  onClick={() => setShowDatePicker(false)}
+                  onClick={handleCloseDatePicker}
                   className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm text-white/80 transition-all hover:bg-white/10"
                 >
-                  Close
+                  {pendingDateChange ? 'Save & Close' : 'Close'}
                 </button>
               </div>
             </motion.div>

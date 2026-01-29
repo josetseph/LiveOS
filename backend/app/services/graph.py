@@ -315,5 +315,326 @@ class GraphService:
 
         return {"nodes": nodes, "links": links}
 
+    # ============ RELATIONSHIP MANAGEMENT ============
+
+    def create_or_update_relationship(
+        self,
+        source_name: str,
+        source_label: str,
+        target_name: str,
+        target_label: str,
+        relationship_type: str,
+        confidence: float = 1.0,
+        context: str = "",
+        note_id: str = None,
+    ) -> dict:
+        """
+        Create or update a relationship between two nodes with evolution support
+
+        Args:
+            source_name: Name of the source node
+            source_label: Label of the source node (Person, Task, Entity, Concept, Event)
+            target_name: Name of the target node
+            target_label: Label of the target node
+            relationship_type: Type of relationship (from RelationshipType enum)
+            confidence: Confidence score (0.0-1.0)
+            context: Sample text showing the relationship
+            note_id: ID of the note where this relationship was mentioned
+
+        Returns:
+            Dict with relationship info and whether it was created/updated/evolved
+        """
+        from datetime import datetime
+        from app.schemas.relationships import can_evolve, is_bidirectional
+
+        current_time = datetime.utcnow().isoformat()
+
+        # Check if relationship already exists
+        check_query = """
+        MATCH (source:$source_label {name: $source_name})
+        MATCH (target:$target_label {name: $target_name})
+        OPTIONAL MATCH (source)-[r]->(target)
+        RETURN r, type(r) as current_type
+        """
+
+        existing = self.execute_query(
+            check_query.replace("$source_label", source_label).replace(
+                "$target_label", target_label
+            ),
+            {"source_name": source_name, "target_name": target_name},
+        )
+
+        action = "created"
+        previous_type = None
+
+        if existing and existing[0].get("r"):
+            # Relationship exists
+            current_type = existing[0]["current_type"]
+
+            if current_type == relationship_type:
+                # Same type, just update properties
+                action = "updated"
+                update_query = f"""
+                MATCH (source:{source_label} {{name: $source_name}})
+                MATCH (target:{target_label} {{name: $target_name}})
+                MATCH (source)-[r:{relationship_type}]->(target)
+                SET r.last_updated = $current_time,
+                    r.mention_count = coalesce(r.mention_count, 0) + 1,
+                    r.confidence = CASE 
+                        WHEN $confidence > coalesce(r.confidence, 0) THEN $confidence
+                        ELSE r.confidence
+                    END,
+                    r.context = $context
+                RETURN r
+                """
+            elif can_evolve(current_type, relationship_type):
+                # Relationship can evolve
+                action = "evolved"
+                previous_type = current_type
+
+                # Delete old relationship and create new one with history
+                update_query = f"""
+                MATCH (source:{source_label} {{name: $source_name}})
+                MATCH (target:{target_label} {{name: $target_name}})
+                MATCH (source)-[old]->(target)
+                DELETE old
+                CREATE (source)-[r:{relationship_type}]->(target)
+                SET r.confidence = $confidence,
+                    r.first_seen = $current_time,
+                    r.last_updated = $current_time,
+                    r.relationship_changed = $current_time,
+                    r.previous_type = $previous_type,
+                    r.mention_count = 1,
+                    r.context = $context,
+                    r.is_active = true,
+                    r.note_id = $note_id
+                RETURN r
+                """
+            else:
+                # Can't evolve, keep existing
+                logger.warning(
+                    f"Cannot evolve relationship {current_type} to {relationship_type}"
+                )
+                return {
+                    "action": "rejected",
+                    "reason": f"Cannot evolve {current_type} to {relationship_type}",
+                    "source": source_name,
+                    "target": target_name,
+                }
+        else:
+            # Create new relationship
+            update_query = f"""
+            MERGE (source:{source_label} {{name: $source_name}})
+            MERGE (target:{target_label} {{name: $target_name}})
+            CREATE (source)-[r:{relationship_type}]->(target)
+            SET r.confidence = $confidence,
+                r.first_seen = $current_time,
+                r.last_updated = $current_time,
+                r.mention_count = 1,
+                r.context = $context,
+                r.is_active = true,
+                r.note_id = $note_id
+            RETURN r
+            """
+
+        self.execute_query(
+            update_query,
+            {
+                "source_name": source_name,
+                "target_name": target_name,
+                "confidence": confidence,
+                "context": context,
+                "current_time": current_time,
+                "previous_type": previous_type,
+                "note_id": note_id,
+            },
+        )
+
+        # Handle bidirectional relationships
+        if is_bidirectional(relationship_type):
+            # Create inverse relationship automatically
+            self._create_inverse_relationship(
+                target_name,
+                target_label,
+                source_name,
+                source_label,
+                relationship_type,
+                confidence,
+                context,
+                note_id,
+                current_time,
+            )
+
+        logger.info(
+            f"[Graph] Relationship {action}: ({source_name})-[{relationship_type}]->({target_name})"
+        )
+
+        return {
+            "action": action,
+            "source": source_name,
+            "target": target_name,
+            "relationship_type": relationship_type,
+            "confidence": confidence,
+            "previous_type": previous_type,
+        }
+
+    def _create_inverse_relationship(
+        self,
+        source_name: str,
+        source_label: str,
+        target_name: str,
+        target_label: str,
+        relationship_type: str,
+        confidence: float,
+        context: str,
+        note_id: str,
+        current_time: str,
+    ):
+        """Helper to create inverse relationship for bidirectional types"""
+        query = f"""
+        MERGE (source:{source_label} {{name: $source_name}})
+        MERGE (target:{target_label} {{name: $target_name}})
+        MERGE (source)-[r:{relationship_type}]->(target)
+        SET r.confidence = $confidence,
+            r.first_seen = coalesce(r.first_seen, $current_time),
+            r.last_updated = $current_time,
+            r.mention_count = coalesce(r.mention_count, 0) + 1,
+            r.context = $context,
+            r.is_active = true,
+            r.note_id = $note_id
+        RETURN r
+        """
+
+        self.execute_query(
+            query,
+            {
+                "source_name": source_name,
+                "target_name": target_name,
+                "confidence": confidence,
+                "context": context,
+                "current_time": current_time,
+                "note_id": note_id,
+            },
+        )
+
+    def get_node_relationships(
+        self,
+        node_name: str,
+        node_label: str = None,
+        relationship_types: list[str] = None,
+        direction: str = "both",  # "outgoing", "incoming", "both"
+        min_confidence: float = 0.0,
+    ) -> list[dict]:
+        """
+        Get all relationships for a node
+
+        Args:
+            node_name: Name of the node
+            node_label: Optional label filter (Person, Task, etc.)
+            relationship_types: Optional list of relationship types to filter
+            direction: "outgoing", "incoming", or "both"
+            min_confidence: Minimum confidence threshold
+
+        Returns:
+            List of relationship dicts with source, target, type, properties
+        """
+        label_filter = f":{node_label}" if node_label else ""
+
+        if direction == "outgoing":
+            match_pattern = f"(node{label_filter} {{name: $node_name}})-[r]->(target)"
+        elif direction == "incoming":
+            match_pattern = f"(source)-[r]->(node{label_filter} {{name: $node_name}})"
+        else:  # both
+            match_pattern = f"(node{label_filter} {{name: $node_name}})-[r]-(other)"
+
+        type_filter = ""
+        if relationship_types:
+            type_filter = "AND type(r) IN $relationship_types"
+
+        query = f"""
+        MATCH {match_pattern}
+        WHERE r.is_active = true 
+          AND coalesce(r.confidence, 0) >= $min_confidence
+          {type_filter}
+        RETURN 
+            CASE 
+                WHEN startNode(r) = node THEN node.name 
+                ELSE startNode(r).name 
+            END as source_name,
+            labels(startNode(r))[0] as source_label,
+            CASE 
+                WHEN endNode(r) = node THEN node.name 
+                ELSE endNode(r).name 
+            END as target_name,
+            labels(endNode(r))[0] as target_label,
+            type(r) as relationship_type,
+            r.confidence as confidence,
+            r.first_seen as first_seen,
+            r.last_updated as last_updated,
+            r.mention_count as mention_count,
+            r.context as context
+        """
+
+        params = {
+            "node_name": node_name,
+            "min_confidence": min_confidence,
+        }
+        if relationship_types:
+            params["relationship_types"] = relationship_types
+
+        return self.execute_query(query, params)
+
+    def get_related_nodes(
+        self,
+        node_name: str,
+        node_label: str = None,
+        max_depth: int = 2,
+        relationship_types: list[str] = None,
+        min_confidence: float = 0.5,
+    ) -> list[dict]:
+        """
+        Get nodes related to a given node up to max_depth hops away
+
+        Args:
+            node_name: Name of the starting node
+            node_label: Optional label of the starting node
+            max_depth: Maximum graph traversal depth (1-3 recommended)
+            relationship_types: Optional filter for relationship types
+            min_confidence: Minimum confidence threshold
+
+        Returns:
+            List of related nodes with their relationship paths
+        """
+        label_filter = f":{node_label}" if node_label else ""
+        type_filter = ""
+        if relationship_types:
+            type_filter = f":{('|').join(relationship_types)}"
+
+        query = f"""
+        MATCH path = (start{label_filter} {{name: $node_name}})-[r{type_filter}*1..{max_depth}]-(related)
+        WHERE all(rel in relationships(path) WHERE 
+            rel.is_active = true AND 
+            coalesce(rel.confidence, 0) >= $min_confidence
+        )
+        WITH related, relationships(path) as rels, length(path) as depth
+        RETURN DISTINCT
+            related.name as name,
+            labels(related)[0] as label,
+            related.summary as summary,
+            related.description as description,
+            depth,
+            [rel in rels | type(rel)] as relationship_path,
+            [rel in rels | rel.confidence] as confidence_path
+        ORDER BY depth, related.name
+        """
+
+        return self.execute_query(
+            query,
+            {
+                "node_name": node_name,
+                "min_confidence": min_confidence,
+            },
+        )
+
 
 graph_service = GraphService()

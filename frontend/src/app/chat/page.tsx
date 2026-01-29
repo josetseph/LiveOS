@@ -414,7 +414,7 @@ export default function ChatPage() {
           </form>
           <div className="mt-3 flex items-center justify-center gap-2 text-xs text-white/40">
             <span>Powered by</span>
-            <span className="font-medium text-purple-400">Gemma3 12B</span>
+            <span className="font-medium text-purple-400">Gemma3 4B</span>
             <span>•</span>
             <span className="font-medium text-pink-400">Qwen3 Embedding</span>
             <span>•</span>

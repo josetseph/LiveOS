@@ -14,31 +14,49 @@ class Settings(BaseSettings):
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = "password"
 
-    # LLM (Local)
+    # LLM Provider Selection
+    LLM_PROVIDER: str = "ollama"  # "ollama", "openai", "gemini", "anthropic"
+    LLM_FALLBACK_PROVIDER: str | None = None  # Optional fallback if primary fails
+
+    # LLM (Local - Ollama)
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    MODEL_EXTRACTION: str = "gemma3:27b-cloud"
-    MODEL_ARCHITECT: str = "gemma3:27b-cloud"
-    MODEL_SUMMARIZATION: str = "gemma3:27b-cloud"
-    MODEL_BRAIN: str = "gemma3:27b-cloud"
-    MODEL_REASONING: str = "gemma3:27b-cloud"
+    MODEL_EXTRACTION: str = "gemma3:4b"
+    MODEL_ARCHITECT: str = "gemma3:4b"
+    MODEL_SUMMARIZATION: str = "gemma3:4b"
+    MODEL_BRAIN: str = "gemma3:4b"
+    MODEL_REASONING: str = "gemma3:4b"
     MODEL_EMBEDDING: str = "qwen3-embedding:0.6b"
     EMBEDDING_DIMENSIONS: int = 1024
-    MODEL_VISION: str = "deepseek-ocr:latest"
+    MODEL_VISION: str = "MedAIBase/PaddleOCR-VL:0.9b"
 
     # Hugging Face Models (Transformers)
     MODEL_FLORENCE_HF: str = "microsoft/Florence-2-large"
     MODEL_FLORENCE_LOCAL: str = "florence-2-large"
-    MODEL_WHISPER_HF: str = "openai/whisper-large-v3"
-    MODEL_WHISPER_LOCAL: str = "whisper-large-v3"
-    MODEL_RERANKER_HF: str = "michaelfeil/mxbai-rerank-large-v2-seq"
-    MODEL_RERANKING_LOCAL: str = "mxbai-rerank-large-v2-seq"
+    MODEL_WHISPER_HF: str = "openai/whisper-large-v3-turbo"
+    MODEL_WHISPER_LOCAL: str = "whisper-large-v3-turbo"
+    MODEL_RERANKER_HF: str = "tomaarsen/qwen3-reranker-0.6b-seq-cls"
+    MODEL_RERANKING_LOCAL: str = "qwen3-reranker-0.6b-seq-cls"
 
     # Model Storage Path
     MODELS_PATH: str = "models"  # Relative to backend root
 
-    # LLM (Cloud)
+    # LLM (Cloud Providers)
+    # OpenAI
+    OPENAI_API_KEY: str | None = None
+    OPENAI_MODEL: str | None = (
+        None  # Supports structured outputs. e.g., "gpt-4o-2024-08-06"
+    )
+    OPENAI_MODEL_REASONING: str | None = (
+        None  # For complex reasoning tasks. e.g., "o1-mini"
+    )
+
+    # Google Gemini
     GEMINI_API_KEY: str | None = None
-    GEMINI_MODEL: str | None = None
+    GEMINI_MODEL: str | None = None  # Supports JSON schema. eg., "gemini-3-pro"
+
+    # Anthropic Claude
+    ANTHROPIC_API_KEY: str | None = None
+    ANTHROPIC_MODEL: str | None = None  # e.g., "claude-3"
 
     # Storage (R2 / MinIO)
     BUCKET_NAME: str = "liveos-assets"

@@ -20,6 +20,7 @@ export default function GraphPage() {
   const [nodeDetails, setNodeDetails] = useState<any>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const graphRef = useRef<any>(null);
+  const isFirstRender = useRef(true);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -39,9 +40,9 @@ export default function GraphPage() {
     setSelectedNode(node);
     setNodeDetails(null);
 
-    // Focus camera on node
-    graphRef.current?.centerAt(node.x, node.y, 1000);
-    graphRef.current?.zoom(4, 1000);
+    // Don't auto-reset/zoom view on click to preserve user context
+    // graphRef.current?.centerAt(node.x, node.y, 1000);
+    // graphRef.current?.zoom(4, 1000);
 
     if (node.group === "Note" && node.uuid) {
       setDetailLoading(true);
@@ -176,23 +177,64 @@ export default function GraphPage() {
         }}
         nodeRelSize={6}
         linkColor={(link: any) => {
-          // Academic relationships get special colors
+          // Inter-node relationships (extracted from content)
+          if (link.type === "knows" || link.type === "friends_with" || link.type === "works_with") {
+            return "rgba(168, 139, 250, 0.5)"; // purple for social relationships
+          }
+          if (link.type === "manages" || link.type === "reports_to") {
+            return "rgba(251, 146, 60, 0.5)"; // orange for hierarchy
+          }
+          if (link.type === "prerequisite_for" || link.type === "depends_on") {
+            return "rgba(16, 185, 129, 0.5)"; // emerald for dependencies
+          }
+          if (link.type === "contradicts" || link.type === "blocks") {
+            return "rgba(239, 68, 68, 0.5)"; // red for conflicts
+          }
+          if (link.type === "similar_to" || link.type === "related_to") {
+            return "rgba(59, 130, 246, 0.4)"; // blue for similarities
+          }
+          if (link.type === "assigned_to" || link.type === "created_by") {
+            return "rgba(236, 72, 153, 0.4)"; // pink for ownership
+          }
+          if (link.type === "interested_in" || link.type === "expert_in" || link.type === "learning") {
+            return "rgba(132, 204, 22, 0.4)"; // lime for learning
+          }
+          if (link.type === "involves" || link.type === "requires_knowledge_of") {
+            return "rgba(251, 191, 36, 0.4)"; // amber for involvement
+          }
+          
+          // Academic relationships (note-to-reference)
           if (link.type === "CITES") return "rgba(255, 215, 0, 0.4)"; // gold for citations
           if (link.type === "PREREQUISITE_FOR") return "rgba(16, 185, 129, 0.3)"; // emerald for prerequisites
           if (link.type === "CONTRADICTS") return "rgba(239, 68, 68, 0.3)"; // red for contradictions
-          // Default for other relationships
+          
+          // Default for note-to-node relationships
           return "rgba(255,255,255,0.15)";
         }}
         linkWidth={(link: any) => {
-          // Make academic relationships slightly thicker
+          // Make inter-node relationships thicker to stand out
+          const interNodeTypes = [
+            "knows", "friends_with", "works_with", "manages", "reports_to",
+            "prerequisite_for", "depends_on", "contradicts", "blocks",
+            "similar_to", "related_to", "assigned_to", "created_by",
+            "interested_in", "expert_in", "learning", "involves", "requires_knowledge_of"
+          ];
+          if (interNodeTypes.includes(link.type)) {
+            return 3;
+          }
+          // Academic relationships
           if (link.type === "CITES" || link.type === "PREREQUISITE_FOR" || link.type === "CONTRADICTS") {
             return 2;
           }
           return 1;
         }}
         linkDirectionalParticles={(link: any) => {
-          // Show direction particles for academic relationships
-          if (link.type === "PREREQUISITE_FOR") return 2;
+          // Show direction particles for directional relationships
+          const directionalTypes = [
+            "prerequisite_for", "depends_on", "manages", "reports_to",
+            "blocks", "assigned_to", "created_by", "PREREQUISITE_FOR"
+          ];
+          if (directionalTypes.includes(link.type)) return 3;
           return 0;
         }}
         linkDirectionalParticleWidth={2}
@@ -200,7 +242,12 @@ export default function GraphPage() {
         d3VelocityDecay={0.3}
         cooldownTicks={100}
         onNodeClick={handleNodeClick}
-        onEngineStop={() => graphRef.current?.zoomToFit(400)}
+        onEngineStop={() => {
+          if (isFirstRender.current) {
+            graphRef.current?.zoomToFit(400);
+            isFirstRender.current = false;
+          }
+        }}
       />
 
       {/* Node Detail Panel */}

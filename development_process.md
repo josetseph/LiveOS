@@ -329,6 +329,15 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
     *   **Before Fix**: "Your notes reveal a pattern of ambition paired with uncertainty about direction." (generic, title-only)
     *   **After Fix**: Specific details from actual content: "Database migration & testing", "Hubtel integration", "franchising expansion to Nigeria and Benin"
     *   **Evidence**: LLM now quotes actual text from notes instead of inferring from titles
+*   **Cutoff System Refinement**:
+    *   **Observation**: Entity queries with 7.0 cutoff were very aggressive, filtering 36-40 results down to just 2 (85-95% reduction).
+    *   **Analysis**: While this achieved high precision (no noise), it risked losing valuable context for complex queries.
+    *   **Options Evaluated**:
+        *   Lower entity cutoff from 7.0 → 6.0 (would yield 5-10 results)
+        *   Add minimum results guarantee (ensure at least 5 results even if below cutoff)
+        *   Keep current behavior (optimized for precision and lower token costs)
+    *   **Decision**: Kept 7.0 cutoff for now based on LLM synthesis quality with 2 high-quality snippets. System prioritizes precision over recall, with adaptive fallback preventing empty results.
+    *   **Code Cleanup**: Removed unused `query` parameter from `_get_cutoff_score()` method signature - query length/complexity detection deemed unnecessary since temporal/entity detection already covers query types.
 
 ---
 

@@ -193,10 +193,31 @@ async def extraction_node(state: IngestionState):
        - title: REQUIRED - Full title of the work (cannot be empty)
        - content: The actual quote or key excerpt (if applicable)
        - source: Author/Artist/Creator name
-    7. CRITICAL: Extract text snippets exactly as they appear. Do NOT wrap values in extra quotes. 
+    7. RELATIONSHIPS: Extract connections between the nodes you identify above.
+       - source_name: The name of the first node (must match an entity, concept, task, or person extracted above)
+       - source_type: Type of first node (Person, Task, Entity, Concept, Event)
+       - target_name: The name of the second node (must match another extracted node)
+       - target_type: Type of second node
+       - relationship_type: The type of relationship (see examples below)
+       - confidence: 0.0-1.0 (how certain you are about this relationship)
+       - context: Brief text snippet showing this relationship
+       
+       RELATIONSHIP TYPE EXAMPLES:
+       * Person↔Person: knows, friends_with, works_with, manages, reports_to, married_to, siblings_with
+       * Person↔Task: assigned_to, created_by, completed_by, blocked_by
+       * Task↔Task: depends_on, blocks, relates_to, prerequisite_for
+       * Entity↔Entity: part_of, contains, related_to
+       * Concept↔Concept: prerequisite_for, related_to, contradicts, similar_to
+       * Person↔Concept: interested_in, expert_in, learning, teaches
+       * Task↔Concept: involves, requires_knowledge_of
+       * Entity↔Concept: implements, based_on, example_of
+       
+       CRITICAL: Only extract relationships where BOTH nodes were identified in the extraction above!
+       
+    8. CRITICAL: Extract text snippets exactly as they appear. Do NOT wrap values in extra quotes. 
        Example: {{"quote": "I am happy"}}, NOT {{"quote": ""I am happy""}}.
-    8. NO COMMENTARY: Do not explain your errors or apologize. Return ONLY valid JSON.
-    9. ENGLISH ONLY: All output keys and values MUST be in English.
+    9. NO COMMENTARY: Do not explain your errors or apologize. Return ONLY valid JSON.
+    10. ENGLISH ONLY: All output keys and values MUST be in English.
 
     CONTENT:
     "{state['content']}"

@@ -183,7 +183,10 @@ class MultimediaService:
                 audio, sampling_rate=16000, return_tensors="pt"
             ).input_features.to(self.device)
 
-            generated_ids = self.whisper_model.generate(input_features)
+            # Explicitly pass generation_config to suppress "defaults modified" warning
+            generated_ids = self.whisper_model.generate(
+                input_features, generation_config=self.whisper_model.generation_config
+            )
             transcription = self.whisper_processor.batch_decode(
                 generated_ids, skip_special_tokens=True
             )[0]

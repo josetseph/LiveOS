@@ -54,6 +54,27 @@ class PersonaTrait(BaseModel):
         return v or ""
 
 
+class ExtractedRelationship(BaseModel):
+    """Relationship between two nodes extracted from content"""
+
+    source_name: str = ""
+    source_type: str = ""  # Person, Task, Entity, Concept, Event
+    target_name: str = ""
+    target_type: str = ""
+    relationship_type: str = ""  # From RelationshipType enum
+    confidence: float = 0.8
+    context: str = ""  # Text snippet showing this relationship
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def handle_none(cls, v: Any, info) -> Any:
+        if v is None:
+            if info.field_name == "confidence":
+                return 0.8
+            return ""
+        return v
+
+
 class ExternalReference(BaseModel):
     title: str = ""
     type: str = "Quote"  # "Song", "Quote", "Book", "Paper", "Video", "Poem"
@@ -76,10 +97,17 @@ class Extraction(BaseModel):
     tasks: List[Task] = Field(default_factory=list)
     persona_traits: List[PersonaTrait] = Field(default_factory=list)
     references: List[ExternalReference] = Field(default_factory=list)
+    relationships: List[ExtractedRelationship] = Field(default_factory=list)
     sentiment: str = "Neutral"
 
     @field_validator(
-        "entities", "concepts", "tasks", "persona_traits", "references", mode="before"
+        "entities",
+        "concepts",
+        "tasks",
+        "persona_traits",
+        "references",
+        "relationships",
+        mode="before",
     )
     @classmethod
     def ensure_list_of_objects(cls, v, info):
@@ -99,6 +127,7 @@ class Extraction(BaseModel):
                     new_list.append({"description": item})
                 elif info.field_name == "persona_traits":
                     new_list.append({"trait": item})
+                # relationships cannot be strings, skip
             else:
                 new_list.append(item)
         return new_list

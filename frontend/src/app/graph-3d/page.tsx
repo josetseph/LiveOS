@@ -48,7 +48,6 @@ export default function Graph3DPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const initialCameraPosition = useRef<{ position: { x: number; y: number; z: number }, lookAt: { x: number; y: number; z: number } } | null>(null);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -68,45 +67,10 @@ export default function Graph3DPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleNodeClick = useCallback((node: any) => {
     setSelectedNode(node);
-
-    // Save initial camera position before zooming (only once)
-    if (graphRef.current && !initialCameraPosition.current) {
-      const cam = graphRef.current.camera();
-      initialCameraPosition.current = {
-        position: { x: cam.position.x, y: cam.position.y, z: cam.position.z },
-        lookAt: { x: 0, y: 0, z: 0 }
-      };
-    }
-
-    // Autofocus: Aim at node from outside it
-    if (graphRef.current) {
-      const distance = 40;
-      const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
-
-      const newPos = node.x || node.y || node.z
-        ? { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio }
-        : { x: 0, y: 0, z: distance }; // special case if node is in (0,0,0)
-
-      graphRef.current.cameraPosition(
-        newPos, // new position
-        node, // lookAt ({ x, y, z })
-        3000  // ms transition duration
-      );
-    }
   }, []);
 
   const handleClosePanel = useCallback(() => {
     setSelectedNode(null);
-
-    // Return to initial camera position
-    if (graphRef.current && initialCameraPosition.current) {
-      graphRef.current.cameraPosition(
-        initialCameraPosition.current.position,
-        initialCameraPosition.current.lookAt,
-        2000 // ms transition duration
-      );
-      initialCameraPosition.current = null;
-    }
   }, []);
 
   const toggleFullscreen = useCallback(() => {
@@ -375,45 +339,46 @@ export default function Graph3DPage() {
         nodeLabel="name"
         nodeAutoColorBy="group"
         nodeColor={getNodeColor}
-        nodeRelSize={3}
-        nodeResolution={16}
+        nodeRelSize={2}
+        nodeResolution={20}
         nodeOpacity={0.9}
-        linkColor={(link: any) => getNodeColor(link.source)}
-        linkWidth={0.5}
-        linkOpacity={0.6}
-        linkDirectionalParticles={4}
-        linkDirectionalParticleWidth={1.5}
+        cooldownTicks={500}
+        warmupTicks={500}
+        d3AlphaDecay={0.05}
+        d3VelocityDecay={0.4}
+        d3AlphaMin={0}
+        enableNavigationControls={true}
+        enablePointerInteraction={true}
+        linkColor={() => "rgba(255, 255, 255, 0.2)"}
+        linkWidth={0.3}
+        linkOpacity={0.3}
+        linkDirectionalParticles={1}
+        linkDirectionalParticleWidth={1}
         linkDirectionalParticleSpeed={0.008}
         linkCurvature={0.5}
         linkDirectionalArrowLength={3}
         linkDirectionalArrowRelPos={1}
         linkThreeObjectExtend={true}
-        linkThreeObject={(link: any) => {
-          const sprite = new SpriteText(link.type, 3);
-          sprite.color = "rgba(255, 255, 255, 0.6)";
-          sprite.textHeight = 2;
-          return sprite;
-        }}
-        linkPositionUpdate={(sprite: any, { start, end }: any) => {
-          const middlePos = Object.assign({},
-            ...['x', 'y', 'z'].map(c => ({
-              [c]: start[c] + (end[c] - start[c]) / 2
-            }))
-          );
-          Object.assign(sprite.position, middlePos);
-        }}
         onNodeClick={handleNodeClick}
-        enableNodeDrag={true}
+        enableNodeDrag={false}
         showNavInfo={true}
         backgroundColor="#000000"
         nodeThreeObject={(node: any) => {
-          const sprite = new SpriteText(node.name, 8);
+          // Only show labels for important nodes (those with many connections)
+          const connections = data.links.filter((l: any) => 
+            (typeof l.source === 'object' ? l.source.id : l.source) === node.id ||
+            (typeof l.target === 'object' ? l.target.id : l.target) === node.id
+          ).length;
+          
+          if (connections < 3) return undefined; // No label for nodes with few connections
+          
+          const sprite = new SpriteText(node.name, 6);
           // @ts-expect-error - depthWrite exists but not in types
           sprite.material.depthWrite = false;
           sprite.color = getNodeColor(node);
-          sprite.textHeight = 2;
+          sprite.textHeight = 1.5;
           // @ts-expect-error - position exists but not in types
-          sprite.position.set(0, -5, 0); // Position text below node
+          sprite.position.set(0, -4, 0);
           return sprite;
         }}
         nodeThreeObjectExtend={true}

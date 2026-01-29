@@ -472,6 +472,54 @@ class IngestionWorkflow:
                 {"data": reference_data, "note_id": note_id, "created_at": created_at},
             )
 
+        # 6. RELATIONSHIPS (New - Inter-node connections)
+        if extraction.relationships:
+            logger.info(
+                f"[Ingestion] Creating {len(extraction.relationships)} relationships..."
+            )
+
+            # Map extracted node types to Neo4j labels
+            type_mapping = {
+                "Person": "Entity",  # Person entities are stored as Entity nodes
+                "Place": "Entity",
+                "Tool": "Entity",
+                "Organization": "Entity",
+                "Entity": "Entity",
+                "Concept": "Concept",
+                "Task": "Task",
+                "Event": "Entity",  # Events treated as entities
+            }
+
+            for rel in extraction.relationships:
+                try:
+                    # Map types to Neo4j labels
+                    source_label = type_mapping.get(rel.source_type, "Entity")
+                    target_label = type_mapping.get(rel.target_type, "Entity")
+
+                    # Create or update relationship
+                    result = graph_service.create_or_update_relationship(
+                        source_name=rel.source_name,
+                        source_label=source_label,
+                        target_name=rel.target_name,
+                        target_label=target_label,
+                        relationship_type=rel.relationship_type,
+                        confidence=rel.confidence,
+                        context=rel.context,
+                        note_id=note_id,
+                    )
+
+                    logger.info(
+                        f"[Relationship] {result['action']}: "
+                        f"({rel.source_name})-[{rel.relationship_type}]->({rel.target_name})"
+                    )
+
+                except Exception as e:
+                    logger.error(
+                        f"[Relationship] Failed to create relationship "
+                        f"{rel.source_name}->{rel.target_name}: {e}"
+                    )
+                    continue
+
         return title
 
     async def _update_neighborhoods(

@@ -11,10 +11,6 @@ setup_logging()
 
 app = FastAPI(title="LiveOS Brain API", version="0.1.0")
 
-# Ensure upload directory exists
-UPLOAD_DIR = os.path.join(os.getcwd(), "data", "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
 # CORS setup used to allow connections from Next.js frontend
 app.add_middleware(
     CORSMiddleware,
@@ -247,13 +243,27 @@ async def create_note(
     c_at = datetime.now(timezone.utc)
     if note_input.created_at:
         try:
-            import dateparser
+            # Try parsing as ISO format first (from frontend)
+            from dateutil import parser as dateutil_parser
 
-            dt = dateparser.parse(note_input.created_at)
-            if dt:
-                c_at = dt
+            dt = dateutil_parser.isoparse(note_input.created_at)
+            # Ensure timezone-aware
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            c_at = dt
         except:
-            pass
+            # Fallback to dateparser for other formats
+            try:
+                import dateparser
+
+                dt = dateparser.parse(note_input.created_at)
+                if dt:
+                    # Ensure timezone-aware
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    c_at = dt
+            except:
+                pass
 
     new_note = Note(
         id=note_id,
@@ -423,13 +433,27 @@ async def update_note(
     # Update created_at if provided
     if note_input.created_at:
         try:
-            import dateparser
+            # Try parsing as ISO format first (from frontend)
+            from dateutil import parser as dateutil_parser
 
-            dt = dateparser.parse(note_input.created_at)
-            if dt:
-                existing_note.created_at = dt
+            dt = dateutil_parser.isoparse(note_input.created_at)
+            # Ensure timezone-aware
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            existing_note.created_at = dt
         except:
-            pass
+            # Fallback to dateparser for other formats
+            try:
+                import dateparser
+
+                dt = dateparser.parse(note_input.created_at)
+                if dt:
+                    # Ensure timezone-aware
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    existing_note.created_at = dt
+            except:
+                pass
 
     existing_note.updated_at = datetime.now(timezone.utc)
 

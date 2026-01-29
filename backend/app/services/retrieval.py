@@ -166,7 +166,7 @@ class RetrievalService:
                 break
         return chunks
 
-    async def hybrid_search(self, query: str, top_k: int = 25) -> List[dict]:
+    async def hybrid_search(self, query: str, top_k: int = 20) -> List[dict]:
         """
         Semantic Snippet Retrieval Pipeline with Weighted Scoring:
         1. Fetch Graph Nodes (The Mind)
@@ -189,18 +189,43 @@ class RetrievalService:
 
         logger.info(f"  [Retrieval] Semantic Snippet Search for: '{query}'")
         t_start = time.perf_counter()
+        t_phase_start = time.perf_counter()
 
-        # Detect query characteristics
-        is_temporal_query = self._is_temporal_query(query)
-        query_entities = self._extract_query_entities(query)
+        # Query Analysis with LLM structured outputs
+        from app.services.llm import llm_service
+
+        query_analysis = llm_service.analyze_query(query)
+
+        # Use LLM analysis as primary source, with heuristic fallback
+        is_temporal_query = query_analysis.get(
+            "is_temporal", False
+        ) or self._is_temporal_query(query)
+
+        # Combine entities from LLM with heuristic extraction for comprehensive coverage
+        llm_entities = query_analysis.get("entities", [])
+        llm_concepts = query_analysis.get("concepts", [])
+        heuristic_entities = self._extract_query_entities(query)
+
+        # Merge all entities and concepts (LLM entities take priority, add unique heuristic ones)
+        query_entities = llm_entities + [
+            e for e in heuristic_entities if e not in llm_entities
+        ]
+        query_concepts = llm_concepts
+
         logger.info(
-            f"  [Retrieval] Query Analysis - Temporal: {is_temporal_query}, Entities: {query_entities}"
+            f"  [LLM Analysis] Intent: {query_analysis.get('intent')}, "
+            f"Temporal: {is_temporal_query}, "
+            f"Entities: {query_entities}, "
+            f"Concepts: {query_concepts}"
         )
 
         # Generate query embedding
         full_vector = embedding_service.embed_query(query)
+        t_embedding = time.perf_counter() - t_phase_start
+        logger.info(f"  [⏱️ Timing] Query embedding: {t_embedding:.2f}s")
 
         # ============ FETCH CANDIDATES ============
+        t_phase_start = time.perf_counter()
 
         # 1. Graph Nodes
         graph_nodes = graph_service.search_knowledge_graph(
@@ -215,12 +240,18 @@ class RetrievalService:
         node_names = [n["name"] for n in graph_nodes]
         evidence_note_ids = set()
         if node_names:
+            logger.info(
+                f"  [DEBUG] Graph found entities: {node_names[:10]}"
+            )  # First 10
             evidence_results = graph_service.get_linked_evidence(
                 node_names, limit_per_node=3
             )
             for row in evidence_results:
                 for note in row.get("evidence", []):
                     evidence_note_ids.add(note["id"])
+            logger.info(
+                f"  [DEBUG] Evidence retrieval found {len(evidence_note_ids)} notes from {len(node_names)} entities"
+            )
 
         # Combine Note IDs
         all_note_ids = recent_note_ids.union(evidence_note_ids)
@@ -230,6 +261,7 @@ class RetrievalService:
         note_meta_map = {}
 
         if all_note_ids:
+            t_db_start = time.perf_counter()
             async with AsyncSessionLocal() as session:
                 stmt = select(Note.id, Note.content, Note.title, Note.created_at).where(
                     Note.id.in_(list(all_note_ids))
@@ -243,6 +275,14 @@ class RetrievalService:
                             row.created_at.isoformat() if row.created_at else ""
                         ),
                     }
+            t_db = time.perf_counter() - t_db_start
+            logger.info(
+                f"  [⏱️ Timing] Database fetch ({len(all_note_ids)} notes): {t_db:.2f}s"
+            )
+            if query_entities:
+                logger.info(
+                    f"  [DEBUG] Looking for entities {query_entities} in {len(all_note_ids)} notes"
+                )
 
         # ============ PREPARE CANDIDATES ============
         candidates = []
@@ -285,32 +325,53 @@ class RetrievalService:
                     }
                 )
 
+        t_candidates = time.perf_counter() - t_phase_start
         logger.info(
-            f"  [Retrieval] Reranking {len(candidates)} candidates (Nodes + Snippets)..."
+            f"  [⏱️ Timing] Candidate collection: {t_candidates:.2f}s ({len(candidates)} candidates)"
+        )
+
+        # ============ RELATIONSHIP EXPANSION ============
+        # Expand graph nodes with related nodes BEFORE reranking
+        # This ensures related concepts are scored by the reranker
+        t_expand_start = time.perf_counter()
+        expanded_candidates = self._expand_candidates_with_relationships(
+            candidates, max_related=3, min_confidence=0.7
+        )
+        t_expand = time.perf_counter() - t_expand_start
+        if len(expanded_candidates) > len(candidates):
+            logger.info(
+                f"  [Relationships] Expanded {len(candidates)} → {len(expanded_candidates)} candidates (+{len(expanded_candidates) - len(candidates)} related nodes) in {t_expand:.2f}s"
+            )
+
+        logger.info(
+            f"  [Retrieval] Reranking {len(expanded_candidates)} candidates (Nodes + Related + Snippets)..."
         )
 
         # ============ RERANKING ============
-        if not candidates:
+        if not expanded_candidates:
             return []
 
-        candidate_texts = [c["text"] for c in candidates]
+        candidate_texts = [c["text"] for c in expanded_candidates]
 
         # Off-thread reranking
         import asyncio
 
+        t_rerank_start = time.perf_counter()
         loop = asyncio.get_running_loop()
         ranked_pairs = await loop.run_in_executor(
             None, self.rerank, query, candidate_texts
         )
+        t_rerank = time.perf_counter() - t_rerank_start
+        logger.info(f"  [⏱️ Timing] Reranking: {t_rerank:.2f}s")
 
         # Map back to objects
         # Note: ranked_pairs is list of (text, score)
         # We need to efficienty lookup. Text usually unique enough, but let's be safe.
-        # Actually, since we generated the text list from candidates, we can just use a dict mapping text -> list[candidate]
+        # Actually, since we generated the text list from expanded_candidates, we can just use a dict mapping text -> list[candidate]
         # to handle duplicates (unlikely to have exact duplicate chunks from different notes, but possible).
 
         text_to_candidates = {}
-        for c in candidates:
+        for c in expanded_candidates:
             t = c["text"]
             if t not in text_to_candidates:
                 text_to_candidates[t] = []
@@ -327,6 +388,16 @@ class RetrievalService:
         high_quality_threshold = 0.8
         high_quality_count = 0
         early_stop_target = 50
+
+        # DEBUG: Log score distribution
+        if ranked_pairs:
+            scores = [score for _, score in ranked_pairs]
+            logger.info(
+                f"  [DEBUG] Reranker score stats: min={min(scores):.4f}, max={max(scores):.4f}, median={sorted(scores)[len(scores)//2]:.4f}"
+            )
+            logger.info(
+                f"  [DEBUG] Scores above threshold ({score_threshold}): {sum(1 for s in scores if s >= score_threshold)}/{len(scores)}"
+            )
 
         for text, score in ranked_pairs:
             # EARLY STOPPING: If we have enough high-quality results, stop reranking
@@ -364,9 +435,16 @@ class RetrievalService:
                 entity_boost = 1.0
                 if query_entities:
                     text_lower = cand["text"].lower()
-                    if any(entity.lower() in text_lower for entity in query_entities):
+                    matched_entities = [
+                        e for e in query_entities if e.lower() in text_lower
+                    ]
+                    if matched_entities:
                         entity_boost = 2.0
                         final_score *= entity_boost
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(
+                                f"  [Entity Match] Boosted by 2.0x for entities: {matched_entities} in text: {cand['text'][:100]}"
+                            )
 
                 # 3. Keyword/Exact Match Boost (3.0x if exact query terms appear)
                 keyword_boost = 1.0
@@ -405,7 +483,7 @@ class RetrievalService:
 
         # Apply dynamic cutoff to filter low-quality results before feeding to LLM
         cutoff_score = self._get_cutoff_score(
-            query, is_temporal_query, query_entities, all_results
+            is_temporal_query, query_entities, all_results
         )
         filtered_results = [
             r for r in all_results if r.get("final_score", 0) >= cutoff_score
@@ -418,6 +496,13 @@ class RetrievalService:
         # Apply diversity constraint: limit snippets per note in top results
         final_list = self._apply_diversity_constraint(filtered_results, max_per_note=3)
 
+        # Apply hard limit on results sent to LLM (prevent context overload)
+        if len(final_list) > top_k:
+            logger.info(
+                f"  [Retrieval] Limiting results from {len(final_list)} to {top_k} (top_k)"
+            )
+            final_list = final_list[:top_k]
+
         # Log Top Results with detailed scoring
         logger.info(f"  [Retrieval] Final Selection (Total {len(final_list)}):")
         for i, doc in enumerate(final_list[:20]):
@@ -428,7 +513,7 @@ class RetrievalService:
             )
 
         logger.info(
-            f"  [Retrieval] Total Pipeline Time: {time.perf_counter() - t_start:.4f}s"
+            f"  [⏱️ Timing] Total Pipeline Time: {time.perf_counter() - t_start:.2f}s (Embedding: {t_embedding:.2f}s | Candidates: {t_candidates:.2f}s | DB: {t_db if all_note_ids else 0:.2f}s | Reranking: {t_rerank:.2f}s | Scoring: {time.perf_counter() - t_start - t_embedding - t_candidates - t_rerank:.2f}s)"
         )
         return final_list
 
@@ -558,7 +643,6 @@ class RetrievalService:
 
     def _get_cutoff_score(
         self,
-        query: str,
         is_temporal_query: bool,
         query_entities: List[str],
         results: List[dict],
@@ -705,6 +789,109 @@ class RetrievalService:
                 diverse_results.append(result)
 
         return diverse_results
+
+    def _expand_candidates_with_relationships(
+        self, candidates: List[dict], max_related: int = 3, min_confidence: float = 0.7
+    ) -> List[dict]:
+        """
+        Expand candidates by adding related nodes from the knowledge graph BEFORE reranking.
+
+        This allows the reranker to score related concepts for relevance, ensuring only
+        the most relevant related nodes make it to the final results.
+
+        Args:
+            candidates: Initial candidate list (graph nodes + note snippets)
+            max_related: Maximum related nodes to add per graph node
+            min_confidence: Minimum relationship confidence threshold
+
+        Returns:
+            Expanded candidate list (original + related nodes as new candidates)
+        """
+        expanded = list(candidates)  # Start with original candidates
+        added_nodes = set()  # Track to avoid duplicates
+
+        for candidate in candidates:
+            # Only expand graph nodes (not note snippets)
+            if candidate.get("type") != "graph_consensus":
+                continue
+
+            node = candidate.get("original_obj", {})
+            node_name = node.get("name")
+            node_label = node.get("labels", ["Entity"])[0]
+
+            if not node_name:
+                continue
+
+            try:
+                # Get related nodes up to 2 hops away
+                related_nodes = graph_service.get_related_nodes(
+                    node_name=node_name,
+                    node_label=node_label,
+                    max_depth=2,
+                    min_confidence=min_confidence,
+                )
+
+                # Limit to top N most relevant
+                if len(related_nodes) > max_related:
+                    # Sort by depth (closer is better) and confidence
+                    related_nodes.sort(
+                        key=lambda x: (
+                            x.get("depth", 999),
+                            -max([c for c in x.get("confidence_path", [0.5])]),
+                        )
+                    )
+                    related_nodes = related_nodes[:max_related]
+
+                # Add related nodes as new candidates for reranking
+                for rn in related_nodes:
+                    rn_name = rn.get("name")
+                    if not rn_name or rn_name in added_nodes:
+                        continue  # Skip duplicates
+
+                    # Create candidate from related node
+                    rel_path = " → ".join(rn.get("relationship_path", []))
+                    summary = rn.get("summary") or rn.get("description", "")
+                    text = f"[{rn.get('label')}: {rn_name}] (via {rel_path} from {node_name}): {summary}"
+
+                    expanded.append(
+                        {
+                            "text": text,
+                            "type": "related_node",
+                            "original_obj": rn,
+                            "is_recent": False,
+                            "parent_node": node_name,
+                            "relationship_path": rn.get("relationship_path", []),
+                        }
+                    )
+                    added_nodes.add(rn_name)
+
+            except Exception as e:
+                logger.debug(f"[Relationships] Could not expand '{node_name}': {e}")
+                continue
+
+        return expanded
+
+    def enrich_with_relationships(
+        self, results: List[dict], max_related: int = 3, min_confidence: float = 0.7
+    ) -> List[dict]:
+        """
+        DEPRECATED: Relationship enrichment now happens BEFORE reranking inside hybrid_search().
+
+        This method is kept for backward compatibility but just returns results unchanged.
+        Related nodes are now added as candidates before reranking for better relevance scoring.
+
+        Args:
+            results: List of search results from hybrid_search
+            max_related: Maximum number of related nodes to include per result
+            min_confidence: Minimum relationship confidence to include
+
+        Returns:
+            Results unchanged (enrichment now happens in hybrid_search)
+        """
+        logger.debug(
+            "[Relationships] enrich_with_relationships called but enrichment already done in hybrid_search"
+        )
+        return results
 
     def _detect_query_domain(self, query: str) -> str:
         """

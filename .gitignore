@@ -13,9 +13,16 @@ backend/logs/
 # Models (too large for git)
 backend/models/
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
 # Extra
 /data
-*.pyc
 /backend/venv
 /frontend/.next
 /frontend/node_modules
