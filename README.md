@@ -216,11 +216,14 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 ## 2. The Retrieval System ("The Voice")
 
-1.  **Graph-First Hybrid RAG (4-Phase Architecture)**:
-    *   **Phase 1: Temporal Anchor** (Short-Term Memory): Always fetch 10 most recent notes for current context.
-    *   **Phase 2: Graph Consensus** (Long-Term Wisdom): Search unified knowledge graph index (25 distilled Concepts, Entities, Tasks, Personas, References).
-    *   **Phase 3: Grounding** (Evidence): Trace back from graph nodes to source notes that formed them.
-    *   **Phase 4: Semantic Fallback** (Safety Net): Only runs if Phases 1-3 return < 15 notes. Traditional vector search on note embeddings.
+1.  **Semantic Snippet Retrieval Pipeline**:
+    *   **Step 1: LLM Query Analysis**: Uses structured outputs to extract intent, entities, concepts, and temporal signals from the query
+    *   **Step 2: Graph Nodes** (Long-Term Wisdom): Search unified knowledge graph index (20 distilled Concepts, Entities, Tasks, Personas, References)
+    *   **Step 3: Recent Notes** (Short-Term Memory): Fetch 20 most recent notes for current context
+    *   **Step 4: Linked Evidence**: Trace back from graph nodes to source notes that formed them
+    *   **Step 5: Chunking**: Split all note content into overlapping snippets (400 chars, 100 overlap)
+    *   **Step 6: Relationship Expansion**: Expand graph nodes with related nodes before reranking
+    *   **Step 7: Reranking**: Score all candidates (nodes + snippets) with qwen3-reranker-0.6b-seq-cls
 
 2.  **Intelligent Multi-Factor Scoring**:
     *   **Weighted Formula**: `final_score = rerank_score × recency_boost × entity_match_boost × keyword_match_boost × temporal_query_boost`
@@ -231,7 +234,8 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
     *   **Temporal Query Boost**: 3.0× for recent notes on temporal queries (e.g., "recent notes", "latest thoughts")
 
 3.  **Smart Query Analysis**:
-    *   **Entity Extraction**: Detects capitalized words, quoted terms, words after "at/with/about/for/working"
+    *   **LLM-Powered**: Uses Gemma3 structured outputs to extract intent, entities, and concepts
+    *   **Heuristic Fallback**: Detects capitalized words, quoted terms, words after "at/with/about/for/working"
     *   **Temporal Detection**: Applies 3× boost only for queries explicitly asking for recent/latest/newest AND not entity-focused
     *   **Example Behavior**: "job at livecops" → entity query (no temporal boost), "recent notes" → temporal query (3× boost)
 
