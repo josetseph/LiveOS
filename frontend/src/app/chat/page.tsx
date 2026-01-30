@@ -420,7 +420,7 @@ export default function ChatPage() {
             <span>•</span>
             <span className="font-medium text-cyan-400">MxBai Reranker</span>
             <span>•</span>
-            <span className="font-medium text-emerald-400">DeepSeek OCR</span>
+            <span className="font-medium text-emerald-400">Paddle OCR</span>
             <span>•</span>
             <span className="font-medium text-teal-400">Florence 2</span>
             <span>•</span>

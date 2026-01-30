@@ -23,17 +23,21 @@ async def test_whisper_on_audio():
 
     # Look for common audio files in CWD, script dir, or project root
     search_paths = [
-        Path("."), 
-        Path(__file__).parent, 
-        Path(__file__).parent.parent.parent
+        Path("."),
+        Path(__file__).parent,
+        Path(__file__).parent.parent.parent,
     ]
-    
+
     audio_files = []
     for path in search_paths:
-        audio_files.extend(list(path.glob("*.mp3")) + list(path.glob("*.wav")) + list(path.glob("*.m4a")))
+        audio_files.extend(
+            list(path.glob("*.mp3"))
+            + list(path.glob("*.wav"))
+            + list(path.glob("*.m4a"))
+        )
         if audio_files:
             break
-    
+
     if not audio_files:
         print(f"❌ Error: No audio files (.mp3, .wav, .m4a) found in search paths")
         print("Please place a test audio file in the project root or backend/tests/")
@@ -63,6 +67,7 @@ async def test_whisper_on_audio():
     except Exception as e:
         print(f"❌ Error during transcription: {e}")
         import traceback
+
         traceback.print_exc()
 
 
@@ -72,17 +77,21 @@ async def compare_models():
 
     # Look for common audio files in CWD, script dir, or project root
     search_paths = [
-        Path("."), 
-        Path(__file__).parent, 
-        Path(__file__).parent.parent.parent
+        Path("."),
+        Path(__file__).parent,
+        Path(__file__).parent.parent.parent,
     ]
-    
+
     audio_files = []
     for path in search_paths:
-        audio_files.extend(list(path.glob("*.mp3")) + list(path.glob("*.wav")) + list(path.glob("*.m4a")))
+        audio_files.extend(
+            list(path.glob("*.mp3"))
+            + list(path.glob("*.wav"))
+            + list(path.glob("*.m4a"))
+        )
         if audio_files:
             break
-    
+
     if not audio_files:
         print(f"❌ No audio files found")
         return
@@ -100,7 +109,7 @@ async def compare_models():
     for model_config in models_to_test:
         local_name = model_config["local"]
         hf_name = model_config["hf"]
-        
+
         print(f"\n{'='*80}")
         print(f"Testing: {local_name} ({hf_name})")
         print("=" * 80)
@@ -108,7 +117,7 @@ async def compare_models():
         # Temporarily override settings
         original_local = settings.MODEL_WHISPER_LOCAL
         original_hf = settings.MODEL_WHISPER_HF
-        
+
         settings.MODEL_WHISPER_LOCAL = local_name
         settings.MODEL_WHISPER_HF = hf_name
 

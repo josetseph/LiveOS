@@ -187,7 +187,7 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
     *   **Performance**: Reduced retrieval latency by capping context before reranking.
 *   **UI Transparency**:
     *   **System Info Header**: Expanded to show all active services:
-        *   **Models**: Gemma3 12B, Qwen3 Embed, MxBai Rerank, DeepSeek OCR, Whisper Audio
+        *   **Models**: Gemma3 12B, Qwen3 Embed, MxBai Rerank, Paddle OCR, Whisper Audio
         *   **Databases**: Neo4j, Postgres, MinIO (color-coded indicators)
     *   **Markdown Support**: Confirmed note preview modal renders markdown via `ReactMarkdown`.
     *   **User Icon Removal**: Cleaned up header by removing profile icon (no authentication).
@@ -223,6 +223,62 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
     *   **Date Display**: Note header shows formatted creation date in both edit and preview modes.
     *   **Modal UX**: Date picker doesn't auto-close, file previews show images/PDFs/audio with download fallback.
     *   **Link Styling**: Unified subtle purple glow across chat references, file links, and note previews.
+
+---
+
+## 📅 Phase 16: The "PKM Upgrade" (Dual-Purpose Knowledge Management)
+**Goal**: Transform LiveOS from pure personal journal into dual-purpose system supporting Academic/Professional PKM alongside personal journaling.
+
+*   **Domain Categorization**:
+    *   **Schema Extension**: Added `domain` field (Academic/Personal/Professional) and `references: List[ExternalReference]` to Extraction model.
+    *   **Intelligent Classification**: LLM classifies notes based on PRIMARY SUBJECT MATTER, not writing style.
+        *   "I learned about Linear Regression" → Academic (learning material)
+        *   "Met with team to discuss GraphRAG" → Professional (work meeting)
+        *   "Feeling anxious about thesis defense" → Personal (emotions/feelings)
+    *   **Critical Fix**: Updated `system_msg` in `llm.py` to include `domain` and `references` in JSON template - without this, LLM defaulted all notes to "Personal".
+*   **Academic Knowledge Graph**:
+    *   **External References**: New `Reference` node type for papers, books, quotes, videos.
+    *   **Citation Tracking**: `CITES` relationships link Notes to References.
+    *   **Academic Relationships**: 
+        *   `PREREQUISITE_FOR`: Knowledge dependencies (e.g., Probability → Linear Regression)
+        *   `CONTRADICTS`: Conflicting concepts (e.g., Deterministic vs Stochastic)
+        *   Detected via heuristics from concept definitions ("builds on", "requires", "contradicts")
+*   **Domain-Aware Retrieval**:
+    *   **Query Classification**: Keyword-based detection of query domain using same heuristics as synthesis.
+    *   **Domain Boosting**: 1.5x score multiplier for notes matching query domain in hybrid search.
+    *   **Graph Service Update**: Added `query_vector_with_domain()` method returning domain field.
+*   **Domain-Aware Synthesis**:
+    *   **Adaptive Prompts**: System instructions change based on detected query domain:
+        *   **Academic**: Pedagogical, conceptual, references papers/theorems, explains prerequisites
+        *   **Personal**: Empathetic, insight-focused, connects feelings and experiences
+        *   **Professional**: Concise, action-oriented, references meetings/tasks/decisions
+    *   **Consistent Detection**: Uses same keyword matching as retrieval for domain detection.
+*   **Graph Visualization**:
+    *   **Reference Nodes**: Gold (#ffd700) nodes for citations with summaries
+    *   **Domain Colors**: Notes colored by domain (Academic=emerald, Professional=purple, Personal=blue)
+    *   **Academic Link Styling**: 
+        *   `CITES` links: Gold with 0.4 opacity
+        *   `PREREQUISITE_FOR`: Emerald with directional particles
+        *   `CONTRADICTS`: Red with 0.3 opacity
+    *   **Color Fix**: Changed Persona nodes from orange to light purple (#a78bfa) to distinguish from gold References
+*   **Documentation**: Created comprehensive `PKM_UPGRADE.md` with examples, test scenarios, and implementation details.
+*   **Testing**: Full test suite (`test_pkm_upgrade.py`) validates domain detection, cross-domain insights, and reference extraction.
+
+---
+
+## 📅 Phase 17: The "Creative Expansion" (Multi-Domain System)
+**Goal**: Expand the system to support creative writing, poetry, and artistic expression as a first-class citizen.
+
+*   **New Domain Integration**:
+    *   **Creative Domain**: Added specific handling for "Creative" notes (poems, stories, lyrics).
+    *   **Keyword Detection**: Heuristics updated to detect "poem", "metaphor", "story", "lyrics".
+    *   **Advice-Free Synthesis**: Synthesis prompt explicitly forbids giving advice or critique for creative queries, focusing instead on thematic reflection and imagery.
+*   **Full-Stack Implementation**:
+    *   **Backend**: Updated Schema, Retrieval, LLM prompts, and Vector Search (lowered threshold to 0.5 to capture poetic semantics).
+    *   **Frontend**: Added pink (#ec4899) color coding for Creative nodes in the Graph view.
+    *   **Documentation**: Detailed newly added extensibility in README and PKM_UPGRADE docs.
+*   **Refinement**:
+    *   **Vector Search Tuning**: Validation scripts revealed a need to lower `min_score` from 0.7 to 0.5 to better catch semantic matches in non-literal creative text.
 
 ---
 
@@ -344,69 +400,13 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 ## 📋 Current Model Stack (Phase 19)
 | Component | Model | Role |
 | :--- | :--- | :--- |
-| **Chat / Synthesis** | `gemma3:12b` | The "Brain". Concise, reliable instruction following with strong JSON adherence. |
-| **Extraction** | `knowledge-architect` (Gemma3 12B) | The "Senses". Custom-tuned for structured data extraction. |
-| **Embedding** | `qwen3-embedding:8b` | Semantic vector search (4096-dim) for Notes AND Knowledge Nodes. |
-| **Reranking** | `mxbai-rerank-large-v2-seq` | Fast context relevance scoring with intelligent multi-factor weighting. |
+| **Chat / Synthesis** | `gemma3:4b` | The "Brain". Concise, reliable instruction following with strong JSON adherence. |
+| **Extraction** | `gemma3:4b` | The "Senses". Optimized for structured JSON data extraction. |
+| **Embedding** | `qwen3-embedding:0.6b` | Semantic vector search (1024-dim) for Notes AND Knowledge Nodes. |
+| **Reranking** | `qwen3-reranker-0.6b-seq-cls` | Fast context relevance scoring with intelligent multi-factor weighting. |
 | **Vision** | `microsoft/Florence-2-large` | Local Transformer model for detailed image description. |
-| **Audio** | `openai/whisper-large-v3` | Local audio transcription. |
-| **OCR** | `deepseek-ocr:latest` | PDF and image text extraction. |
-
----
-
-## 📅 Phase 16: The "PKM Upgrade" (Dual-Purpose Knowledge Management)
-**Goal**: Transform LiveOS from pure personal journal into dual-purpose system supporting Academic/Professional PKM alongside personal journaling.
-
-*   **Domain Categorization**:
-    *   **Schema Extension**: Added `domain` field (Academic/Personal/Professional) and `references: List[ExternalReference]` to Extraction model.
-    *   **Intelligent Classification**: LLM classifies notes based on PRIMARY SUBJECT MATTER, not writing style.
-        *   "I learned about Linear Regression" → Academic (learning material)
-        *   "Met with team to discuss GraphRAG" → Professional (work meeting)
-        *   "Feeling anxious about thesis defense" → Personal (emotions/feelings)
-    *   **Critical Fix**: Updated `system_msg` in `llm.py` to include `domain` and `references` in JSON template - without this, LLM defaulted all notes to "Personal".
-*   **Academic Knowledge Graph**:
-    *   **External References**: New `Reference` node type for papers, books, quotes, videos.
-    *   **Citation Tracking**: `CITES` relationships link Notes to References.
-    *   **Academic Relationships**: 
-        *   `PREREQUISITE_FOR`: Knowledge dependencies (e.g., Probability → Linear Regression)
-        *   `CONTRADICTS`: Conflicting concepts (e.g., Deterministic vs Stochastic)
-        *   Detected via heuristics from concept definitions ("builds on", "requires", "contradicts")
-*   **Domain-Aware Retrieval**:
-    *   **Query Classification**: Keyword-based detection of query domain using same heuristics as synthesis.
-    *   **Domain Boosting**: 1.5x score multiplier for notes matching query domain in hybrid search.
-    *   **Graph Service Update**: Added `query_vector_with_domain()` method returning domain field.
-*   **Domain-Aware Synthesis**:
-    *   **Adaptive Prompts**: System instructions change based on detected query domain:
-        *   **Academic**: Pedagogical, conceptual, references papers/theorems, explains prerequisites
-        *   **Personal**: Empathetic, insight-focused, connects feelings and experiences
-        *   **Professional**: Concise, action-oriented, references meetings/tasks/decisions
-    *   **Consistent Detection**: Uses same keyword matching as retrieval for domain detection.
-*   **Graph Visualization**:
-    *   **Reference Nodes**: Gold (#ffd700) nodes for citations with summaries
-    *   **Domain Colors**: Notes colored by domain (Academic=emerald, Professional=purple, Personal=blue)
-    *   **Academic Link Styling**: 
-        *   `CITES` links: Gold with 0.4 opacity
-        *   `PREREQUISITE_FOR`: Emerald with directional particles
-        *   `CONTRADICTS`: Red with 0.3 opacity
-    *   **Color Fix**: Changed Persona nodes from orange to light purple (#a78bfa) to distinguish from gold References
-*   **Documentation**: Created comprehensive `PKM_UPGRADE.md` with examples, test scenarios, and implementation details.
-*   **Testing**: Full test suite (`test_pkm_upgrade.py`) validates domain detection, cross-domain insights, and reference extraction.
-
----
-
-## 📅 Phase 17: The "Creative Expansion" (Multi-Domain System)
-**Goal**: Expand the system to support creative writing, poetry, and artistic expression as a first-class citizen.
-
-*   **New Domain Integration**:
-    *   **Creative Domain**: Added specific handling for "Creative" notes (poems, stories, lyrics).
-    *   **Keyword Detection**: Heuristics updated to detect "poem", "metaphor", "story", "lyrics".
-    *   **Advice-Free Synthesis**: Synthesis prompt explicitly forbids giving advice or critique for creative queries, focusing instead on thematic reflection and imagery.
-*   **Full-Stack Implementation**:
-    *   **Backend**: Updated Schema, Retrieval, LLM prompts, and Vector Search (lowered threshold to 0.5 to capture poetic semantics).
-    *   **Frontend**: Added pink (#ec4899) color coding for Creative nodes in the Graph view.
-    *   **Documentation**: Detailed newly added extensibility in README and PKM_UPGRADE docs.
-*   **Refinement**:
-    *   **Vector Search Tuning**: Validation scripts revealed a need to lower `min_score` from 0.7 to 0.5 to better catch semantic matches in non-literal creative text.
+| **Audio** | `openai/whisper-large-v3-turbo` | Local audio transcription. |
+| **OCR** | `MedAIBase/PaddleOCR-VL:0.9b` | PDF and image text extraction. |
 
 ---
 

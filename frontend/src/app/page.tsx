@@ -95,7 +95,7 @@ export default function Home() {
             <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 backdrop-blur-xl">
               <Brain className="h-4 w-4 text-purple-400" />
               <span className="text-sm text-white/80">
-                Models: Gemma3, Whisper V3, Florence 2, Qwen3, MxBai Reranker, DeepSeek OCR
+                Models: Gemma3, Whisper V3, Florence 2, Qwen3, MxBai Reranker, Paddle OCR
               </span>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-2">

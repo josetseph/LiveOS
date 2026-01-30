@@ -12,7 +12,6 @@ Usage:
 import argparse
 import sys
 import requests
-from datetime import datetime
 
 # Configuration
 API_URL = "http://localhost:8000/api/v1/ingest"

@@ -14,13 +14,11 @@ Usage:
 
 import asyncio
 import sys
-from datetime import datetime
 
 # Add parent directory to path
 sys.path.insert(0, "/Users/joey/Projects/LiveOS/backend")
 
 from app.services.graph import graph_service
-from app.schemas.extraction import ExtractedRelationship
 from app.core.logging_config import get_component_logger
 
 logger = get_component_logger("RelationshipTest")

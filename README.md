@@ -1,9 +1,10 @@
 # LiveOS Brain (Core System)
 
+[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+
 LiveOS Brain is a multimodal, graph-based personal memory system. It ingests notes, audio, images, and PDFs, understands their semantic meaning, and creates a living ontology (knowledge graph) of your life.
 
 > **Project History**: For a detailed log of the architectural evolution and model choices, see [Development Process](./development_process.md).
-> **Project Findings**: For a detailed log of the results from testing multiple models, see [Test Results](./findings/test_results.md).
 
 ## System Architecture
 
@@ -44,14 +45,15 @@ graph TD
         API --> Workflow[Ingestion Agent - LangGraph]
         Workflow --> Multimedia[Multimedia Node]
         Multimedia -->|Whisper Audio| Transcribe[Audio Transcription]
-        Multimedia -->|DeepSeek OCR| OCR[PDF/Image Processing]
+        Multimedia -->|Paddle OCR| OCR[PDF]
+        Multimedia -->|Florence 2| OCR[Image Processing]
         Multimedia -.->|Sync Content| Postgres
         
-        Transcribe --> Extractor[Knowledge Architect - Gemma3 12B]
+        Transcribe --> Extractor[Knowledge Architect - Gemma3 4B]
         OCR --> Extractor
         Extractor -->|Domain Detection| DomainClassifier{Personal/Academic/Professional}
         DomainClassifier -->|JSON Repair| Cleaner[JSON Repair Pipeline]
-        Cleaner -->|Entities & Concepts| Embedder[Qwen3 Embedding 8B]
+        Cleaner -->|Entities & Concepts| Embedder[Qwen3 Embedding 0.6B]
         Embedder -->|Vectors + Metadata| Neo4j
         Embedder -->|Academic Relationships| AcademicGraph[PREREQUISITE_FOR, CONTRADICTS, CITES]
         Embedder -->|Summaries| Summarizer[Neighborhood Updates]
@@ -64,7 +66,7 @@ graph TD
         Search -->|1. Vector Scan| Neo4j
         Search -.->|2. Fetch Content| Postgres
         Search -->|3. Graph Expansion| Neo4j
-        Search -->|4. Rerank - 50 cap| Reranker[MxBai Reranker Seq-Cls]
+        Search -->|4. Rerank - 50 cap| Reranker[Qwen3 Reranker 0.6B Seq-Cls]
         Reranker -->|Top Context| Synthesis[Domain-Aware Synthesis]
         Synthesis --> User
     end
@@ -102,9 +104,6 @@ The system runs locally using Docker for services and Ollama for models.
     # Create Database Tables & Storage Bucket
     python scripts/init_local.py
 
-    # Build Custom Model (Optional)
-    ollama create knowledge-architect -f Architect.modelfile
-
     # Start API Server
     uvicorn app.main:app --reload
     ```
@@ -135,17 +134,17 @@ Deploy the entire stack with a single command (requires Ollama running on host).
 #### Steps
 1.  **Pull Ollama Models** (on host):
     ```bash
-    ollama pull gemma3:12b
-    ollama pull qwen3-embedding:8b
-    ollama create knowledge-architect -f backend/Architect.modelfile # Optional
+    ollama pull gemma3:4b
+    ollama pull qwen3-embedding:0.6b
+    ollama pull MedAIBase/PaddleOCR-VL:0.9b
     ```
 
 2.  **Download Hugging Face Models** (pre-bundled in repo):
     *   **Florence-2-Large** (Vision): [`microsoft/Florence-2-large`](https://huggingface.co/microsoft/Florence-2-large)
-    *   **MxBai Reranker** (Context Scoring): [`michaelfeil/mxbai-rerank-large-v2-seq`](https://huggingface.co/michaelfeil/mxbai-rerank-large-v2-seq)
+    *   **Qwen3 Reranker** (Context Scoring): [`tomaarsen/qwen3-reranker-0.6b-seq-cls`](https://huggingface.co/tomaarsen/qwen3-reranker-0.6b-seq-cls)
     *   **Whisper V3 Turbo** (Audio Transcription): [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo)
     
-    These models will need to be downoaded into the `backend/models/` folder and will be copied into the Docker image during build.
+    These models will need to be downloaded into the `backend/models/` folder and will be copied into the Docker image during build.
 
 3.  **Deploy Full Stack**:
     ```bash
@@ -179,9 +178,12 @@ If you want to wipe all data (Notes, Graph, Vectors, Files) and start fresh:
     *This script will wipe the Neo4j Graph, Postgres Tables, and MinIO Bucket.*
 
 ### How to Manage Models
-The system (optionally) uses custom Modelfiles for optimized extraction. To rebuild:
+The system uses Ollama models for LLM inference. To update models:
 ```bash
-ollama create knowledge-architect -f backend/Architect.modelfile
+# Pull latest versions
+ollama pull gemma3:4b
+ollama pull qwen3-embedding:0.6b
+ollama pull MedAIBase/PaddleOCR-VL:0.9b
 ```
 
 ---
@@ -194,11 +196,11 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
     *   **Unified Pipeline**: Detects file links `[📎 Filename](URL)` and processes them.
     *   **Audio**: `.webm`/`.mp3`/`.m4a` are transcribed via **Whisper Large V3 Turbo** (local). Transcripts sync to Postgres.
     *   **Images**: Described via **Florence-2-Large** (Local Transformer).
-    *   **PDFs**: OCR'd via **DeepSeek OCR** (Ollama).
+    *   **PDFs**: OCR'd via **Paddle OCR** (Ollama).
     *   **Historical Dates**: Backdate notes using the **Date Picker** in the toolbar. The system uses `dateparser` for robust parsing of user-selected dates.
 
 2.  **Cognition (Extraction)**:
-    *   **Model**: `knowledge-architect` (Custom ModelFile based on `gemma3:12b`) OR `gemma3:12b`.
+    *   **Model**: `gemma3:4b` - Lightweight model optimized for structured JSON extraction.
     *   **Schema**: Strict JSON extraction for `Entities`, `Concepts`, `Tasks`, `Persona`, `Domain`, `References`.
     *   **Domain Classification**: Automatically categorizes notes as Academic/Personal/Professional based on primary subject matter.
     *   **Reference Extraction**: Captures citations (papers, books, quotes) with full attribution for academic notes.
@@ -206,7 +208,7 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
     *   **Entity-Level Locking**: Prevents race conditions when multiple notes update the same entity concurrently.
 
 3.  **Embedding & Graph Storage**:
-    *   **Embedding**: `qwen3-embedding:8b` generates 4096-dim vectors.
+    *   **Embedding**: `qwen3-embedding:0.6b` generates 1024-dim vectors - optimized for speed on consumer hardware.
     *   **Graph**: Neo4j stores the ontology with relationships (`MENTIONS`, `CONTRIBUTES_TO`, `PRODUCES_TASK`, `REVEALED_BY`).
     *   **Neighborhood Summaries**: Parallel updates with async locking ensure data integrity.
 
@@ -222,7 +224,7 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 2.  **Intelligent Multi-Factor Scoring**:
     *   **Weighted Formula**: `final_score = rerank_score × recency_boost × entity_match_boost × keyword_match_boost × temporal_query_boost`
-    *   **Rerank Score**: 0-10+ from mxbai-rerank-large-v2-seq (semantic relevance baseline)
+    *   **Rerank Score**: 0-10+ from qwen3-reranker-0.6b-seq-cls (semantic relevance baseline)
     *   **Recency Boost**: 1.0-2.0× linear decay (today = 2.0×, 1 year ago = 1.1×)
     *   **Entity Match Boost**: 2.0× if result mentions detected entity names (e.g., "Votex365", "livecops")
     *   **Keyword Match Boost**: 3.0× for 80%+ query term match, 2.0× for 50%+, 1.5× for 30%+
@@ -243,7 +245,7 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 5.  **Early Stopping Optimization**: Stops reranking after finding 50 high-quality results (score ≥ 0.8) for 3-11% speed improvement
 
-6.  **Domain-Aware Synthesis**: **Gemma3 12B** with adaptive system prompts:
+6.  **Domain-Aware Synthesis**: **Gemma3 4B** with adaptive system prompts:
     *   **Academic**: Pedagogical, conceptual explanations with prerequisites and citations
     *   **Personal**: Empathetic insights connecting experiences and feelings
     *   **Professional**: Concise, action-oriented responses referencing work context
@@ -498,10 +500,6 @@ The backend uses a comprehensive file-based logging system with automatic rotati
 
 ---
 
-### Test Results (`findings/`)
-
-Local test results, benchmarks, and system validation reports are stored in the `Findings/` directory. This includes performance metrics, accuracy tests, and experimental results during development.
-
 ---
 
 ## 📖 Additional Documentation
@@ -571,8 +569,6 @@ See [RETRIEVAL_FAQ.md](backend/RETRIEVAL_FAQ.md) for detailed explanations of:
 - Directional particles indicate flow (dependencies, prerequisites)
 - Relationship types visible on hover
 
-See [RELATIONSHIPS_IMPLEMENTATION.md](backend/RELATIONSHIPS_IMPLEMENTATION.md) for implementation details.
-
 ### Performance & Optimization
 
 **Recent Optimizations:**
@@ -585,7 +581,5 @@ See [RELATIONSHIPS_IMPLEMENTATION.md](backend/RELATIONSHIPS_IMPLEMENTATION.md) f
 - **Cutoff System**: Filters 85-95% noise from entity queries
 - **Reranking**: Soft-capped at 50 snippets for consistent 3-5s response
 - **Embedding Models**: Qwen3 0.6B provides 90%+ quality at 8× smaller size vs 8B models
-
-See [OPTIMIZATION_RESULTS.md](backend/OPTIMIZATION_RESULTS.md) and [DYNAMIC_CUTOFF_RESULTS.md](backend/DYNAMIC_CUTOFF_RESULTS.md) for benchmarks.
 
 ---

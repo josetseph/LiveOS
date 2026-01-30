@@ -3,7 +3,6 @@ Neo4j Verification Script
 Checks that all notes and graph structures were properly ingested.
 """
 
-import asyncio
 from app.services.graph import graph_service
 from app.core.logging_config import get_component_logger
 

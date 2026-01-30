@@ -3,8 +3,7 @@ Data validation and standardization utilities for ingestion pipeline.
 Prevents common data quality issues by normalizing extracted data.
 """
 
-from app.schemas.extraction import Extraction, Task, ExternalReference
-from typing import List
+from app.schemas.extraction import Extraction, ExternalReference
 import hashlib
 
 
