@@ -49,6 +49,7 @@ export default function NotesPage() {
   // Fetch notes on mount
   useEffect(() => {
     fetchNotes(undefined, processedFilter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Debounced search and filter
@@ -109,7 +110,7 @@ export default function NotesPage() {
 
   // Save locally on page unload (backup)
   useEffect(() => {
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+    const handleBeforeUnload = () => {
       if (selectedNote && contentBeforeEditRef.current !== selectedNote.content) {
         handleSaveNote(selectedNote);
       }
@@ -117,7 +118,7 @@ export default function NotesPage() {
 
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [selectedNote]);
+  }, [selectedNote, handleSaveNote]);
 
   const fetchNotes = async (search?: string, filter?: ProcessedFilter) => {
     try {
@@ -383,7 +384,7 @@ export default function NotesPage() {
             <button
               onClick={handleCreateNote}
               disabled={isSaving}
-              className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-pink-500 text-white transition-all hover:scale-105 disabled:opacity-50"
+              className="flex h-10 w-10 items-center justify-center rounded-xl bg-linear-to-br from-purple-500 to-pink-500 text-white transition-all hover:scale-105 disabled:opacity-50"
             >
               {isSaving ? <Loader2 className="h-5 w-5 animate-spin" /> : <Plus className="h-5 w-5" />}
             </button>
@@ -459,7 +460,7 @@ export default function NotesPage() {
                   className={cn(
                     "w-full rounded-xl p-3 text-left transition-all relative",
                     selectedNote?.id === note.id
-                      ? "bg-gradient-to-br from-purple-500/20 to-pink-500/20 border border-purple-500/30"
+                      ? "bg-linear-to-br from-purple-500/20 to-pink-500/20 border border-purple-500/30"
                       : "hover:bg-white/5 border border-transparent"
                   )}
                 >
@@ -532,7 +533,7 @@ export default function NotesPage() {
                     <button
                       onClick={handleIngestNote}
                       disabled={isSaving || !selectedNote?.content.trim()}
-                      className="flex h-9 items-center gap-2 rounded-lg bg-gradient-to-r from-purple-500 to-pink-500 px-4 text-sm font-medium text-white transition-all hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="flex h-9 items-center gap-2 rounded-lg bg-linear-to-r from-purple-500 to-pink-500 px-4 text-sm font-medium text-white transition-all hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {isSaving ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -586,7 +587,7 @@ export default function NotesPage() {
                   className={cn(
                     "flex items-center gap-2 rounded-xl px-4 py-2 text-sm transition-all",
                     isPreviewMode
-                      ? "bg-gradient-to-br from-purple-500 to-pink-500 text-white"
+                      ? "bg-linear-to-br from-purple-500 to-pink-500 text-white"
                       : "border border-white/10 bg-white/5 text-white/80 hover:bg-white/10"
                   )}
                 >
@@ -609,7 +610,7 @@ export default function NotesPage() {
                   <ReactMarkdown 
                     remarkPlugins={[remarkGfm]}
                     components={{
-                      a: ({ node, children, href, ...props }) => {
+                      a: ({ children, href, ...props }) => {
                         const text = children?.toString() || "";
                         // Check if this is a file link
                         if (href && (text.startsWith("📎") || text.startsWith("🎤"))) {
@@ -625,22 +626,22 @@ export default function NotesPage() {
                         }
                         return <a href={href} {...props}>{children}</a>;
                       },
-                      h1: ({ node, children, ...props }) => (
+                      h1: ({ children, ...props }) => (
                         <h1 className="text-4xl font-bold text-white mt-6 mb-4" {...props}>{children}</h1>
                       ),
-                      h2: ({ node, children, ...props }) => (
+                      h2: ({ children, ...props }) => (
                         <h2 className="text-3xl font-bold text-white mt-5 mb-3" {...props}>{children}</h2>
                       ),
-                      h3: ({ node, children, ...props }) => (
+                      h3: ({ children, ...props }) => (
                         <h3 className="text-2xl font-bold text-white mt-4 mb-3" {...props}>{children}</h3>
                       ),
-                      h4: ({ node, children, ...props }) => (
+                      h4: ({ children, ...props }) => (
                         <h4 className="text-xl font-bold text-white mt-3 mb-2" {...props}>{children}</h4>
                       ),
-                      strong: ({ node, children, ...props }) => (
+                      strong: ({ children, ...props }) => (
                         <strong className="font-bold text-white" {...props}>{children}</strong>
                       ),
-                      em: ({ node, children, ...props }) => (
+                      em: ({ children, ...props }) => (
                         <em className="italic text-white/90" {...props}>{children}</em>
                       ),
                     }}
@@ -667,7 +668,7 @@ export default function NotesPage() {
             <button
               onClick={handleCreateNote}
               disabled={isSaving}
-              className="flex items-center gap-2 rounded-xl bg-gradient-to-br from-purple-500 to-pink-500 px-6 py-3 text-white transition-all hover:scale-105 disabled:opacity-50"
+              className="flex items-center gap-2 rounded-xl bg-linear-to-br from-purple-500 to-pink-500 px-6 py-3 text-white transition-all hover:scale-105 disabled:opacity-50"
             >
               <Plus className="h-5 w-5" />
               Create Note
@@ -702,6 +703,8 @@ export default function NotesPage() {
                 <button
                   onClick={handleCloseDatePicker}
                   className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/5 text-white/60 transition-all hover:bg-white/10 hover:text-white"
+                  title="Close date picker"
+                  aria-label="Close date picker"
                 >
                   <X className="h-5 w-5" />
                 </button>
@@ -718,6 +721,8 @@ export default function NotesPage() {
                 }}
                 className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white backdrop-blur-xl focus:border-purple-500/50 focus:outline-none"
                 autoFocus
+                title="Select note date"
+                aria-label="Select note date"
               />
               <div className="mt-4 flex justify-end gap-2">
                 <button
@@ -757,24 +762,28 @@ export default function NotesPage() {
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/5 text-white/60 transition-all hover:bg-white/10 hover:text-white"
+                    title="Open in new tab"
+                    aria-label="Open file in new tab"
                   >
                     <ExternalLink className="h-4 w-4" />
                   </a>
                   <button
                     onClick={() => setFilePreview(null)}
                     className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/5 text-white/60 transition-all hover:bg-white/10 hover:text-white"
+                    title="Close file preview"
+                    aria-label="Close file preview"
                   >
                     <X className="h-5 w-5" />
                   </button>
                 </div>
               </div>
-              <div className="overflow-y-auto p-6" style={{ maxHeight: "calc(90vh - 80px)" }}>
+              <div className="max-h-[calc(90vh-80px)] overflow-y-auto p-6">
                 {filePreview.type === "image" && (
                   /* eslint-disable-next-line @next/next/no-img-element */
                   <img src={filePreview.url} alt={filePreview.filename} className="mx-auto max-w-full rounded-lg" />
                 )}
                 {filePreview.type === "pdf" && (
-                  <iframe src={filePreview.url} className="h-[70vh] w-full rounded-lg" />
+                  <iframe src={filePreview.url} className="h-[70vh] w-full rounded-lg" title="PDF preview" />
                 )}
                 {filePreview.type === "audio" && (
                   <div className="flex items-center justify-center">
@@ -788,7 +797,7 @@ export default function NotesPage() {
                       href={filePreview.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-br from-purple-500 to-pink-500 px-6 py-3 text-white transition-all hover:scale-105"
+                      className="inline-flex items-center gap-2 rounded-xl bg-linear-to-br from-purple-500 to-pink-500 px-6 py-3 text-white transition-all hover:scale-105"
                     >
                       <ExternalLink className="h-5 w-5" />
                       Open in New Tab

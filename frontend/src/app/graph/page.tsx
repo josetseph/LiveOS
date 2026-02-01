@@ -72,7 +72,7 @@ export default function GraphPage() {
       {/* Legend */}
       <div className="absolute bottom-6 left-6 z-10 max-w-xs rounded-2xl border border-white/10 bg-black/80 p-5 shadow-2xl backdrop-blur-xl transition-all duration-300 hover:scale-[1.02]">
         <div className="mb-4 flex items-center gap-2.5 border-b border-white/10 pb-3">
-          <div className="rounded-lg bg-gradient-to-br from-purple-500/20 to-purple-500/5 p-2">
+          <div className="rounded-lg bg-linear-to-br from-purple-500/20 to-purple-500/5 p-2">
             <Network className="h-5 w-5 text-pink-400" />
           </div>
           <div>
@@ -83,42 +83,42 @@ export default function GraphPage() {
         <div className="space-y-2.5">
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#00c6ff] shadow-[0_0_12px_#00c6ff]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#00c6ff] shadow-[0_0_12px_#00c6ff]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#00c6ff] opacity-30"></span>
             </div>
             <span className="font-semibold">Concept / Theme</span>
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#7000ff] shadow-[0_0_12px_#7000ff]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#7000ff] shadow-[0_0_12px_#7000ff]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#7000ff] opacity-30"></span>
             </div>
             <span className="font-semibold">Entity (Person/Place)</span>
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#a78bfa] shadow-[0_0_12px_#a78bfa]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#a78bfa] shadow-[0_0_12px_#a78bfa]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#a78bfa] opacity-30"></span>
             </div>
             <span className="font-semibold">Persona / Trait</span>
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#ff0055] shadow-[0_0_12px_#ff0055]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#ff0055] shadow-[0_0_12px_#ff0055]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#ff0055] opacity-30"></span>
             </div>
             <span className="font-semibold">Task / Goal</span>
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-white shadow-[0_0_12px_rgba(255,255,255,0.6)]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-white shadow-[0_0_12px_rgba(255,255,255,0.6)]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-white opacity-20"></span>
             </div>
             <span className="font-semibold">Note / Memory</span>
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#ffd700] shadow-[0_0_12px_#ffd700]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#ffd700] shadow-[0_0_12px_#ffd700]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#ffd700] opacity-30"></span>
             </div>
             <span className="font-semibold">Reference / Citation</span>
@@ -275,6 +275,8 @@ export default function GraphPage() {
                       "border-[#ff0055]/30 bg-[#ff0055]/15 text-[#ff0055] shadow-lg shadow-[#ff0055]/10",
                     selectedNode.group === "Reference" &&
                       "border-[#ffd700]/30 bg-[#ffd700]/15 text-[#ffd700] shadow-lg shadow-[#ffd700]/10",
+                    selectedNode.group === "Community" &&
+                      "border-cyan-500/30 bg-cyan-500/15 text-cyan-400 shadow-lg shadow-cyan-500/10",
                     selectedNode.group === "Note" && selectedNode.domain === "Academic" &&
                       "border-emerald-500/30 bg-emerald-500/15 text-emerald-400 shadow-lg shadow-emerald-500/10",
                     selectedNode.group === "Note" && selectedNode.domain === "Professional" &&
@@ -289,6 +291,8 @@ export default function GraphPage() {
               <button
                 onClick={() => setSelectedNode(null)}
                 className="group rounded-xl border border-white/5 p-2 text-zinc-400 transition-all hover:border-white/10 hover:bg-white/5 hover:text-white"
+                title="Close panel"
+                aria-label="Close panel"
               >
                 <X className="h-5 w-5 transition-transform duration-300 group-hover:rotate-90" />
               </button>
@@ -358,18 +362,60 @@ export default function GraphPage() {
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      <div className="rounded-xl border border-white/10 bg-white/5 p-5">
-                        <div className="mb-3 flex items-center gap-2">
-                          <Info className="h-4 w-4 text-pink-400" />
-                          <span className="text-xs font-bold uppercase tracking-wider text-white">Summary</span>
+                      {/* Summary Section */}
+                      {selectedNode.summary && (
+                        <div className="rounded-xl border border-white/10 bg-white/5 p-5">
+                          <div className="mb-3 flex items-center gap-2">
+                            <Info className="h-4 w-4 text-pink-400" />
+                            <span className="text-xs font-bold uppercase tracking-wider text-white">Summary</span>
+                          </div>
+                          <p className="text-sm leading-relaxed text-zinc-300">
+                            {selectedNode.summary}
+                          </p>
                         </div>
-                        <p className="text-sm leading-relaxed text-zinc-300">
-                          {selectedNode.summary ||
-                            (selectedNode.group === "Concept"
+                      )}
+
+                      {/* Task-specific: Description */}
+                      {selectedNode.description && (
+                        <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                          <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-1">Description</p>
+                          <p className="text-sm text-zinc-300 leading-relaxed">{selectedNode.description}</p>
+                        </div>
+                      )}
+
+                      {/* Task-specific: Status */}
+                      {selectedNode.status && (
+                        <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                          <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-1">Status</p>
+                          <p className="text-sm text-zinc-300">{selectedNode.status}</p>
+                        </div>
+                      )}
+
+                      {/* Task-specific: Created At */}
+                      {selectedNode.created_at && (
+                        <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                          <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-1">Created</p>
+                          <p className="text-sm text-zinc-300">
+                            {new Date(selectedNode.created_at).toLocaleDateString()}
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Fallback if no details */}
+                      {!selectedNode.summary && !selectedNode.description && !selectedNode.status && (
+                        <div className="rounded-xl border border-white/10 bg-white/5 p-5">
+                          <div className="mb-3 flex items-center gap-2">
+                            <Info className="h-4 w-4 text-pink-400" />
+                            <span className="text-xs font-bold uppercase tracking-wider text-white">Summary</span>
+                          </div>
+                          <p className="text-sm leading-relaxed text-zinc-300">
+                            {selectedNode.group === "Concept"
                               ? "This is a key theme identified in your knowledge base."
-                              : "This entity is connected to your notes and thoughts.")}
-                        </p>
-                      </div>
+                              : "This entity is connected to your notes and thoughts."}
+                          </p>
+                        </div>
+                      )}
+
                       <div className="rounded-xl border border-white/5 bg-white/5 p-4 text-center">
                         <p className="text-xs font-medium text-zinc-500">
                           Click Notes in the sidebar to create new connections

@@ -38,15 +38,34 @@ class ChatWorkflow:
 
             # 3. Append References (Post-Processing)
             # Deduplicate references by Note ID
+            # Sources: 1) direct note_id on doc (recent notes), 2) linked_notes from graph nodes
             seen_refs = set()
             references = []
 
+            # Debug: Count how many docs have linked_notes
+            docs_with_notes = sum(1 for d in top_docs if d.get("linked_notes"))
+            total_linked = sum(len(d.get("linked_notes", [])) for d in top_docs)
+            logger.debug(
+                f"[Chat] Reference extraction: {docs_with_notes}/{len(top_docs)} docs have linked_notes, {total_linked} total notes"
+            )
+
             for d in top_docs:
+                # Source 1: Direct note reference (from recent notes)
                 nid = d.get("note_id")
                 title = d.get("title") or "Untitled Note"
                 if nid and nid not in seen_refs:
                     references.append(f"- [{title}](/notes/{nid})")
                     seen_refs.add(nid)
+
+                # Source 2: Linked notes from graph nodes (evidence grounding)
+                for linked_note in d.get("linked_notes", []):
+                    lnid = linked_note.get("id")
+                    ltitle = linked_note.get("title") or "Untitled Note"
+                    if lnid and lnid not in seen_refs:
+                        references.append(f"- [{ltitle}](/notes/{lnid})")
+                        seen_refs.add(lnid)
+
+            logger.info(f"[Chat] Found {len(references)} references for response")
 
             if references:
                 answer += "\n\n### References\n" + "\n".join(references)

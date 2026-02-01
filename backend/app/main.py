@@ -26,7 +26,6 @@ async def upload_file(file: UploadFile = File(...)):
     Upload a file to R2 Cloud Storage.
     """
     from app.utils.bucket_storage import send_files, get_files
-    import uuid
 
     # Generate unique key
     ext = file.filename.split(".")[-1]
@@ -117,12 +116,20 @@ async def get_graph_visualization():
            n.id as source_uuid,
            n.summary as source_summary,
            n.domain as source_domain,
+           n.description as source_description,
+           n.status as source_status,
+           n.created_at as source_created_at,
+           n.title as source_title,
            elementId(m) as target_id, 
            COALESCE(m.name, m.summary, m.trait, m.description, m.title) as target_name, 
            labels(m)[0] as target_label,
            m.id as target_uuid,
            m.summary as target_summary,
            m.domain as target_domain,
+           m.description as target_description,
+           m.status as target_status,
+           m.created_at as target_created_at,
+           m.title as target_title,
            type(r) as type
     
     UNION
@@ -134,12 +141,20 @@ async def get_graph_visualization():
            n.id as source_uuid,
            n.summary as source_summary,
            n.domain as source_domain,
+           n.description as source_description,
+           n.status as source_status,
+           n.created_at as source_created_at,
+           n.title as source_title,
            NULL as target_id, 
            NULL as target_name, 
            NULL as target_label,
            NULL as target_uuid,
            NULL as target_summary,
            NULL as target_domain,
+           NULL as target_description,
+           NULL as target_status,
+           NULL as target_created_at,
+           NULL as target_title,
            NULL as type
     
     """
@@ -168,6 +183,14 @@ async def get_graph_visualization():
                     "uuid": record["source_uuid"],
                     "summary": record["source_summary"],
                     "domain": record["source_domain"],
+                    "description": record["source_description"],
+                    "status": record["source_status"],
+                    "created_at": (
+                        str(record["source_created_at"])
+                        if record["source_created_at"]
+                        else None
+                    ),
+                    "title": record["source_title"],
                 }
 
             if record["target_id"] is not None:
@@ -184,6 +207,14 @@ async def get_graph_visualization():
                         "uuid": record["target_uuid"],
                         "summary": record["target_summary"],
                         "domain": record["target_domain"],
+                        "description": record["target_description"],
+                        "status": record["target_status"],
+                        "created_at": (
+                            str(record["target_created_at"])
+                            if record["target_created_at"]
+                            else None
+                        ),
+                        "title": record["target_title"],
                     }
 
                 links.append({"source": s_id, "target": t_id, "type": record["type"]})

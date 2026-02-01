@@ -250,6 +250,54 @@ INVERSE_MAPPINGS: Dict[str, str] = {
 }
 
 
+# ============ CONTRADICTION RULES (Bi-Temporal Support) ============
+# Relationships that contradict each other - if new one appears, old one should be invalidated
+CONTRADICTION_RULES: Dict[str, List[str]] = {
+    # Positive ↔ Negative social relationships
+    RelationshipType.FRIENDS_WITH: ["enemies_with", "hates", "dislikes", "avoids"],
+    RelationshipType.KNOWS: [],  # Knowing someone can't really be contradicted
+    RelationshipType.MARRIED_TO: ["divorced_from", "separated_from"],
+    RelationshipType.PARTNERS_WITH: ["separated_from", "ended_partnership"],
+    RelationshipType.WORKS_WITH: ["left_company", "terminated"],
+    RelationshipType.REPORTS_TO: [],  # Can change boss without contradiction
+    RelationshipType.LEARNING: [
+        RelationshipType.EXPERT_IN
+    ],  # Expert contradicts learning
+    # Task relationships
+    RelationshipType.DEPENDS_ON: ["independent_of"],
+    RelationshipType.BLOCKS: ["unblocks", "completed"],
+}
+
+# Also define the reverse (negative types and what they contradict)
+CONTRADICTION_RULES.update(
+    {
+        "enemies_with": [RelationshipType.FRIENDS_WITH, RelationshipType.PARTNERS_WITH],
+        "hates": [RelationshipType.FRIENDS_WITH, "loves"],
+        "dislikes": [RelationshipType.FRIENDS_WITH, "likes"],
+        "divorced_from": [RelationshipType.MARRIED_TO],
+        "loves": ["hates", "dislikes"],
+        "likes": ["hates", "dislikes"],
+    }
+)
+
+
+def get_contradicting_types(relationship_type: str) -> List[str]:
+    """
+    Get relationship types that contradict the given type.
+    If a new relationship of this type is created, old contradicting relationships
+    should be invalidated (soft delete with valid_to timestamp).
+
+    Args:
+        relationship_type: The new relationship type being created
+
+    Returns:
+        List of relationship types that should be invalidated
+    """
+    contradicting = CONTRADICTION_RULES.get(relationship_type, [])
+    # Ensure we return string values, not enum objects
+    return [str(c.value) if isinstance(c, Enum) else str(c) for c in contradicting]
+
+
 def get_expected_relationships(source_label: str, target_label: str) -> List[str]:
     """
     Get expected relationship types between two node labels
@@ -277,7 +325,11 @@ def can_evolve(current_type: str, new_type: str) -> bool:
         True if evolution is allowed, False otherwise
     """
     allowed_evolutions = EVOLUTION_RULES.get(current_type, [])
-    return new_type in allowed_evolutions
+    # Convert enum objects to strings for comparison
+    allowed_str = [
+        str(e.value) if isinstance(e, Enum) else str(e) for e in allowed_evolutions
+    ]
+    return new_type in allowed_str
 
 
 def is_bidirectional(relationship_type: str) -> bool:
@@ -290,7 +342,11 @@ def is_bidirectional(relationship_type: str) -> bool:
     Returns:
         True if bidirectional, False otherwise
     """
-    return relationship_type in BIDIRECTIONAL_TYPES
+    # Convert enum objects to strings for comparison
+    bidirectional_str = {
+        str(b.value) if isinstance(b, Enum) else str(b) for b in BIDIRECTIONAL_TYPES
+    }
+    return relationship_type in bidirectional_str
 
 
 def get_inverse_type(relationship_type: str) -> str:

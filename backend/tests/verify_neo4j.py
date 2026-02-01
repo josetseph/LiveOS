@@ -90,7 +90,7 @@ def verify_neo4j():
     for rel_type in rel_types:
         query = f"""
         MATCH ()-[r:{rel_type}]->()
-        WHERE r.status = 'active'
+        WHERE r.is_active = true
         RETURN count(r) as count
         """
         result = graph_service.execute_query(query)

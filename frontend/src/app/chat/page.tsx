@@ -165,7 +165,7 @@ export default function ChatPage() {
         <div className="mx-auto max-w-4xl px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-pink-500">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-linear-to-br from-purple-500 to-pink-500">
                 <Image src="/logo-black-background.png" alt="LiveOS" width={96} height={96} className="h-24 w-24 object-contain" />
               </div>
               <div>
@@ -241,7 +241,7 @@ export default function ChatPage() {
                     )}
                   >
                     {message.role === "assistant" && (
-                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-pink-500">
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-linear-to-br from-purple-500 to-pink-500">
                         <Sparkles className="h-4 w-4 text-white" />
                       </div>
                     )}
@@ -249,7 +249,7 @@ export default function ChatPage() {
                       className={cn(
                         "max-w-[80%] rounded-2xl px-4 py-3",
                         message.role === "user"
-                          ? "bg-gradient-to-br from-purple-500 to-pink-500 text-white"
+                          ? "bg-linear-to-br from-purple-500 to-pink-500 text-white"
                           : "border border-white/10 bg-white/5 text-white backdrop-blur-xl"
                       )}
                     >
@@ -378,7 +378,7 @@ export default function ChatPage() {
                   animate={{ opacity: 1 }}
                   className="flex gap-4"
                 >
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-pink-500">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-linear-to-br from-purple-500 to-pink-500">
                     <Loader2 className="h-4 w-4 animate-spin text-white" />
                   </div>
                   <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 backdrop-blur-xl">
@@ -407,7 +407,9 @@ export default function ChatPage() {
             <button
               type="submit"
               disabled={!input.trim() || isLoading}
-              className="flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-purple-500 to-pink-500 text-white transition-all hover:scale-105 disabled:opacity-50 disabled:hover:scale-100"
+              className="flex h-12 w-12 items-center justify-center rounded-full bg-linear-to-br from-purple-500 to-pink-500 text-white transition-all hover:scale-105 disabled:opacity-50 disabled:hover:scale-100"
+              title="Send message"
+              aria-label="Send message"
             >
               <Send className="h-5 w-5" />
             </button>
@@ -417,8 +419,6 @@ export default function ChatPage() {
             <span className="font-medium text-purple-400">Gemma3 4B</span>
             <span>•</span>
             <span className="font-medium text-pink-400">Qwen3 Embedding</span>
-            <span>•</span>
-            <span className="font-medium text-cyan-400">MxBai Reranker</span>
             <span>•</span>
             <span className="font-medium text-emerald-400">Paddle OCR</span>
             <span>•</span>
@@ -448,7 +448,7 @@ export default function ChatPage() {
             >
               <div className="flex items-center justify-between border-b border-white/10 px-6 py-4">
                 <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-pink-500">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-linear-to-br from-purple-500 to-pink-500">
                     <FileText className="h-5 w-5 text-white" />
                   </div>
                   <h2 className="text-xl font-bold text-white">{previewNote.title}</h2>
@@ -456,11 +456,13 @@ export default function ChatPage() {
                 <button
                   onClick={() => setPreviewNote(null)}
                   className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/5 text-white/60 transition-all hover:bg-white/10 hover:text-white"
+                  title="Close preview"
+                  aria-label="Close preview"
                 >
                   <X className="h-5 w-5" />
                 </button>
               </div>
-              <div className="overflow-y-auto p-6" style={{ maxHeight: "calc(80vh - 80px)" }}>
+              <div className="max-h-[calc(80vh-80px)] overflow-y-auto p-6">
                 <div className="prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-4xl prose-h1:mt-6 prose-h1:mb-4 prose-h2:text-3xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-2xl prose-h3:mt-4 prose-h3:mb-3 prose-h4:text-xl prose-h4:mt-3 prose-h4:mb-2 prose-p:leading-relaxed prose-p:text-white/90 prose-p:my-3 prose-strong:text-white prose-strong:font-bold prose-em:text-white/90 prose-em:italic prose-a:text-purple-400 prose-a:underline hover:prose-a:text-purple-300 prose-code:text-pink-400 prose-code:bg-white/10 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:before:content-[''] prose-code:after:content-[''] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-l-4 prose-blockquote:border-purple-500/50 prose-blockquote:text-white/80 prose-blockquote:pl-4 prose-blockquote:italic prose-ul:text-white/90 prose-ul:my-3 prose-ol:text-white/90 prose-ol:my-3 prose-li:text-white/90 prose-li:my-1">
                   <ReactMarkdown 
                     remarkPlugins={[remarkGfm]}
@@ -528,7 +530,7 @@ export default function ChatPage() {
             >
               <div className="flex items-center justify-between border-b border-white/10 px-6 py-4">
                 <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500 to-pink-500">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-linear-to-br from-purple-500 to-pink-500">
                     <FileText className="h-5 w-5 text-white" />
                   </div>
                   <h2 className="text-lg font-semibold text-white">{filePreview.filename}</h2>
@@ -547,12 +549,14 @@ export default function ChatPage() {
                   <button
                     onClick={() => setFilePreview(null)}
                     className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/5 text-white/60 transition-all hover:bg-white/10 hover:text-white"
+                    title="Close file preview"
+                    aria-label="Close file preview"
                   >
                     <X className="h-5 w-5" />
                   </button>
                 </div>
               </div>
-              <div className="overflow-y-auto p-6" style={{ maxHeight: "calc(90vh - 80px)" }}>
+              <div className="max-h-[calc(90vh-80px)] overflow-y-auto p-6">
                 {filePreview.type === "image" && (
                   /* eslint-disable-next-line @next/next/no-img-element */
                   <img
@@ -569,14 +573,14 @@ export default function ChatPage() {
                   />
                 )}
                 {filePreview.type === "audio" && (
-                  <div className="flex min-h-[200px] items-center justify-center">
+                  <div className="flex min-h-50 items-center justify-center">
                     <audio controls src={filePreview.url} className="w-full max-w-2xl">
                       Your browser does not support the audio element.
                     </audio>
                   </div>
                 )}
                 {filePreview.type === "other" && (
-                  <div className="flex min-h-[200px] flex-col items-center justify-center gap-4 text-white/60">
+                  <div className="flex min-h-50 flex-col items-center justify-center gap-4 text-white/60">
                     <FileText className="h-16 w-16" />
                     <p>Preview not available for this file type</p>
                     <a

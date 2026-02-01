@@ -1,34 +1,38 @@
 import re
 
+# NOTE: Entity context isolation is now handled by the LLM during extraction.
+# The LLM provides an `isolated_context` field for each entity/concept.
+# This function is kept as a fallback for edge cases where isolated_context is empty.
 
-def get_entity_context(text: str, entity_name: str, window: int = 1) -> str:
+
+def get_entity_context(
+    text: str,
+    entity_name: str,
+    other_entities: list[str] | None = None,
+    window: int = 2,
+) -> str:
     """
-    Extracts sentences containing the entity_name + surrounding window.
+    FALLBACK ONLY: Extracts paragraphs containing the entity_name.
+
+    Primary isolation should come from the LLM's `isolated_context` field.
+    This function is only called when isolated_context is empty/missing.
+
+    Args:
+        text: The full note text
+        entity_name: The entity we're extracting context for
+        other_entities: Unused (kept for backward compatibility)
+        window: Unused (kept for backward compatibility)
     """
-    # Simple sentence splitting by punctuation
-    sentences = re.split(r"(?<=[.!?])\s+", text)
+    # Split by paragraph
+    paragraphs = re.split(r"\n\s*\n", text.strip())
 
-    # Identify indices
-    relevant_indices = [
-        i for i, s in enumerate(sentences) if entity_name.lower() in s.lower()
-    ]
+    entity_lower = entity_name.lower()
 
-    if not relevant_indices:
-        # Fallback: If entity not found (e.g. slight mismatch), return full text
-        # Or maybe return nothing? Better to return full text to be safe,
-        # but the request was "Context Windowing".
-        # Let's try to match by parts?
-        # For now, return empty string if not found to avoid noise?
-        # No, if not found, it implies the Extraction phase found it but Exact match failed.
-        # Let's return the whole text as fallback, but rely on the LLM Prompt to filter.
+    # Include any paragraph that mentions the entity
+    relevant = [p.strip() for p in paragraphs if entity_lower in p.lower()]
+
+    if not relevant:
+        # Entity not found - return full text for LLM to handle
         return text
 
-    context = []
-    for idx in relevant_indices:
-        start = max(0, idx - window)
-        end = min(len(sentences), idx + window + 1)
-        context.extend(sentences[start:end])
-
-    # Deduplicate and join
-    unique_sentences = list(dict.fromkeys(context))
-    return " ".join(unique_sentences)
+    return "\n\n".join(relevant)

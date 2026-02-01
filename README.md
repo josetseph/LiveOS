@@ -66,8 +66,8 @@ graph TD
         Search -->|1. Vector Scan| Neo4j
         Search -.->|2. Fetch Content| Postgres
         Search -->|3. Graph Expansion| Neo4j
-        Search -->|4. Rerank - 50 cap| Reranker[Qwen3 Reranker 0.6B Seq-Cls]
-        Reranker -->|Top Context| Synthesis[Domain-Aware Synthesis]
+        Search -->|4. Symbolic Ranking| Ranker[Priority Scoring - Primary 100, Secondary 50]
+        Ranker -->|Top Context| Synthesis[Domain-Aware Synthesis]
         Synthesis --> User
     end
 ```
@@ -141,7 +141,6 @@ Deploy the entire stack with a single command (requires Ollama running on host).
 
 2.  **Download Hugging Face Models** (pre-bundled in repo):
     *   **Florence-2-Large** (Vision): [`microsoft/Florence-2-large`](https://huggingface.co/microsoft/Florence-2-large)
-    *   **Qwen3 Reranker** (Context Scoring): [`tomaarsen/qwen3-reranker-0.6b-seq-cls`](https://huggingface.co/tomaarsen/qwen3-reranker-0.6b-seq-cls)
     *   **Whisper V3 Turbo** (Audio Transcription): [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo)
     
     These models will need to be downloaded into the `backend/models/` folder and will be copied into the Docker image during build.
@@ -202,14 +201,20 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 2.  **Cognition (Extraction)**:
     *   **Model**: `gemma3:4b` - Lightweight model optimized for structured JSON extraction.
     *   **Schema**: Strict JSON extraction for `Entities`, `Concepts`, `Tasks`, `Persona`, `Domain`, `References`.
-    *   **Domain Classification**: Automatically categorizes notes as Academic/Personal/Professional based on primary subject matter.
+    *   **Domain Classification**: Automatically categorizes notes as Academic/Personal/Professional/Creative/Dreams based on primary subject matter.
     *   **Reference Extraction**: Captures citations (papers, books, quotes) with full attribution for academic notes.
-    *   **JSON Repair Pipeline**: A robust regex layer fixes common LLM syntax errors (comments, smart quotes, unquoted keys).
+    *   **Isolated Context Detection**: Identifies facts that are only true within the note's context (e.g., "today" references).
+    *   **Schema Normalization**: Handles LLM inconsistencies (capitalized keys, string importance values, status variations) via Pydantic validators.
+    *   **Entity Deduplication**: Normalizes names (strips `#` prefix, applies `.title()` case) to prevent duplicate nodes.
+    *   **JSON Repair Pipeline**: A robust regex layer fixes common LLM syntax errors (comments, smart quotes, control characters, markdown fences).
     *   **Entity-Level Locking**: Prevents race conditions when multiple notes update the same entity concurrently.
 
 3.  **Embedding & Graph Storage**:
     *   **Embedding**: `qwen3-embedding:0.6b` generates 1024-dim vectors - optimized for speed on consumer hardware.
     *   **Graph**: Neo4j stores the ontology with relationships (`MENTIONS`, `CONTRIBUTES_TO`, `PRODUCES_TASK`, `REVEALED_BY`).
+    *   **Bi-Temporal Relationships**: Each relationship tracks `valid_from` (event time), `ingested_at` (system time), `valid_to`, and `is_active`.
+    *   **Community Assignment**: Nodes are automatically assigned to domain-based Community clusters (Professional, Academic, Personal, Creative, Dreams).
+    *   **Soft Invalidation**: Contradicted relationships are marked `is_active=false` with `valid_to` timestamp instead of deletion.
     *   **Neighborhood Summaries**: Parallel updates with async locking ensure data integrity.
 
 ---
@@ -222,39 +227,36 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
     *   **Step 3: Recent Notes** (Short-Term Memory): Fetch 20 most recent notes for current context
     *   **Step 4: Linked Evidence**: Trace back from graph nodes to source notes that formed them
     *   **Step 5: Chunking**: Split all note content into overlapping snippets (400 chars, 100 overlap)
-    *   **Step 6: Relationship Expansion**: Expand graph nodes with related nodes before reranking
-    *   **Step 7: Reranking**: Score all candidates (nodes + snippets) with qwen3-reranker-0.6b-seq-cls
+    *   **Step 6: Relationship Expansion**: Expand graph nodes with related nodes before ranking
+    *   **Step 7: Symbolic Ranking**: Score all candidates using pure priority-based scoring (no neural reranker)
 
-2.  **Intelligent Multi-Factor Scoring**:
-    *   **Weighted Formula**: `final_score = rerank_score × recency_boost × entity_match_boost × keyword_match_boost × temporal_query_boost`
-    *   **Rerank Score**: 0-10+ from qwen3-reranker-0.6b-seq-cls (semantic relevance baseline)
-    *   **Recency Boost**: 1.0-2.0× linear decay (today = 2.0×, 1 year ago = 1.1×)
-    *   **Entity Match Boost**: 2.0× if result mentions detected entity names (e.g., "Votex365", "livecops")
-    *   **Keyword Match Boost**: 3.0× for 80%+ query term match, 2.0× for 50%+, 1.5× for 30%+
-    *   **Temporal Query Boost**: 3.0× for recent notes on temporal queries (e.g., "recent notes", "latest thoughts")
+2.  **Pure Symbolic Ranking**:
+    *   **Philosophy**: Trust the graph. If the user asks about "svtlottery", nodes named "svtlottery" are definitionally relevant.
+    *   **Primary Nodes** (name matches query entities): `base_score = 100.0`, marked `symbolic_immune = True`
+    *   **Secondary Nodes** (related via graph): `base_score = 50.0`
+    *   **Final Score**: `base_score × entity_boost × keyword_boost`
+    *   **Performance**: Instant ranking (~0.0001s vs ~2.0s with neural reranker)
 
 3.  **Smart Query Analysis**:
     *   **LLM-Powered**: Uses Gemma3 structured outputs to extract intent, entities, and concepts
     *   **Heuristic Fallback**: Detects capitalized words, quoted terms, words after "at/with/about/for/working"
-    *   **Temporal Detection**: Applies 3× boost only for queries explicitly asking for recent/latest/newest AND not entity-focused
-    *   **Example Behavior**: "job at livecops" → entity query (no temporal boost), "recent notes" → temporal query (3× boost)
+    *   **Entity Detection**: Extracts mentioned entity/concept names for priority scoring
+    *   **Example Behavior**: "job at livecops" → "livecops" detected as entity, nodes named "livecops" get primary priority
 
-4.  **Dynamic Query-Aware Cutoffs**:
-    *   **Entity Queries** (e.g., "Votex365", "livecops"): **7.0 cutoff** - Aggressive precision filter (typically 2-5 results from 30-40 candidates)
-    *   **Temporal Queries** (e.g., "recent notes"): **5.0 cutoff** - Broad context, maintains recall
-    *   **General Queries**: **6.0 cutoff** - Balanced precision/recall
-    *   **Adaptive Fallback**: If top score < base cutoff, uses 60% of top score (min 0.6) to avoid empty results
-    *   **Design Philosophy**: Prioritizes precision over recall - system feeds LLM with 2-5 highly relevant snippets rather than 20+ mixed-quality results
-    *   **Impact**: Reduces LLM token usage by 23% (36.8 → 28.2 avg results) while improving relevance. For entity queries, achieves 85-95% noise reduction.
+4.  **Fact Pool Context Format**:
+    *   **Unified Format**: Single pool of evidence with semantic labels instead of rigid sections
+    *   **`[CORE CONSENSUS]`**: Graph consensus summaries (highest trust)
+    *   **`[RELATED CONTEXT]`**: Related node summaries
+    *   **`[DOMAIN OVERVIEW]`**: Community-level summaries
+    *   **`[CONNECTION PATH]`**: Multi-hop relationship chains
+    *   **Design**: LLM synthesizes across all facts naturally rather than treating sections separately
 
-5.  **Early Stopping Optimization**: Stops reranking after finding 50 high-quality results (score ≥ 0.8) for 3-11% speed improvement
-
-6.  **Domain-Aware Synthesis**: **Gemma3 4B** with adaptive system prompts:
-    *   **Academic**: Pedagogical, conceptual explanations with prerequisites and citations
-    *   **Personal**: Empathetic insights connecting experiences and feelings
-    *   **Professional**: Concise, action-oriented responses referencing work context
-    *   **Creative**: Themes and imagery focus, no advice or judgment
-    *   **Strict Grounding**: No advice, only insights from user's notes with specific quotes
+5.  **Conversational "Thoughtful Peer" Synthesis**: **Gemma3 4B** with persona-based prompting:
+    *   **Style**: "Write like a thoughtful peer reflecting back"
+    *   **No Rigid Headers**: Avoids formulaic "DIRECT ANSWER:" or "KEY INSIGHTS:" patterns
+    *   **Natural Voice**: "You mentioned..." rather than "The notes reveal..."
+    *   **Strict Grounding**: Every claim must trace to context, no invented information
+    *   **Domain-Aware**: Adapts tone for Academic/Personal/Professional/Creative content
 
 ---
 
@@ -270,7 +272,7 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 *   **LLM Stack** (Ollama):
     *   **Main LLM**: Gemma3 4B (Extraction, Summarization, Chat)
     *   **Embedding**: Qwen3 Embedding 0.6B (1024-dim)
-    *   **Reranking**: Qwen3 Reranker 0.6B (Seq-Cls)
+    *   **Ranking**: Pure Symbolic (no neural reranker)
     *   **Vision**: Florence-2-Large (Transformers)
     *   **Audio**: Whisper Large V3 Turbo (Transformers)
     *   **OCR**: PaddleOCR-VL 0.9B (Ollama) - Optimized for resource efficiency
@@ -320,12 +322,19 @@ While DeepSeek-OCR is faster on single pages (0.01s vs 0.48s), the difference be
 *   **Academic Knowledge Graph**: Citation tracking, prerequisite chains, contradiction detection
 *   **Multimodal Ingestion**: Text, Audio, Images, PDFs
 *   **GraphRAG**: Semantic search + Knowledge graph traversal with domain boosting
-*   **Historical Journaling**: Manual date picker for backdating notes
+*   **Community Summaries**: Microsoft GraphRAG-style domain clusters for broad/exploratory queries
+*   **Bi-Temporal Tracking**: Separates event time (when fact became true) from system time (when recorded)
+*   **Historical Journaling**: Manual date picker for backdating notes with proper temporal accuracy
+*   **Soft Invalidation**: Contradicted relationships marked inactive instead of deleted, preserving history
 *   **Entity-Level Locking**: Prevents data corruption during concurrent updates
 *   **Parallel Neighborhood Updates**: Faster ingestion with `asyncio.gather`
-*   **Soft-Capped Reranking**: 50-snippet limit for consistent 3-5s response times
+*   **Symbolic Ranking**: Pure priority-based scoring (primary=100, secondary=50) for instant, grounded retrieval
+*   **Extraction Robustness**: Schema normalization, type coercion, and JSON repair handle LLM inconsistencies
+*   **Entity Deduplication**: Automatic name normalization prevents duplicate nodes (`#project` = `project`)
+*   **Unified Isolated Context**: All extracted types (Entity, Concept, Task, Persona, Reference) use consistent `isolated_context` field
 *   **Markdown Support**: Note previews render markdown in chat
 *   **Real-time System Info**: Header displays all active services and databases
+*   **Dual Graph Visualization**: 2D Force Graph and 3D WebGL graph with Community clusters
 
 ---
 
@@ -533,8 +542,8 @@ export LLM_FALLBACK_PROVIDER=ollama
 **Key Concepts:**
 - **Neighborhood Summaries**: Each graph node (Concept, Entity, Task) maintains an incrementally updated summary that aggregates information across all notes that mention it
 - **Graph-First Strategy**: Searches distilled knowledge nodes (25 max) before falling back to note-level vector search
-- **Dynamic Cutoffs**: Query-aware filtering (7.0 for entities, 5.0 for temporal, 6.0 general) ensures precision over recall
-- **Multi-Factor Scoring**: Combines rerank score, recency, entity match, keyword match, and temporal boosts
+- **Symbolic Ranking**: Pure priority-based scoring trusts graph structure over neural reranking (primary nodes = 100, secondary = 50)
+- **Fact Pool Context**: Unified evidence format with semantic labels ([CORE CONSENSUS], [RELATED CONTEXT], [DOMAIN OVERVIEW])
 
 **Testing the System:**
 ```bash
@@ -552,6 +561,69 @@ See [RETRIEVAL_FAQ.md](backend/RETRIEVAL_FAQ.md) for detailed explanations of:
 - Multi-factor scoring formulas
 - Dynamic cutoff strategies
 - Performance optimization techniques
+
+### Bi-Temporal Knowledge Tracking
+
+LiveOS implements **bi-temporal data modeling** to accurately track both when facts became true and when they were recorded:
+
+**Time Dimensions:**
+- `valid_from`: **Event Time** - When the fact became true (note's `created_at` date)
+- `ingested_at`: **System Time** - When the system recorded the fact (always `now()`)
+- `valid_to`: When the fact stopped being true (null if still valid)
+- `is_active`: Quick boolean filter for current relationships
+
+**Use Case - Historical Note Ingestion:**
+```
+Note from 2024-01-15: "Started new job at Acme Corp"
+→ valid_from: 2024-01-15 (when it happened)
+→ ingested_at: 2026-01-31 (when you added it to LiveOS)
+→ is_active: true (still true today)
+```
+
+**Soft Invalidation:**
+When new information contradicts old facts, the system marks the old relationship as inactive instead of deleting it:
+```
+Old: "Chris works at Acme" (valid_from: 2024-01, is_active: false, valid_to: 2025-06)
+New: "Chris works at Globex" (valid_from: 2025-06, is_active: true)
+```
+
+**Benefits:**
+- Historical notes preserve their original dates when batch-ingested
+- Query "as-of" any point in time (event time or system time)
+- Full audit trail of knowledge evolution
+- No data loss from corrections
+
+### Community Summaries (GraphRAG)
+
+LiveOS implements **Microsoft GraphRAG-style Community Summaries** for broad, exploratory queries:
+
+**Domain-Based Communities:**
+| Community | Description |
+|-----------|-------------|
+| Professional Knowledge | Work, career, projects, colleagues |
+| Academic Knowledge | Learning, concepts, papers, courses |
+| Personal Knowledge | Relationships, feelings, life events |
+| Creative Knowledge | Art, writing, music, poetry |
+| Dreams Knowledge | Dream journals, subconscious patterns |
+
+**How It Works:**
+1. **Ingestion**: Each extracted entity/concept is assigned to a Community based on detected domain
+2. **Aggregation**: Communities track member nodes and generate high-level summaries
+3. **Retrieval**: Broad queries (e.g., "summarize my work life") fetch Community summaries first
+
+**Query Example:**
+```
+Query: "What are the major themes in my professional life?"
+→ Retrieves: [Community - Professional: Professional Knowledge]
+→ Summary: "Your professional journey centers on AI development, 
+   startup culture, and technical leadership..."
+```
+
+**Graph Structure:**
+```
+(Entity: Chris) -[:BELONGS_TO]-> (Community: Professional Knowledge)
+(Concept: GraphRAG) -[:BELONGS_TO]-> (Community: Academic Knowledge)
+```
 
 ### Knowledge Graph Relationships
 
@@ -582,8 +654,8 @@ See [RETRIEVAL_FAQ.md](backend/RETRIEVAL_FAQ.md) for detailed explanations of:
 - **Resource Usage**: PaddleOCR-VL saves 6GB VRAM vs DeepSeek-OCR
 
 **Key Results:**
-- **Cutoff System**: Filters 85-95% noise from entity queries
-- **Reranking**: Soft-capped at 50 snippets for consistent 3-5s response
+- **Symbolic Ranking**: Instant scoring (~0.0001s) vs neural reranking (~2.0s)
+- **Conversational Synthesis**: "Thoughtful Peer" persona produces natural, grounded responses
 - **Embedding Models**: Qwen3 0.6B provides 90%+ quality at 8× smaller size vs 8B models
 
 ---

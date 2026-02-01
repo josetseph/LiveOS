@@ -148,6 +148,7 @@ async def extraction_node(state: IngestionState):
     logger.info("Extracting Metadata (Knowledge Architect)...")
     prompt = f"""
     Analyze the following user note and extract structured metadata.
+    You are the "Knowledge Architect" - your job is to build isolated, content-rich knowledge nodes.
     
     DOMAIN CATEGORIZATION (Choose ONE - CRITICAL):
     Classify based on the PRIMARY SUBJECT MATTER, not the writing style or tone.
@@ -180,19 +181,58 @@ async def extraction_node(state: IngestionState):
     IMPORTANT: A note written in first person ("I learned about X") that explains academic concepts should be classified as Academic, not Personal. Similarly, "We decided in the meeting to use X" should be Professional, not Personal. Look at WHAT the note is about, not HOW it's written.
     
     RULES:
-    1. Return ONLY a single valid JSON object. 
-    2. ENTITY TYPES: Person, Place, Tool, Organization.
-    3. CONCEPT: Abstract themes, topics, or emotional states. EXAMPLES: "Health", "Work", "Productivity", "Stochastic Processes", "Machine Learning".
-    4. TASK: Specific actionable goals mentioned.
-       - STATUS: Use ONLY these standardized values: "Todo", "Complete", "In Progress", "Cancelled"
+    1. Return ONLY a single valid JSON object.
+    
+    2. ENTITY EXTRACTION (CRITICAL - ISOLATED CONTEXT):
+       - TYPES: Person, Place, Tool, Organization, Anonymous
+       - ANONYMOUS ENTITIES: If someone is described but not named (e.g., "the guy who stole from me", "my neighbor"), 
+         extract them with type "Anonymous" and a descriptive name (e.g., "The Thief", "My Neighbor").
+       - **isolated_context**: For EACH entity, provide ALL sentences/paragraphs that discuss THIS entity specifically.
+         * Include sentences where the entity is named
+         * Include follow-up sentences using pronouns (he/she/they/him/her) that refer to THIS entity
+         * EXCLUDE sentences about OTHER entities, even if in the same paragraph
+         * This is the MOST IMPORTANT field - it determines what goes into the entity's knowledge node
+       
+       EXAMPLE:
+       Note: "I like John. He is my friend. The guy who stole from me, I hate him."
+       Entities:
+       - name: "John", type: "Person", isolated_context: "I like John. He is my friend."
+       - name: "The Thief", type: "Anonymous", isolated_context: "The guy who stole from me, I hate him."
+       
+       EXAMPLE 2 (Multi-paragraph):
+       Note: "I saw John today. He was happy about his math test results.
+       
+       I wish I was as good as he was in maths. I kind of envy him."
+       Entities:
+       - name: "John", type: "Person", isolated_context: "I saw John today. He was happy about his math test results. I wish I was as good as he was in maths. I kind of envy him."
+       (All paragraphs relate to John via pronouns)
+    
+    3. CONCEPT EXTRACTION:
+       - Abstract themes, topics, or emotional states
+       - EXAMPLES: "Health", "Work", "Productivity", "Stochastic Processes", "Machine Learning"
+       - **isolated_context**: All sentences discussing this concept specifically
+       
+    4. TASK EXTRACTION:
+       - Specific actionable goals mentioned.
+       - **name**: Short label for the task (e.g., "Complete svtlottery", "Pay rent")
+       - **description**: Optional longer explanation (can be same as name if short)
+       - **status**: Use ONLY these standardized values: "Todo", "Complete", "In Progress", "Cancelled"
        - Do NOT use: "done", "pending", "finished", "open", or any other variations
        - If status is unclear, use "Todo"
-    5. PERSONA: Traits about the user's state (for Personal domain only).
+       - **isolated_context**: All sentences discussing this task specifically
+       
+    5. PERSONA EXTRACTION (for Personal domain only):
+       - Traits about the user's emotional state, personality, or mindset
+       - **trait**: The trait itself (e.g., "lonely", "motivated", "anxious")
+       - **isolated_context**: Sentences showing evidence of this trait
+    
     6. REFERENCES: For Academic/Professional domains - extract external citations, quotes, papers, books.
-       - type: "Paper", "Book", "Quote", "Video", "Song"
-       - title: REQUIRED - Full title of the work (cannot be empty)
-       - content: The actual quote or key excerpt (if applicable)
-       - source: Author/Artist/Creator name
+       - **type**: "Paper", "Book", "Quote", "Video", "Song", "Poem"
+       - **title**: REQUIRED - Full title of the work (cannot be empty)
+       - **content**: The actual quote or key excerpt (if applicable)
+       - **source**: Author/Artist/Creator name
+       - **isolated_context**: Sentences discussing or mentioning this reference
+       
     7. RELATIONSHIPS: Extract connections between the nodes you identify above.
        - source_name: The name of the first node (must match an entity, concept, task, or person extracted above)
        - source_type: Type of first node (Person, Task, Entity, Concept, Event)
@@ -230,6 +270,8 @@ async def extraction_node(state: IngestionState):
         if not extraction:
             return {"errors": ["LLM returned empty extraction"]}
 
+        logger.info(f"Extraction Completed: {extraction}")
+
         # FILTER: Remove garbage entities/concepts
         extraction.entities = [
             e
@@ -237,17 +279,21 @@ async def extraction_node(state: IngestionState):
             if e.name
             and e.name.strip().lower() not in ["untitled", "none", "unknown", ""]
         ]
+        logger.info(f"Filtered Entities: {extraction.entities}")
+
         extraction.concepts = [
             c
             for c in extraction.concepts
             if c.name
             and c.name.strip().lower() not in ["untitled", "none", "unknown", ""]
         ]
+        logger.info(f"Filtered Concepts: {extraction.concepts}")
 
         # VALIDATION: Standardize extracted data to prevent quality issues
         from app.utils.data_validation import standardize_extraction
 
         extraction = standardize_extraction(extraction)
+        logger.info(f"Standardized Extraction: {extraction}")
 
         logger.info(
             f"Extracted: {len(extraction.entities)} entities, {len(extraction.concepts)} concepts, {len(extraction.references)} references."

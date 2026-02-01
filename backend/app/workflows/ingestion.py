@@ -1,17 +1,15 @@
+import asyncio
+import uuid
+from collections import defaultdict
 from datetime import datetime
+
 from app.core.logging_config import get_component_logger
-
-# Setup Logger
-logger = get_component_logger("IngestionPipeline")
-
 from app.schemas.extraction import Extraction, NoteInput
-from app.workflows.agents.ingestion_agent import ingestion_agent
 from app.services.graph import graph_service
 from app.services.llm import llm_service
-import uuid
+from app.workflows.agents.ingestion_agent import ingestion_agent
 
-import asyncio
-from collections import defaultdict
+logger = get_component_logger("IngestionPipeline")
 
 
 class EntityLockManager:
@@ -211,6 +209,15 @@ class IngestionWorkflow:
             },
         )
 
+        # Helper to normalize names: strip # prefix and extra whitespace
+        def normalize_name(name: str) -> str:
+            """Normalize names to prevent duplicates like #svtlottery vs svtlottery"""
+            if not name:
+                return ""
+            # Remove leading # (common in task references like #project)
+            name = name.lstrip("#").strip()
+            return name
+
         # 1. ENTITIES (Batch)
         if extraction.entities:
             # Generate embeddings for entities
@@ -218,8 +225,11 @@ class IngestionWorkflow:
 
             entity_embeddings = {}
             for e in extraction.entities:
-                text_to_embed = f"{e.name} ({e.type})"
-                entity_embeddings[e.name] = embedding_service.embed_query(text_to_embed)
+                normalized_name = normalize_name(e.name)
+                text_to_embed = f"{normalized_name} ({e.type})"
+                entity_embeddings[normalized_name] = embedding_service.embed_query(
+                    text_to_embed
+                )
 
             query_entities = """
             MERGE (n:Note {id: $note_id})
@@ -231,15 +241,15 @@ class IngestionWorkflow:
             MERGE (n)-[r:MENTIONS]->(e)
             SET r.created_at = $created_at,
                 r.valid_from = $created_at,
-                r.status = 'active'
+                r.is_active = true
             """
-            # Prepare dict list
+            # Prepare dict list with normalized names
             entity_data = [
                 {
-                    "name": e.name,
+                    "name": normalize_name(e.name),
                     "type": e.type,
                     "importance": e.importance,
-                    "embedding": entity_embeddings[e.name],
+                    "embedding": entity_embeddings[normalize_name(e.name)],
                 }
                 for e in extraction.entities
             ]
@@ -270,7 +280,7 @@ class IngestionWorkflow:
             MERGE (n)-[r:CONTRIBUTES_TO]->(c)
             SET r.created_at = $created_at,
                 r.valid_from = $created_at,
-                r.status = 'active'
+                r.is_active = true
             """
             concept_data = [
                 {
@@ -356,30 +366,58 @@ class IngestionWorkflow:
 
             task_embeddings = []
             for t in extraction.tasks:
-                text_to_embed = f"Task: {t.description} (Status: {t.status})"
+                # Use name if available, fall back to description
+                task_label = t.name or t.description or "Untitled Task"
+                text_to_embed = f"Task: {task_label} (Status: {t.status})"
                 task_embeddings.append(embedding_service.embed_query(text_to_embed))
 
             query_tasks = """
             MERGE (n:Note {id: $note_id})
             WITH n
             UNWIND $data AS item
-            // Create Task with unique 'name' (description_uuid format)
-            CREATE (t:Task:Indexable {id: item.task_id, description: item.desc, name: item.name, status: item.status, due_date: item.due_date, created_at: $created_at, embedding: item.embedding})
+            // MERGE by normalized name to update existing tasks
+            MERGE (t:Task {name: item.name})
+            ON CREATE SET 
+                t.id = item.task_id,
+                t:Indexable,
+                t.created_at = $created_at
+            // Always update these fields (latest note wins)
+            SET t.description = CASE WHEN item.desc <> '' THEN item.desc ELSE t.description END,
+                t.status = item.status,
+                t.due_date = CASE WHEN item.due_date IS NOT NULL THEN item.due_date ELSE t.due_date END,
+                t.isolated_context = item.isolated_context,
+                t.embedding = item.embedding,
+                t.updated_at = $created_at
             MERGE (n)-[r:PRODUCES_TASK]->(t)
             SET r.created_at = $created_at,
                 r.valid_from = $created_at,
-                r.status = 'active'
+                r.is_active = true
             """
-            # Generate unique task names using validation utility
+            # Use task.name if available, otherwise generate from description
             from app.utils.data_validation import generate_unique_task_name
+
+            def normalize_task_name(name: str) -> str:
+                """Normalize task names for consistent merging.
+                - Strips # prefix (e.g., 'complete #svtlottery' -> 'Complete Svtlottery')
+                - Applies .title() for consistent casing
+                """
+                if not name:
+                    return ""
+                # Remove # symbols from task names
+                name = name.replace("#", "").strip()
+                return name.lower().title()
 
             task_data = [
                 {
                     "task_id": str(uuid.uuid4()),
+                    "name": normalize_task_name(t.name)
+                    or normalize_task_name(
+                        generate_unique_task_name(t.description, str(uuid.uuid4()))
+                    ),
                     "desc": t.description,
-                    "name": generate_unique_task_name(t.description, str(uuid.uuid4())),
                     "status": t.status,  # Already standardized in extraction_node
                     "due_date": t.due_date,
+                    "isolated_context": getattr(t, "isolated_context", "") or "",
                     "embedding": task_embeddings[i],
                 }
                 for i, t in enumerate(extraction.tasks)
@@ -396,9 +434,13 @@ class IngestionWorkflow:
 
             persona_embeddings = {}
             for t in extraction.persona_traits:
-                text_to_embed = (
-                    f"Personality trait: {t.trait}. Evidence: {t.evidence_quote or ''}"
+                # Use isolated_context if available, fall back to legacy evidence_quote
+                context = (
+                    getattr(t, "isolated_context", "")
+                    or getattr(t, "evidence_quote", "")
+                    or ""
                 )
+                text_to_embed = f"Personality trait: {t.trait}. Evidence: {context}"
                 persona_embeddings[t.trait] = embedding_service.embed_query(
                     text_to_embed
                 )
@@ -410,17 +452,19 @@ class IngestionWorkflow:
             // Generic visualization uses 'name'
             MERGE (p:Persona {trait: item.trait})
             ON CREATE SET p.name = item.trait
-            SET p:Indexable, p.embedding = item.embedding
+            SET p:Indexable, p.embedding = item.embedding, p.isolated_context = item.isolated_context
             MERGE (p)-[r:REVEALED_BY]->(n)
-            SET r.quote = item.quote, 
+            SET r.quote = item.isolated_context, 
                 r.created_at = $created_at,
                 r.valid_from = $created_at,
-                r.status = 'active'
+                r.is_active = true
             """
             persona_data = [
                 {
                     "trait": t.trait,
-                    "quote": t.evidence_quote,
+                    "isolated_context": getattr(t, "isolated_context", "")
+                    or getattr(t, "evidence_quote", "")
+                    or "",
                     "embedding": persona_embeddings[t.trait],
                 }
                 for t in extraction.persona_traits
@@ -449,7 +493,7 @@ class IngestionWorkflow:
             UNWIND $data AS item
             MERGE (r:Reference {title: item.title, source: item.source})
             ON CREATE SET r.type = item.type, r.content = item.content
-            SET r:Indexable, r.embedding = item.embedding, r.name = item.title
+            SET r:Indexable, r.embedding = item.embedding, r.name = item.title, r.isolated_context = item.isolated_context
             MERGE (n)-[rel:CITES]->(r)
             SET rel.created_at = $created_at,
                 rel.valid_from = $created_at,
@@ -461,6 +505,7 @@ class IngestionWorkflow:
                     "type": ref.type,
                     "content": ref.content,
                     "source": ref.source or "Unknown",
+                    "isolated_context": getattr(ref, "isolated_context", "") or "",
                     "embedding": reference_embeddings[
                         f"{ref.title}|{ref.source or 'Unknown'}"
                     ],
@@ -496,7 +541,8 @@ class IngestionWorkflow:
                     source_label = type_mapping.get(rel.source_type, "Entity")
                     target_label = type_mapping.get(rel.target_type, "Entity")
 
-                    # Create or update relationship
+                    # Create or update relationship with bi-temporal support
+                    # event_time = when this fact became true (note's date)
                     result = graph_service.create_or_update_relationship(
                         source_name=rel.source_name,
                         source_label=source_label,
@@ -506,6 +552,7 @@ class IngestionWorkflow:
                         confidence=rel.confidence,
                         context=rel.context,
                         note_id=note_id,
+                        event_time=created_at,  # When the fact became true
                     )
 
                     logger.info(
@@ -520,7 +567,105 @@ class IngestionWorkflow:
                     )
                     continue
 
+        # 7. COMMUNITY ASSIGNMENT
+        # Group extracted nodes into domain-based communities
+        self._assign_to_communities(extraction, content)
+
         return title
+
+    def _assign_to_communities(self, extraction: Extraction, content: str):
+        """
+        Assign extracted nodes to domain-based communities.
+
+        Communities are high-level groupings (Professional, Academic, Personal, Creative, Dreams)
+        that provide summarized context for broad queries.
+        """
+        from app.services.llm import llm_service
+
+        # Detect the domain of this note's content
+        domain = llm_service.detect_domain(content)
+
+        # Collect all node names from this extraction
+        node_names = []
+
+        for entity in extraction.entities or []:
+            if entity.name and entity.name.strip():
+                node_names.append(entity.name.strip().title())
+
+        for concept in extraction.concepts or []:
+            if concept.name and concept.name.strip():
+                node_names.append(concept.name.strip().title())
+
+        if not node_names:
+            return
+
+        # Create/update domain community
+        community_name = f"{domain} Knowledge"
+
+        try:
+            graph_service.create_or_update_community(
+                name=community_name,
+                domain=domain,
+                member_names=node_names,
+            )
+            logger.info(
+                f"[Community] Assigned {len(node_names)} nodes to '{community_name}'"
+            )
+
+            # Generate/update community summary based on member nodes
+            self._update_community_summary(community_name, domain)
+
+        except Exception as e:
+            logger.warning(f"[Community] Failed to assign to community: {e}")
+
+    def _update_community_summary(self, community_name: str, domain: str):
+        """
+        Generate a high-level summary for a community based on its member nodes.
+        """
+        from app.services.llm import llm_service
+
+        try:
+            # Get community members with their summaries
+            community_data = graph_service.get_community_summary(community_name)
+            if not community_data or not community_data.get("top_members"):
+                return
+
+            # Gather member summaries for context
+            member_contexts = []
+            for member in community_data.get("top_members", []):
+                if member and member.get("summary"):
+                    member_contexts.append(
+                        f"- {member.get('name')} ({member.get('label')}): {member.get('summary')}"
+                    )
+
+            if not member_contexts:
+                return
+
+            # Generate community-level summary using the summarize method
+            context_text = "\n".join(member_contexts[:10])  # Limit to top 10
+            summary_input = f"""This is a {domain} knowledge cluster containing:
+
+{context_text}
+
+Summarize the common themes and key insights that connect these items."""
+
+            summary = llm_service.summarize(summary_input)
+            if summary and summary.strip():
+                # Extract themes from member names
+                themes = [
+                    m.get("name")
+                    for m in community_data.get("top_members", [])[:5]
+                    if m.get("name")
+                ]
+                graph_service.update_community_summary(
+                    community_name, summary.strip(), themes
+                )
+                logger.info(f"[Community] Updated summary for '{community_name}'")
+
+        except Exception as e:
+            logger.warning(
+                f"[Community] Failed to generate summary for {community_name}: {e}"
+            )
 
     async def _update_neighborhoods(
         self, concepts, entities, tasks, persona_traits, references, new_content: str
@@ -528,53 +673,77 @@ class IngestionWorkflow:
         """
         Refreshes the summaries of concepts, entities, tasks, personas, and references affected by this note.
         Parallelizes updates to reduce total latency.
+
+        LLM-NATIVE ISOLATION: Uses the `isolated_context` field from the LLM extraction
+        instead of trying to compute context windows in Python.
         """
         tasks_list = []
 
-        # Update Concepts
+        # Update Concepts - use LLM-provided isolated_context
         for concept in concepts or []:
             name = concept.name.strip().title()
             if not name:
                 continue
-            tasks_list.append(self._update_node_summary("Concept", name, new_content))
+            # Use isolated_context from LLM if available, fall back to full content
+            context = getattr(concept, "isolated_context", "") or new_content
+            tasks_list.append(self._update_node_summary("Concept", name, context))
 
-        # Update Entities
+        # Update Entities - use LLM-provided isolated_context
         for entity in entities or []:
             name = entity.name.strip()
             if not name:
                 continue
-            tasks_list.append(self._update_node_summary("Entity", name, new_content))
+            # Normalize entity names (strip # prefix) to match storage
+            name = name.lstrip("#").strip()
+            # Use isolated_context from LLM if available, fall back to full content
+            context = getattr(entity, "isolated_context", "") or new_content
+            tasks_list.append(self._update_node_summary("Entity", name, context))
 
-        # Update Tasks
+        # Update Tasks - use LLM-provided isolated_context
+        def normalize_task_name(name: str) -> str:
+            """Normalize task names for consistent lookup (must match storage normalization)"""
+            if not name:
+                return ""
+            # Remove # symbols to match how tasks are stored
+            name = name.replace("#", "").strip()
+            return name.lower().title()
+
         for task in tasks or []:
-            desc = task.description.strip()
-            if not desc:
+            # Prefer name for node label, fall back to description
+            raw_name = (task.name or task.description or "").strip()
+            if not raw_name:
                 continue
+            # Normalize to match how tasks are stored in Neo4j
+            name = normalize_task_name(raw_name)
+            # Use isolated_context from LLM if available, fall back to full content
+            context = getattr(task, "isolated_context", "") or new_content
             tasks_list.append(
-                self._update_node_summary(
-                    "Task", desc, new_content, identifier_key="description"
-                )
+                self._update_node_summary("Task", name, context, identifier_key="name")
             )
 
-        # Update Personas
+        # Update Personas - use LLM-provided isolated_context
         for trait in persona_traits or []:
             t_text = trait.trait.strip()
             if not t_text:
                 continue
+            # Use isolated_context from LLM if available, fall back to full content
+            context = getattr(trait, "isolated_context", "") or new_content
             tasks_list.append(
                 self._update_node_summary(
-                    "Persona", t_text, new_content, identifier_key="trait"
+                    "Persona", t_text, context, identifier_key="trait"
                 )
             )
 
-        # Update References
+        # Update References - use LLM-provided isolated_context
         for reference in references or []:
             ref_title = reference.title.strip()
             if not ref_title:
                 continue
+            # Use isolated_context from LLM if available, fall back to full content
+            context = getattr(reference, "isolated_context", "") or new_content
             tasks_list.append(
                 self._update_node_summary(
-                    "Reference", ref_title, new_content, identifier_key="title"
+                    "Reference", ref_title, context, identifier_key="title"
                 )
             )
 
@@ -582,15 +751,25 @@ class IngestionWorkflow:
             await asyncio.gather(*tasks_list)
 
     async def _update_node_summary(
-        self, label: str, name: str, new_content: str, identifier_key: str = "name"
+        self,
+        label: str,
+        name: str,
+        isolated_context: str,
+        identifier_key: str = "name",
     ):
-        async with entity_lock_manager.get_lock(label, name):
-            # 1. Fetch existing summary
-            # we run sync query in thread to avoid blocking loop
-            import asyncio
+        """
+        Updates a node's summary using LLM-provided isolated context.
 
+        Args:
+            label: Node label (Entity, Concept, Task, etc.)
+            name: Node identifier
+            isolated_context: Pre-isolated context from LLM extraction (already filtered)
+            identifier_key: Property to match on (name, description, trait, title)
+        """
+        async with entity_lock_manager.get_lock(label, name):
             loop = asyncio.get_running_loop()
 
+            # 1. Fetch existing summary
             def _get_existing():
                 return graph_service.execute_query(
                     f"MATCH (n:{label} {{{identifier_key}: $name}}) RETURN n.summary as summary",
@@ -600,31 +779,25 @@ class IngestionWorkflow:
             res = await loop.run_in_executor(None, _get_existing)
             existing_summary = res[0].get("summary") if res else ""
 
-            # 2. Get Context Window
-            from app.utils.text_processing import get_entity_context
-
-            context = get_entity_context(new_content, name, window=1)
-
-            # 3. Generate Delta Update
-            # update_summary is sync, run in thread
+            # 2. Generate Delta Update using pre-isolated context
+            # No need to call get_entity_context() - LLM already provided isolated context
             def _call_llm():
                 return llm_service.update_summary(
-                    existing_summary or "None yet.", context, name, label
+                    existing_summary or "None yet.", isolated_context, name, label
                 )
 
             update_data = await loop.run_in_executor(None, _call_llm)
 
-            # 4. Generate embedding for updated summary
+            # 3. Generate embedding for updated summary
             from app.services.embedding import embedding_service
 
             def _generate_embedding():
-                # Use the updated summary + title for embedding
                 text_to_embed = f"{update_data['title']}: {update_data['summary']}"
                 return embedding_service.embed_query(text_to_embed)
 
             new_embedding = await loop.run_in_executor(None, _generate_embedding)
 
-            # 5. Save back with updated embedding
+            # 4. Save back with updated embedding
             def _save_update():
                 graph_service.execute_query(
                     f"MATCH (n:{label} {{{identifier_key}: $name}}) SET n.summary = $summary, n.title = $title, n.embedding = $embedding, n:Indexable",

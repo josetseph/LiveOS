@@ -397,13 +397,174 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 
 ---
 
-## 📋 Current Model Stack (Phase 19)
+## � Phase 20: The "Bi-Temporal Knowledge" Update (GraphRAG + Community Summaries)
+**Goal**: Implement true bi-temporal tracking for historical note ingestion and Microsoft GraphRAG-style Community Summaries.
+
+*   **Bi-Temporal Time Separation**:
+    *   **Problem**: Both `valid_from` and `ingested_at` were using `datetime.utcnow()`, causing historical notes to lose their original dates.
+    *   **Solution**: Separated event time (when fact became true) from system time (when recorded):
+        *   `valid_from` = Note's `created_at` (the date picker value for historical notes)
+        *   `ingested_at` = Always `datetime.utcnow()` (when the system processed it)
+        *   `valid_to` = When fact stopped being true (null if still valid)
+        *   `is_active` = Quick boolean filter for current relationships
+    *   **Graph Service Update**: Added `event_time` parameter to `create_or_update_relationship()` to properly handle the separation.
+    *   **Ingestion Update**: Passes note's `created_at` as `event_time` to relationship creation.
+    *   **Benefit**: Can now ingest 2 years of historical notes with proper chronological accuracy while tracking when each was added to the system.
+
+*   **Community Summaries (Microsoft GraphRAG)**:
+    *   **Philosophy**: High-level domain clusters that aggregate related knowledge nodes for broad/exploratory queries.
+    *   **Domain-Based Communities**: Auto-created groupings by detected domain:
+        *   Professional Knowledge, Academic Knowledge, Personal Knowledge, Creative Knowledge, Dreams Knowledge
+    *   **Graph Schema**: New `Community` node type with properties:
+        *   `name`: Community identifier (e.g., "Professional Knowledge")
+        *   `domain`: Domain category (Professional, Academic, Personal, Creative, Dreams)
+        *   `summary`: LLM-generated high-level summary (aggregated from members)
+        *   `themes`: List of key themes across the community
+        *   `member_count`: Number of nodes in the community
+    *   **Relationships**: `BELONGS_TO` from knowledge nodes to Community nodes.
+    *   **Ingestion Integration**: `_assign_to_communities()` method detects domain and assigns extracted entities/concepts to appropriate community.
+    *   **Retrieval Integration**: Broad/exploratory queries fetch community summaries first:
+        *   Detects broad queries via keyword matching ("overall", "general", "summary", "everything about")
+        *   Fetches relevant community summaries as top-level context
+        *   Formats as `[Community - Domain: Name]` labels for LLM synthesis
+    *   **New Graph Methods**:
+        *   `create_or_update_community(name, domain, member_names, summary, themes)`
+        *   `get_community_summary(community_name)`
+        *   `get_communities_by_domain(domain)`
+        *   `get_communities_for_query(query_entities)`
+        *   `get_all_communities()`
+        *   `assign_node_to_community(node_name, community_name)`
+        *   `update_community_summary(community_name, summary, themes)`
+
+*   **LLM-Native Ingestion Enhancements**:
+    *   **`isolated_context` Field**: Added to extraction schema for facts that are true only within the note's context (e.g., "today" references, temporary states).
+    *   **Contradiction Rules**: Added `CONTRADICTION_RULES` constant defining temporal vs factual contradictions with soft invalidation logic.
+    *   **Soft Invalidation**: Old relationships marked with `is_active=false` and `valid_to` timestamp instead of deletion.
+
+*   **Retrieval Improvements**:
+    *   **`is_active = true` Filtering**: All graph queries now filter for active relationships only.
+    *   **Consensus Labels**: Distilled knowledge nodes labeled as `[Consensus - Type: Name]` for clear LLM context.
+    *   **Relationship Context**: Added `r.context` to related node queries for richer evidence.
+
+---
+
+## � Phase 21: The "Extraction Robustness" Update (Schema Normalization & Deduplication)
+**Goal**: Make extraction reliable with small local models (Gemma3 4B) that return inconsistent JSON formats.
+
+*   **Schema Normalization** (Critical):
+    *   **Problem**: Gemma3 returns capitalized/different keys (`Entities`, `DOMAIN CATEGORIZATION`, `PERSONA`) but Pydantic expects lowercase (`entities`, `domain`, `persona_traits`).
+    *   **Solution**: Added `normalize_keys` model validator to `Extraction` class that maps LLM output to correct field names:
+        *   `"Entities"` → `"entities"`, `"DOMAIN CATEGORIZATION"` → `"domain"`, `"PERSONA"` → `"persona_traits"`
+    *   **Result**: 100% extraction success rate instead of silent fallback to empty `Extraction()`.
+
+*   **Type Coercion Validators**:
+    *   **Importance as String**: LLM returns `importance: "High"` but schema expects float. Added mapping: `High → 0.9`, `Medium → 0.5`, `Low → 0.3`.
+    *   **Confidence as String**: Same fix for `ExtractedRelationship.confidence` field.
+    *   **Status Normalization**: LLM returns variations like `"To Do"`, `"done"`, `"In-Progress"`. Added mapping to standardized values: `Todo`, `In Progress`, `Complete`, `Cancelled`.
+
+*   **Task Schema Enhancement**:
+    *   **Added `name` Field**: Tasks now have both `name` (short label for graph) and `description` (longer explanation).
+    *   **Added `isolated_context`**: Consistent with Entity/Concept pattern for source text context.
+    *   **Validator Logic**: If LLM returns only `description`, copies to `name` for backwards compatibility.
+
+*   **Unified Context Pattern**:
+    *   **Before**: `PersonaTrait.evidence_quote`, no context on `ExternalReference`.
+    *   **After**: All extracted types use `isolated_context` field consistently: `Entity`, `Concept`, `Task`, `PersonaTrait`, `ExternalReference`.
+
+*   **JSON Cleaning Improvements**:
+    *   **Control Character Stripping**: Added regex to remove `\u0000-\u001F` characters that break JSON parsing.
+    *   **Markdown Fence Handling**: Already strips ` ```json ... ``` ` wrappers from LLM output.
+    *   **json_repair Library**: Handles malformed JSON (trailing commas, unquoted keys, comments).
+
+*   **Entity Name Deduplication**:
+    *   **Problem**: Notes mentioning `#svtlottery` and `svtlottery` created duplicate nodes.
+    *   **Solution**: Added `normalize_name()` helper that strips `#` prefix: `#svtlottery` → `svtlottery`.
+    *   **Applied To**: Entity storage and Task storage (via `normalize_task_name()`).
+
+*   **Task Name Normalization Fix**:
+    *   **Problem**: Tasks stored with `.title()` case (`Complete Svtlottery`) but summary lookup used raw name (`complete svtlottery`) - no match, summaries never saved.
+    *   **Solution**: Added same `normalize_task_name()` function to `_update_neighborhoods` for consistent lookup.
+    *   **Result**: Task summaries now properly persist and display in graph visualization.
+
+*   **Relationship Property Cleanup**:
+    *   **Removed Duplicate**: Was setting both `r.is_active = true` and `r.status = 'active'` on relationships.
+    *   **Kept Only**: `r.is_active = true` - used by all graph queries for filtering active relationships.
+    *   **Fixed Cypher Syntax**: Removed trailing commas that caused `SyntaxError` after removing `r.status` lines.
+
+*   **Graph Visualization Improvements**:
+    *   **2D Graph**: Added Task-specific fields (`description`, `status`, `created_at`) to match 3D.
+    *   **3D Graph**: Added Community nodes with `MEMBER_OF` relationships and cyan color (`#06b6d4`).
+    *   **Grounding Notes**: Fixed `get_linked_evidence()` to return source notes by ensuring `is_active = true` on all relationships.
+
+---
+
+## 🧘 Phase 22: The "Symbolic Purity" Update (Reranker Removal & Conversational Synthesis)
+**Goal**: Remove neural reranker complexity in favor of pure symbolic ranking, and make synthesis genuinely conversational.
+
+### The Core Insight
+Testing revealed that the qwen3-reranker was actually *hurting* retrieval quality for GraphRAG. The reranker treated all text equally, "drowning out" symbolically important nodes (entities the user explicitly mentioned) in favor of semantically similar but irrelevant content. Removing it entirely produced dramatically better results.
+
+*   **Reranker Removal** (Major Simplification):
+    *   **Problem**: Reranker scores (0-10) obscured symbolic importance. A node explicitly matching "svtlottery" might score 6.5 while an unrelated note about "tasks" scored 7.2.
+    *   **Solution**: Removed all reranker code (~150 lines):
+        *   `_load_reranker()` - Model/tokenizer initialization
+        *   `rerank()` - Batch scoring with MPS cache management
+        *   `_clear_mps_cache()` - Memory cleanup
+        *   `_calculate_recency_boost()` - Unused method
+        *   `_get_cutoff_score()` - Dynamic cutoff logic
+    *   **Result**: Instant ranking (~0.0001s vs ~2.0s), symbolically-grounded retrieval.
+
+*   **Pure Symbolic Ranking**:
+    *   **Primary Nodes** (name matches query entities): `base_score = 100.0`, marked `symbolic_immune = True`
+    *   **Secondary Nodes** (related via graph): `base_score = 50.0`
+    *   **Final Score**: `base_score × entity_boost × keyword_boost`
+    *   **Philosophy**: Trust the graph. If the user asks about "svtlottery", nodes named "svtlottery" are definitionally relevant.
+
+*   **Fact Pool Context Format** (Reviewer Recommendation):
+    *   **Problem**: Sectional format (`## DISTILLED KNOWLEDGE`, `## RELATED CONTEXT`) caused LLM to treat each section as separate items to summarize rather than unified evidence.
+    *   **Solution**: Single "Fact Pool" with semantic labels:
+        *   `[CORE CONSENSUS]` - Graph consensus summaries (highest trust)
+        *   `[RELATED CONTEXT]` - Related node summaries
+        *   `[DOMAIN OVERVIEW]` - Community-level summaries
+        *   `[CONNECTION PATH]` - Multi-hop relationship chains
+    *   **Result**: LLM synthesizes across all facts naturally.
+
+*   **Conversational "Thoughtful Peer" Synthesis**:
+    *   **Problem**: Rigid prompts produced formulaic responses with headers like "DIRECT ANSWER:" and "KEY INSIGHTS:".
+    *   **Solution**: New persona prompt:
+        *   "Write like a thoughtful peer reflecting back"
+        *   "No headers like 'DIRECT ANSWER' or 'KEY INSIGHTS'"
+        *   "Say 'You mentioned...' not 'The notes reveal...'"
+        *   "Every claim must trace to context"
+    *   **Result**: Natural, conversational responses that actually answer questions.
+
+*   **Case-Insensitive Reference Linking**:
+    *   **Problem**: Graph stored `svtlottery` but lookup used `Svtlottery` - no match, empty references.
+    *   **Solution**: Added `toLower()` to Cypher queries and `.lower()` to dict keys in `node_to_notes`.
+    *   **Result**: References section now properly shows source notes.
+
+*   **Community Summary References**:
+    *   **Added `linked_notes`**: Community summaries now include notes linked to member nodes.
+    *   **New Method**: `get_community_linked_notes()` traces community → member nodes → source notes.
+    *   **Result**: Even community-level insights are grounded to specific notes.
+
+### Performance Impact
+| Metric | Before (Reranker) | After (Symbolic) |
+| :--- | :--- | :--- |
+| **Ranking Time** | ~2.0s | ~0.0001s |
+| **Model Memory** | ~1.2GB (reranker model) | 0 |
+| **Code Complexity** | ~200 lines | ~30 lines |
+| **Response Quality** | Indirect summaries | Direct answers |
+
+---
+
+## 📋 Current Model Stack (Phase 22)
 | Component | Model | Role |
 | :--- | :--- | :--- |
-| **Chat / Synthesis** | `gemma3:4b` | The "Brain". Concise, reliable instruction following with strong JSON adherence. |
+| **Chat / Synthesis** | `gemma3:4b` | The "Brain". Conversational "Thoughtful Peer" persona with strict grounding. |
 | **Extraction** | `gemma3:4b` | The "Senses". Optimized for structured JSON data extraction. |
 | **Embedding** | `qwen3-embedding:0.6b` | Semantic vector search (1024-dim) for Notes AND Knowledge Nodes. |
-| **Reranking** | `qwen3-reranker-0.6b-seq-cls` | Fast context relevance scoring with intelligent multi-factor weighting. |
+| **Ranking** | Pure Symbolic | Primary nodes = 100, Secondary = 50. No neural reranker. |
 | **Vision** | `microsoft/Florence-2-large` | Local Transformer model for detailed image description. |
 | **Audio** | `openai/whisper-large-v3-turbo` | Local audio transcription. |
 | **OCR** | `MedAIBase/PaddleOCR-VL:0.9b` | PDF and image text extraction. |
@@ -421,5 +582,7 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 7.  **Performance Caps**: Soft limits (50 snippets) ensure predictable response times.
 8.  **Transparency**: Real-time system info displays all active services and models.
 9.  **Multi-Domain Design**: Single system serves personal, academic, professional, and creative needs with domain-aware intelligence.
-10. **Intelligent Ranking**: Multi-factor weighted scoring (recency, entity match, keyword match, temporal context) with query-aware dynamic cutoffs.
-11. **Adaptive Filtering**: Query-type detection (entity vs temporal vs general) applies appropriate precision/recall tradeoffs.
+10. **Symbolic Ranking**: Pure priority-based scoring (primary=100, secondary=50) trusts graph structure over neural reranking.
+11. **Conversational Synthesis**: "Thoughtful Peer" persona produces natural responses without rigid headers.
+12. **Bi-Temporal Tracking**: Separates event time (when fact became true) from system time (when recorded) for historical accuracy.
+13. **Community Summaries**: Microsoft GraphRAG-style domain clusters provide high-level context for broad queries.

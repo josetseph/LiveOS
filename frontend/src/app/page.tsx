@@ -25,7 +25,7 @@ export default function Home() {
             initial={{ opacity: 0, scale: 0.8 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.5 }}
-            className="mb-8 inline-flex h-24 w-24 items-center justify-center rounded-2xl bg-gradient-to-br from-purple-500 to-pink-500 shadow-2xl shadow-purple-500/50 overflow-hidden"
+            className="mb-8 inline-flex h-24 w-24 items-center justify-center rounded-2xl bg-linear-to-br from-purple-500 to-pink-500 shadow-2xl shadow-purple-500/50 overflow-hidden"
           >
             <Image src="/logo.png" alt="LiveOS" width={96} height={96} className="h-24 w-24 object-contain" />
           </motion.div>
@@ -35,7 +35,7 @@ export default function Home() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 0.2 }}
-            className="mb-6 bg-gradient-to-r from-purple-400 via-pink-400 to-purple-400 bg-clip-text text-6xl font-bold tracking-tight text-transparent md:text-8xl"
+            className="mb-6 bg-linear-to-r from-purple-400 via-pink-400 to-purple-400 bg-clip-text text-6xl font-bold tracking-tight text-transparent md:text-8xl"
           >
             LiveOS Brain
           </motion.h1>
@@ -95,7 +95,7 @@ export default function Home() {
             <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 backdrop-blur-xl">
               <Brain className="h-4 w-4 text-purple-400" />
               <span className="text-sm text-white/80">
-                Models: Gemma3, Whisper V3, Florence 2, Qwen3, MxBai Reranker, Paddle OCR
+                Models: Gemma3, Whisper V3, Florence 2, Qwen3, Paddle OCR
               </span>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-2">

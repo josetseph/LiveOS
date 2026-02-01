@@ -95,13 +95,17 @@ class LLMService:
     def _clean_json(self, json_str: str) -> str:
         """
         Uses json_repair to robustly fix malformed JSON from LLMs.
-        Also strips markdown code blocks pre-repair.
+        Also strips markdown code blocks and sanitizes control characters.
         """
         # 1. Unwrap markdown (Common failure mode)
         if "```" in json_str:
             match = re.search(r"```(?:json)?(.*?)```", json_str, re.DOTALL)
             if match:
                 json_str = match.group(1)
+
+        # 2. Remove control characters (except allowed ones: \n \r \t inside strings are handled by json_repair)
+        # This handles \u0000-\u001F that break JSON parsing
+        json_str = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", json_str)
 
         try:
             from json_repair import repair_json
@@ -178,7 +182,34 @@ class LLMService:
             temperature=temperature,
         )
 
-        return response_model.model_validate_json(response.choices[0].message.content)
+        # Clean JSON response (strip markdown code fences, repair malformed JSON)
+        raw_content = response.choices[0].message.content
+        cleaned_json = self._clean_json(raw_content)
+
+        # Always log raw JSON for debugging (first 500 chars)
+        import json
+
+        try:
+            parsed = json.loads(cleaned_json)
+            entity_count = len(parsed.get("entities", []))
+            concept_count = len(parsed.get("concepts", []))
+            logger.info(
+                f"[Ollama] Raw extraction: {entity_count} entities, {concept_count} concepts"
+            )
+            if entity_count == 0:
+                logger.warning(
+                    f"[Ollama] Empty entities. Full JSON: {cleaned_json[:2000]}"
+                )
+        except:
+            logger.warning(f"[Ollama] Could not pre-parse JSON: {cleaned_json[:500]}")
+
+        try:
+            return response_model.model_validate_json(cleaned_json)
+        except Exception as validation_error:
+            # Log the raw response for debugging
+            logger.error(f"[Ollama] Validation failed: {validation_error}")
+            logger.error(f"[Ollama] Raw JSON (first 1000 chars): {cleaned_json[:1000]}")
+            raise  # Re-raise to trigger fallback handling
 
     def _extract_openai(
         self, prompt: str, response_model: Type[BaseModel], temperature: float
@@ -396,9 +427,11 @@ Extract:
                     temperature=0,  # Deterministic analysis
                 )
 
-                analysis = QueryAnalysis.model_validate_json(
-                    response.choices[0].message.content
-                )
+                # Clean markdown code fences from LLM response
+                raw_content = response.choices[0].message.content
+                cleaned_json = self._clean_json(raw_content)
+
+                analysis = QueryAnalysis.model_validate_json(cleaned_json)
                 return analysis.model_dump()
 
         except Exception as e:
@@ -523,32 +556,23 @@ Extract:
             """
 
         prompt = f"""
-        # SYSTEM INSTRUCTIONS
-        You are the User's "Second Brain" and intelligent personal assistant.
-        Your goal is to provide INSIGHTS by linking graph consensus summaries and supporting notes.
+        # ROLE
+        You are the User's "Second Brain"—a thoughtful, conversational AI partner.
+        Your goal is to answer the query based on the retrieved knowledge from their life.
         
         {domain_instructions}
         
-        # CRITICAL CONSTRAINTS (VIOLATION = FAILURE)
-        1. **NO ADVICE OR SUGGESTIONS**: NEVER tell the user what they "should", "must", "need to", or "have to" do.
-           - FORBIDDEN: "You should focus on X", "You need to address Y", "will be crucial to Z"
-           - ALLOWED: "You expressed concern about X", "You mentioned wanting to improve Y"
+        # STYLE GUIDELINES
+        - **CONVERSATIONAL**: Write naturally. Avoid headers like "DIRECT ANSWER" or "INSIGHTS".
+        - **GROUNDED**: Every claim must be based on the provided [CORE CONSENSUS] or [RELATED CONTEXT].
+        - **PEER PERSONA**: Address the user as "You". Don't say "The notes reveal"; say "You mentioned" or "As far as your projects go..."
+        - **DIRECT BUT FLUID**: Answer the question immediately, but weave the supporting facts into the narrative.
         
-        2. **NO FOLLOW-UP QUESTIONS**: Do not ask if you should "delve deeper", "explore further", or help with anything else.
-           - FORBIDDEN: "Do you want me to...", "Should I dive deeper into...", "Would you like help with..."
-           - Simply answer the question and stop.
-        
-        3. **ONLY INSIGHTS**: Connect dots between notes (e.g., "Your desire for X conflicts with your fear of Y").
-        
-        4. **STRICT GROUNDING**: Use ONLY the provided CONTEXT. If the answer is not in the notes, say "I do not have enough information in your notes to answer that."
-        
-        5. **PERSONA**: Address user as "You".
-        
-        6. **CITATIONS**: Reference note titles when stating facts.
-        
-        7. **SUMMARY FORMAT**: If you include a summary/takeaway, make it a factual observation, NOT advice:
-           - FORBIDDEN: "You need to address your emotional challenges to succeed."
-           - ALLOWED: "Your notes reveal a pattern of ambition paired with uncertainty about direction."
+        # CONSTRAINTS
+        - **NO ADVICE**: Do not tell the user what they "should" do. Just state the facts.
+        - **NO PREAMBLE**: Don't start with "Looking at your notes..." or "I found this...". Just start the conversation.
+        - **NO CITATIONS**: Do not use "(/notes/id)" or "Note: X". The UI handles this.
+        - **NO FOLLOW-UP QUESTIONS**: Don't ask "Would you like me to explore..." - just answer and stop.
         
         # CONTEXT
         {structured_context_str}
@@ -556,7 +580,7 @@ Extract:
         # USER QUESTION
         {query}
         
-        # YOUR ANSWER
+        # YOUR RESPONSE (Conversational and grounded)
         """
         import asyncio
 
@@ -610,6 +634,18 @@ Extract:
         elif self.provider == "anthropic":
             return settings.ANTHROPIC_MODEL
         return settings.MODEL_ARCHITECT
+
+    def detect_domain(self, text: str) -> str:
+        """
+        Public wrapper for domain detection. Used by ingestion to assign nodes to communities.
+
+        Args:
+            text: Content to analyze for domain classification
+
+        Returns:
+            Domain string: "Academic", "Professional", "Personal", "Creative", or "Dreams"
+        """
+        return self._detect_query_domain(text)
 
     def _detect_query_domain(self, query: str) -> str:
         """
@@ -753,28 +789,43 @@ Extract:
     ) -> dict:
         """
         Uses Architect to update Summary AND generate a Short Title.
+        Generates ENTITY-ISOLATED, CONTENT-RICH summaries.
+
+        NOTE: The `new_evidence` is already pre-isolated by the LLM extraction phase.
+        It should only contain context relevant to this specific entity.
         """
         prompt = f"""
         ### SYSTEM INSTRUCTIONS
-        You are the LiveOS Core. Your goal is to update the Knowledge Graph summary and title for '{entity_name}'.
+        You are the LiveOS Core. Update the Knowledge Graph entry for '{entity_name}'.
+        The context provided has already been filtered to only include information about this entity.
         
-        ### RULES
-        1. **Title**: Generate a concise, punchy title (MAX 5 WORDS) that captures the essence of this entity's role in the user's life.
-           - Example: "Career Ambitions", "Fitness Goals", "Project Alpha".
-        2. **Summary**: Update the summary with new evidence.
-           - ADDRESS USER AS "YOU".
-           - Omit chores/health unless relevant.
-           - Keep it grounded.
+        ### CONTENT RICHNESS RULES (CRITICAL)
+        1. This is NOT a brief summary - include ALL relevant details about '{entity_name}'.
+        2. Preserve specific facts: dates, numbers, names, outcomes, feelings, decisions.
+        3. Accumulate knowledge over time - never lose important details from the existing summary.
+        4. If new evidence contradicts existing summary, keep both with temporal context if possible.
+        5. Write in a way that captures the FULL picture of this entity in the user's life.
+        
+        ### TITLE RULES
+        Generate a punchy title (MAX 5 WORDS) capturing '{entity_name}''s role in the user's life.
+        
+        ### FORMAT RULES
+        - ADDRESS USER AS "YOU" (not "I" or third person).
+        - Be factual and grounded.
 
         ### INPUT
         Entity: {entity_name} ({entity_type})
-        Existing Summary: "{existing_summary}"
-        New Note Context: "{new_evidence}"
+        
+        Existing Summary (preserve important details): 
+        "{existing_summary}"
+        
+        New Evidence (pre-isolated context about {entity_name}): 
+        "{new_evidence}"
         
         ### OUTPUT (JSON)
         {{
             "title": "Short Title Here",
-            "summary": "Updated summary string here..."
+            "summary": "Content-rich summary here..."
         }}
         """
 
@@ -812,72 +863,47 @@ Double-quote all keys.""",
 
     def _format_structured_context(self, docs: list[dict], query: str) -> str:
         """
-        Organizes docs into:
-        1. Mind (Concepts/Tasks)
-        2. Evidence (Linked Notes)
-        3. Anchor (Recent Notes)
+        Unified Fact Pool format - treats all retrieved knowledge as facts to use,
+        not sections to summarize. This prevents the LLM from being indirect.
 
-        Applies Smart Snippet Extraction to notes.
+        Labels:
+        - [CORE CONSENSUS]: Direct entity/concept matches (distilled knowledge)
+        - [RELATED CONTEXT]: Expanded neighbors from graph traversal
+        - [DOMAIN OVERVIEW]: Community-level summaries for broad context
+        - [CONNECTION PATH]: Multi-hop paths showing how entities relate
         """
-        # 1. Separate by Type
-        mind_nodes = [d for d in docs if d.get("type") == "graph_consensus"]
-        # Recent notes = anchor, older notes = evidence
-        anchor_notes = [
-            d for d in docs if d.get("type") == "note" and d.get("is_recent", False)
-        ]
-        evidence_notes = [
-            d for d in docs if d.get("type") == "note" and not d.get("is_recent", False)
-        ]
+        parts = ["# KNOWLEDGE RETRIEVED FROM YOUR BRAIN"]
+        parts.append("Use the following facts to answer the question directly.\n")
 
-        parts = []
+        for d in docs:
+            dtype = d.get("type", "unknown")
+            text = d.get("text", "")
 
-        # SECTION 1: THE MIND
-        if mind_nodes:
-            parts.append("### SECTION 1: KNOWLEDGE GRAPH (The Mind)")
-            parts.append("High-level concepts and tasks related to the query:")
-            for d in mind_nodes:
-                node_text = d.get("text")
-                parts.append(f"- {node_text}")
+            if not text:
+                continue
 
-                # Add related nodes if available (from relationship enrichment)
-                related_nodes = d.get("related_nodes", [])
-                if related_nodes:
-                    parts.append("  Related:")
-                    for rn in related_nodes:
-                        rel_path = " → ".join(rn.get("relationship_path", []))
-                        rel_summary = rn.get("summary", "")[
-                            :100
-                        ]  # Truncate to 100 chars
-                        parts.append(
-                            f"    • {rn.get('name')} ({rn.get('label')}) [{rel_path}]: {rel_summary}"
-                        )
-            parts.append("")
+            # Label based on type to signal authority level
+            if dtype == "graph_consensus":
+                # Primary entity matches - highest authority
+                parts.append(f"[CORE CONSENSUS]: {text}")
+            elif dtype == "related_node":
+                # Graph neighbors - supporting context
+                parts.append(f"[RELATED CONTEXT]: {text}")
+            elif dtype == "community_summary":
+                # High-level domain overviews
+                parts.append(f"[DOMAIN OVERVIEW]: {text}")
+            elif dtype == "multi_hop_path":
+                # Paths connecting query entities
+                parts.append(f"[CONNECTION PATH]: {text}")
+            elif dtype == "note":
+                # Raw note snippets (fallback)
+                title = d.get("title", "Unknown")
+                parts.append(f"[NOTE EXCERPT - {title}]: {text}")
+            else:
+                # Unknown type - include anyway
+                parts.append(f"[CONTEXT]: {text}")
 
-        # SECTION 2: EVIDENCE (Linked Details)
-        if evidence_notes:
-            parts.append("### SECTION 2: LINKED EVIDENCE (Specific Details)")
-            parts.append(
-                "Key excerpts from notes directly linked to the above concepts:"
-            )
-            for d in evidence_notes:
-                # Use 'text' field which contains the actual snippet from retrieval
-                snippet = d.get("text", "")
-                if snippet:
-                    parts.append(f"- [From Note: {d.get('title')}]: {snippet}")
-            parts.append("")
-
-        # SECTION 3: ANCHOR (Recent Context)
-        if anchor_notes:
-            parts.append("### SECTION 3: RECENT CONTEXT (The Anchor)")
-            parts.append("Snippets from your most recent notes:")
-            for d in anchor_notes:
-                # Use 'text' field which contains the actual snippet from retrieval
-                snippet = d.get("text", "")
-                if snippet:
-                    parts.append(f"- [From Note: {d.get('title')}]: {snippet}")
-            parts.append("")
-
-        return "\n".join(parts)
+        return "\n\n".join(parts)
 
     def _extract_relevant_snippet(
         self, content: str, query_terms: set, window_size: int = 300

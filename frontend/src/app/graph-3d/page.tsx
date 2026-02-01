@@ -98,6 +98,9 @@ export default function Graph3DPage() {
     // Reference nodes (papers, books, citations)
     if (node.group === "Reference") return "#ffd700";
     
+    // Community nodes (clusters)
+    if (node.group === "Community") return "#ffffff";
+    
     // Domain-aware coloring for Notes
     if (node.group === "Note") {
       if (node.domain === "Academic") return "#10b981"; // emerald
@@ -157,7 +160,7 @@ export default function Graph3DPage() {
       {/* Legend */}
       <div className="absolute bottom-6 left-6 z-20 max-w-xs rounded-2xl border border-white/10 bg-black/80 p-5 shadow-2xl backdrop-blur-xl transition-all duration-300 hover:scale-[1.02]">
         <div className="mb-4 flex items-center gap-2.5 border-b border-white/10 pb-3">
-          <div className="rounded-lg bg-gradient-to-br from-purple-500/20 to-purple-500/5 p-2">
+          <div className="rounded-lg bg-linear-to-br from-purple-500/20 to-purple-500/5 p-2">
             <Network className="h-5 w-5 text-pink-400" />
           </div>
           <div>
@@ -168,42 +171,42 @@ export default function Graph3DPage() {
         <div className="space-y-2.5">
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#00c6ff] shadow-[0_0_12px_#00c6ff]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#00c6ff] shadow-[0_0_12px_#00c6ff]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#00c6ff] opacity-30"></span>
             </div>
             <span className="font-semibold">Concept / Theme</span>
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#7000ff] shadow-[0_0_12px_#7000ff]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#7000ff] shadow-[0_0_12px_#7000ff]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#7000ff] opacity-30"></span>
             </div>
             <span className="font-semibold">Entity (Person/Place)</span>
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#a78bfa] shadow-[0_0_12px_#a78bfa]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#a78bfa] shadow-[0_0_12px_#a78bfa]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#a78bfa] opacity-30"></span>
             </div>
             <span className="font-semibold">Persona / Trait</span>
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#ff0055] shadow-[0_0_12px_#ff0055]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#ff0055] shadow-[0_0_12px_#ff0055]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#ff0055] opacity-30"></span>
             </div>
             <span className="font-semibold">Task / Goal</span>
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-white shadow-[0_0_12px_rgba(255,255,255,0.6)]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-white shadow-[0_0_12px_rgba(255,255,255,0.6)]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-white opacity-20"></span>
             </div>
             <span className="font-semibold">Note / Memory</span>
           </div>
           <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
             <div className="relative">
-              <span className="block h-3.5 w-3.5 flex-shrink-0 rounded-full bg-[#ffd700] shadow-[0_0_12px_#ffd700]"></span>
+              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#ffd700] shadow-[0_0_12px_#ffd700]"></span>
               <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#ffd700] opacity-30"></span>
             </div>
             <span className="font-semibold">Reference / Citation</span>
