@@ -820,6 +820,127 @@ Extract:
         title: str
         summary: str
 
+    def generate_entity_summary(
+        self,
+        context: str,
+        entity_name: str,
+        entity_type: str,
+    ) -> dict:
+        """
+        Generates a FRESH summary for an entity from the provided context.
+        This is used when creating new entities or when no existing summary exists.
+
+        Returns:
+            dict with 'title' and 'summary' keys
+        """
+        if not context or not context.strip():
+            return {
+                "title": entity_name,
+                "summary": f"Information about {entity_name}.",
+            }
+
+        # Benchmark mode uses factual, objective prompts
+        if settings.BENCHMARK_MODE:
+            format_rules = """### FORMAT RULES
+        - Use third-person, objective language (not "you" or "I").
+        - Be factual and grounded IN THE PROVIDED CONTEXT ONLY.
+        - Do NOT use personal framing or address any user."""
+            title_rules = f"""### TITLE RULES
+        Generate a short descriptive title (MAX 5 WORDS) for '{entity_name}'."""
+        else:
+            format_rules = """### FORMAT RULES
+        - ADDRESS USER AS "YOU" (not "I" or third person).
+        - Be factual and grounded IN THE PROVIDED CONTEXT ONLY."""
+            title_rules = f"""### TITLE RULES
+        Generate a punchy title (MAX 5 WORDS) capturing '{entity_name}''s role in the user's life."""
+
+        prompt = f"""
+        ### SYSTEM INSTRUCTIONS
+        You are the LiveOS Core. Create a Knowledge Graph entry for '{entity_name}'.
+        
+        ### ANTI-HALLUCINATION RULES (ABSOLUTELY CRITICAL)
+        ⚠️ NEVER invent, assume, or add information not explicitly present in the context below.
+        ⚠️ NEVER use your training knowledge to fill in gaps (no external facts, dates, names, numbers).
+        ⚠️ If something is unclear or missing, say "details pending" - DO NOT GUESS.
+        ⚠️ ONLY include facts that are EXPLICITLY stated in the Context.
+        
+        ### CONTENT RICHNESS RULES
+        1. Include ALL relevant details from the context about '{entity_name}'.
+        2. Preserve specific facts: dates, numbers, names, outcomes FROM THE CONTEXT ONLY.
+        3. Write in a way that captures what was ACTUALLY written, not what you think was meant.
+        
+        {title_rules}
+        
+        {format_rules}
+
+        ### INPUT
+        Entity: {entity_name} ({entity_type})
+        
+        Context about {entity_name}: 
+        "{context}"
+        
+        ### OUTPUT (JSON)
+        {{
+            "title": "Short Title Here",
+            "summary": "Content-rich summary here..."
+        }}
+        """
+
+        try:
+            model = (
+                settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_ARCHITECT
+            )
+
+            if not self.is_gemini:
+                extra_body = {"keep_alive": -1, "format": "json"}
+                response = self.chat_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """You are a JSON-only definition engine. Valid JSON (RFC 8259). 
+Example:
+{
+  "title": "My Title",
+  "summary": "My summary."
+}
+Double-quote all keys. Use straight quotes, not curly quotes.""",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    extra_body=extra_body,
+                )
+                raw_content = response.choices[0].message.content
+                cleaned_json = self._clean_json(raw_content)
+                parsed = self.SummaryUpdate.model_validate_json(cleaned_json)
+                return {"title": parsed.title, "summary": parsed.summary}
+            else:
+                response = self.extraction_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """You are a JSON-only definition engine. Valid JSON (RFC 8259). 
+Example:
+{
+  "title": "My Title",
+  "summary": "My summary."
+}
+Double-quote all keys.""",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    response_model=self.SummaryUpdate,
+                    max_retries=2,
+                )
+                return {"title": response.title, "summary": response.summary}
+        except Exception as e:
+            logger.error(f"Entity Summary Generation Failed for {entity_name}: {e}")
+            return {
+                "title": entity_name,
+                "summary": f"Information about {entity_name}.",
+            }
+
     def update_summary(
         self,
         existing_summary: str,

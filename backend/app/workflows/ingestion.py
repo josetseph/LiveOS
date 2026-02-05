@@ -789,8 +789,12 @@ Summarize the common themes and key insights that connect these items."""
         """
         Updates a node's summary using LLM-provided isolated context.
 
-        Now includes RETRIEVAL: fetches related nodes to provide richer context,
-        preventing hallucinations when new notes have incomplete context.
+        NEW APPROACH:
+        1. First generate a fresh summary from the new context
+        2. If existing summary exists (and is meaningful), merge old + new
+        3. Otherwise, use the fresh summary directly
+
+        This ensures we ALWAYS get a real summary, never just "None yet."
 
         Args:
             label: Node label (Entity, Concept, Task, etc.)
@@ -811,55 +815,81 @@ Summarize the common themes and key insights that connect these items."""
             res = await loop.run_in_executor(None, _get_existing)
             existing_summary = res[0].get("summary") if res else ""
 
-            # 2. NEW: Fetch related nodes for additional context
-            # This prevents hallucinations when new notes lack full context
-            def _get_related_context():
-                related_context_parts = []
-                try:
-                    # Get directly connected nodes (1-hop neighbors)
-                    related_nodes = graph_service.get_related_nodes(
-                        node_name=name,
-                        node_label=label,
-                        max_depth=1,
-                        min_confidence=0.5,
-                    )
-                    # Extract summaries from related nodes (limit to top 3)
-                    for node in related_nodes[:3]:
-                        node_summary = node.get("summary")
-                        if node_summary:
-                            node_name_rel = node.get("name", "Unknown")
-                            node_label_rel = node.get("label", "Entity")
-                            rel_path = " → ".join(node.get("relationship_path", []))
-                            related_context_parts.append(
-                                f"[{node_label_rel}: {node_name_rel}] (via {rel_path}): {node_summary[:300]}"
-                            )
-                except Exception as e:
-                    logger.debug(
-                        f"  [Ingestion] Could not fetch related context for {name}: {e}"
-                    )
+            # Check if existing summary is meaningful (not None, empty, or placeholder)
+            has_meaningful_summary = (
+                existing_summary
+                and existing_summary.strip()
+                and existing_summary.strip().lower()
+                not in ["none yet.", "none yet", ""]
+            )
 
-                return "\n".join(related_context_parts) if related_context_parts else ""
-
-            related_context = await loop.run_in_executor(None, _get_related_context)
-
-            if related_context:
-                logger.info(
-                    f"  [Ingestion] Found related context for {name} ({len(related_context)} chars)"
-                )
-
-            # 3. Generate Delta Update using pre-isolated context + related context
-            def _call_llm():
-                return llm_service.update_summary(
-                    existing_summary or "None yet.",
+            # 2. Generate fresh summary from new context FIRST
+            def _generate_fresh_summary():
+                return llm_service.generate_entity_summary(
                     isolated_context,
                     name,
                     label,
-                    related_context=related_context,
                 )
 
-            update_data = await loop.run_in_executor(None, _call_llm)
+            new_summary_data = await loop.run_in_executor(None, _generate_fresh_summary)
 
-            # 3. Generate embedding for updated summary
+            # 3. If existing meaningful summary exists, merge old + new
+            if has_meaningful_summary:
+                # Fetch related context for richer merging
+                def _get_related_context():
+                    related_context_parts = []
+                    try:
+                        related_nodes = graph_service.get_related_nodes(
+                            node_name=name,
+                            node_label=label,
+                            max_depth=1,
+                            min_confidence=0.5,
+                        )
+                        for node in related_nodes[:3]:
+                            node_summary = node.get("summary")
+                            if node_summary and node_summary.strip().lower() not in [
+                                "none yet.",
+                                "none yet",
+                            ]:
+                                node_name_rel = node.get("name", "Unknown")
+                                node_label_rel = node.get("label", "Entity")
+                                rel_path = " → ".join(node.get("relationship_path", []))
+                                related_context_parts.append(
+                                    f"[{node_label_rel}: {node_name_rel}] (via {rel_path}): {node_summary[:300]}"
+                                )
+                    except Exception as e:
+                        logger.debug(
+                            f"  [Ingestion] Could not fetch related context for {name}: {e}"
+                        )
+                    return (
+                        "\n".join(related_context_parts)
+                        if related_context_parts
+                        else ""
+                    )
+
+                related_context = await loop.run_in_executor(None, _get_related_context)
+
+                # Merge existing + new using update_summary
+                def _merge_summaries():
+                    return llm_service.update_summary(
+                        existing_summary,
+                        new_summary_data[
+                            "summary"
+                        ],  # Use the new summary as "evidence"
+                        name,
+                        label,
+                        related_context=related_context,
+                    )
+
+                update_data = await loop.run_in_executor(None, _merge_summaries)
+                logger.info(
+                    f"  [Ingestion] Merged existing + new summary for {label}: {name}"
+                )
+            else:
+                # No existing summary, use the fresh one directly
+                update_data = new_summary_data
+
+            # 4. Generate embedding for updated summary
             from app.services.embedding import embedding_service
 
             def _generate_embedding():
@@ -868,7 +898,7 @@ Summarize the common themes and key insights that connect these items."""
 
             new_embedding = await loop.run_in_executor(None, _generate_embedding)
 
-            # 4. Save back with updated embedding
+            # 5. Save back with updated embedding
             def _save_update():
                 graph_service.execute_query(
                     f"MATCH (n:{label} {{{identifier_key}: $name}}) SET n.summary = $summary, n.title = $title, n.embedding = $embedding, n:Indexable",

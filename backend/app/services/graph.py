@@ -177,6 +177,7 @@ class GraphService:
         MATCH (source:Indexable), (target:Indexable)
         WHERE toLower(source.name) CONTAINS toLower(source_name)
           AND toLower(target.name) CONTAINS toLower(target_name)
+          AND source <> target  // Prevent same node matching both source and target
         MATCH path = shortestPath((source)-[*1..{max_depth}]-(target))
         WHERE all(rel in relationships(path) WHERE 
             coalesce(rel.confidence, 0.8) >= $min_confidence
