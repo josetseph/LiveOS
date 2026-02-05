@@ -1,0 +1,3 @@
+# Lourenço Mutarelli
+
+In addition to comic books, Mutarelli has also created plays, books, and all the illustration and animated sequences of the 2004 motion picture "Nina", which was based on the novel "Crime and Punishment" by Dostoyevsky.

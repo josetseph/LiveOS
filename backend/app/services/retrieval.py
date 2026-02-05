@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import datetime
 from typing import List
 from app.core.config import settings
 from app.core.logging_config import get_component_logger
@@ -9,6 +10,22 @@ from app.services.graph import graph_service
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
 logger = get_component_logger("RetrievalService")
+
+# Create a dedicated retrieval debug logger that writes full details to file
+retrieval_debug_logger = logging.getLogger("retrieval_debug")
+retrieval_debug_logger.setLevel(logging.DEBUG)
+# Only add handler if not already present
+if not retrieval_debug_logger.handlers:
+    # Create logs directory if needed
+    logs_dir = os.path.join(os.path.dirname(__file__), "../../logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    # File handler for detailed retrieval logs
+    retrieval_log_path = os.path.join(logs_dir, "retrieval_debug.log")
+    file_handler = logging.FileHandler(retrieval_log_path, mode="a", encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+    retrieval_debug_logger.addHandler(file_handler)
+    logger.info(f"Retrieval debug logging enabled: {retrieval_log_path}")
 
 # Stopwords to filter from LLM-extracted entities
 # These are common words that match everything and provide no signal
@@ -134,6 +151,80 @@ class RetrievalService:
         )
         # No reranker needed - using pure symbolic ranking for GraphRAG
         logger.info("RetrievalService initialized (symbolic ranking mode)")
+
+    def _log_retrieval_details(
+        self,
+        query: str,
+        results: List[dict],
+        query_entities: List[str],
+        query_concepts: List[str],
+    ):
+        """
+        Log detailed retrieval results to dedicated file for debugging.
+        Includes full node summaries, not truncated versions.
+        """
+        retrieval_debug_logger.debug("=" * 100)
+        retrieval_debug_logger.debug(f"RETRIEVAL SESSION: {datetime.now().isoformat()}")
+        retrieval_debug_logger.debug(f"QUERY: {query}")
+        retrieval_debug_logger.debug(f"EXTRACTED ENTITIES: {query_entities}")
+        retrieval_debug_logger.debug(f"EXTRACTED CONCEPTS: {query_concepts}")
+        retrieval_debug_logger.debug("=" * 100)
+
+        for i, doc in enumerate(results):
+            retrieval_debug_logger.debug(f"\n--- RESULT {i+1} ---")
+            retrieval_debug_logger.debug(f"TYPE: {doc.get('type', 'unknown')}")
+            retrieval_debug_logger.debug(f"SCORE: {doc.get('final_score', 0):.2f}")
+            retrieval_debug_logger.debug(f"BOOSTS: {doc.get('boosts', {})}")
+            retrieval_debug_logger.debug(
+                f"SYMBOLIC IMMUNE: {doc.get('symbolic_immune', False)}"
+            )
+
+            # Get node details from original object
+            original = doc.get("original_obj", {})
+            if original:
+                retrieval_debug_logger.debug(
+                    f"NODE NAME: {original.get('name', 'N/A')}"
+                )
+                retrieval_debug_logger.debug(
+                    f"NODE LABELS: {original.get('labels', [])}"
+                )
+                retrieval_debug_logger.debug(
+                    f"NODE TYPE: {original.get('type', 'N/A')}"
+                )
+
+                # Full summary - not truncated!
+                summary = original.get("summary") or original.get("description", "")
+                retrieval_debug_logger.debug(f"FULL SUMMARY ({len(summary)} chars):")
+                retrieval_debug_logger.debug(summary if summary else "(empty)")
+
+                # Isolated context if available
+                isolated = original.get("isolated_context", "")
+                if isolated:
+                    retrieval_debug_logger.debug(
+                        f"ISOLATED CONTEXT ({len(isolated)} chars):"
+                    )
+                    retrieval_debug_logger.debug(isolated)
+
+            # Linked notes
+            linked_notes = doc.get("linked_notes", [])
+            if linked_notes:
+                retrieval_debug_logger.debug(f"LINKED NOTES ({len(linked_notes)}):")
+                for note in linked_notes[:3]:
+                    retrieval_debug_logger.debug(
+                        f"  - {note.get('title', 'Untitled')} ({note.get('id', 'N/A')})"
+                    )
+
+            # Full text sent to LLM
+            retrieval_debug_logger.debug(
+                f"TEXT SENT TO LLM ({len(doc.get('text', ''))} chars):"
+            )
+            retrieval_debug_logger.debug(
+                doc.get("text", "")[:1000] + "..."
+                if len(doc.get("text", "")) > 1000
+                else doc.get("text", "")
+            )
+
+        retrieval_debug_logger.debug("\n" + "=" * 100 + "\n")
 
     def _chunk_text(
         self, text: str, chunk_size: int = 400, overlap: int = 100
@@ -344,18 +435,36 @@ class RetrievalService:
                     f"  [GraphRAG] Expanded to {len(related_nodes)} related nodes via traversal"
                 )
 
-        # STEP 3: Vector fallback ONLY if entity lookup found nothing
-        vector_fallback_nodes = []
-        if not graph_nodes:
-            logger.info(
-                "  [Fallback] No entities found by name, using vector search..."
+        # STEP 3: HYBRID VECTOR SEARCH - Find semantically similar nodes
+        # This supplements name-based lookup to catch nodes the user didn't name explicitly
+        # e.g., query about "financial struggles" should find "Debt", "Budget", etc.
+        vector_similar_nodes = []
+        t_vector_start = time.perf_counter()
+        try:
+            vector_results = graph_service.search_knowledge_graph(
+                full_vector, top_k=15, min_score=0.65  # Higher threshold for quality
             )
-            vector_fallback_nodes = graph_service.search_knowledge_graph(
-                full_vector, top_k=20, min_score=0.6
-            )
-            graph_nodes.extend(vector_fallback_nodes)
+            # Filter out nodes we already found by name (avoid duplicates)
+            for vnode in vector_results:
+                if vnode["name"] not in node_names_found:
+                    vnode["_source"] = "vector"  # Mark source for scoring
+                    vector_similar_nodes.append(vnode)
+                    node_names_found.add(vnode["name"])
 
-        all_node_names = [n["name"] for n in graph_nodes + related_nodes]
+            if vector_similar_nodes:
+                logger.info(
+                    f"  [Hybrid] Vector search added {len(vector_similar_nodes)} semantically similar nodes: "
+                    f"{[n['name'] for n in vector_similar_nodes[:5]]}"
+                )
+        except Exception as e:
+            logger.debug(f"  [Hybrid] Vector search failed: {e}")
+
+        t_vector = time.perf_counter() - t_vector_start
+        logger.info(f"  [⏱️ Timing] Vector search: {t_vector:.2f}s")
+
+        all_node_names = [
+            n["name"] for n in graph_nodes + related_nodes + vector_similar_nodes
+        ]
 
         # STEP 4: Community summaries for broad queries
         # If query is exploratory ("what have I learned", "what's happening with X")
@@ -587,7 +696,8 @@ class RetrievalService:
             # Collect linked notes from all nodes in the path (case-insensitive lookup)
             path_linked_notes = []
             for node_name in path_nodes:
-                path_linked_notes.extend(node_to_notes.get(node_name.lower(), []))
+                if node_name:  # Skip None values
+                    path_linked_notes.extend(node_to_notes.get(node_name.lower(), []))
             # Deduplicate by note id
             seen_ids = set()
             unique_notes = []
@@ -608,15 +718,45 @@ class RetrievalService:
                 }
             )
 
+        # E. Vector-Similar Nodes (semantic matches from hybrid search)
+        for node in vector_similar_nodes:
+            summary = node.get("summary") or node.get("description", "")
+            if not summary:
+                continue
+
+            label = (
+                node.get("labels", ["Entity"])[0]
+                if isinstance(node.get("labels"), list)
+                else "Entity"
+            )
+            vector_score = node.get("score", 0.0)
+            text = f"[Semantic Match - {label}: {node['name']}] (similarity: {vector_score:.2f}): {summary}"
+
+            # Attach linked notes for reference traceability (case-insensitive lookup)
+            linked_notes = node_to_notes.get(node["name"].lower(), [])
+
+            candidates.append(
+                {
+                    "text": text,
+                    "type": "vector_similar",
+                    "original_obj": node,
+                    "is_recent": False,
+                    "priority": "tertiary",  # Lower than name matches but still valuable
+                    "vector_score": vector_score,
+                    "linked_notes": linked_notes,
+                }
+            )
+
         logger.info(
             f"  [GraphRAG] Prepared {len(candidates)} candidates from graph "
-            f"(no note chunking - summaries are primary)"
+            f"(hybrid: name + vector search)"
         )
 
-        # ============ SYMBOLIC RANKING (No Reranker) ============
-        # In a symbolic knowledge graph, we don't need a statistical reranker.
-        # When you ask about "Ceruba", the node literally named "Ceruba" is relevant.
-        # Rerankers can "drown out" exact matches with semantically similar but irrelevant content.
+        # ============ HYBRID RANKING (Symbolic + Vector) ============
+        # Primary: Name matches (symbolic) get highest priority
+        # Secondary: Graph traversal results
+        # Tertiary: Vector-similar nodes (semantic matches)
+        # Vector scores are used to boost/prune within each tier
 
         if not candidates:
             logger.warning("  [Retrieval] No candidates found from graph")
@@ -624,7 +764,7 @@ class RetrievalService:
 
         t_ranking_start = time.perf_counter()
 
-        # Score candidates based on symbolic priority
+        # Score candidates based on symbolic priority + vector similarity
         all_results = []
         for cand in candidates:
             # Base score by priority tier
@@ -632,9 +772,16 @@ class RetrievalService:
                 # Direct entity matches (from find_nodes_by_name) - highest priority
                 base_score = 100.0
                 cand["symbolic_immune"] = True
-            else:
+            elif cand.get("priority") == "secondary":
                 # Related nodes, community summaries, multi-hop paths
                 base_score = 50.0
+            else:
+                # Tertiary: Vector-similar nodes (semantic matches)
+                # Start at 30, boosted by vector similarity score
+                vector_sim = cand.get("vector_score", 0.0)
+                base_score = 30.0 + (
+                    vector_sim * 20.0
+                )  # 30-50 range based on similarity
 
             final_score = base_score
 
@@ -654,17 +801,24 @@ class RetrievalService:
             if keyword_boost > 1.0:
                 final_score *= keyword_boost
 
+            # Vector similarity boost for non-primary candidates
+            vector_boost = 1.0
+            if cand.get("vector_score"):
+                vector_boost = 1.0 + (cand["vector_score"] * 0.3)  # Up to 30% boost
+                final_score *= vector_boost
+
             cand["final_score"] = final_score
             cand["rerank_score"] = 0.0  # No reranker used
             cand["boosts"] = {
                 "priority": base_score,
                 "entity_match": entity_boost,
                 "keyword_match": keyword_boost,
+                "vector_sim": vector_boost,
             }
             all_results.append(cand)
 
         t_ranking = time.perf_counter() - t_ranking_start
-        logger.info(f"  [⏱️ Timing] Symbolic ranking: {t_ranking:.4f}s")
+        logger.info(f"  [⏱️ Timing] Hybrid ranking: {t_ranking:.4f}s")
 
         # ============ FINAL RANKING ============
         all_results.sort(key=lambda x: x.get("final_score", 0), reverse=True)
@@ -672,7 +826,7 @@ class RetrievalService:
         # Apply limit (no cutoff needed - symbolic matches are already high quality)
         filtered_results = all_results[:top_k]
 
-        # Log Top Results
+        # Log Top Results (brief version to console)
         logger.info(f"  [Retrieval] Final Selection ({len(filtered_results)} results):")
         for i, doc in enumerate(filtered_results[:10]):
             display_text = doc["text"][:80].replace("\n", " ")
@@ -684,9 +838,14 @@ class RetrievalService:
                 f"{display_text}..."
             )
 
+        # Detailed logging to file (full summaries, not truncated)
+        self._log_retrieval_details(
+            query, filtered_results, query_entities, query_concepts
+        )
+
         t_total = time.perf_counter() - t_start
         logger.info(
-            f"  [⏱️ Timing] Total: {t_total:.2f}s (Embed: {t_embedding:.2f}s | Graph: {t_candidates:.2f}s | Ranking: {t_ranking:.4f}s)"
+            f"  [⏱️ Timing] Total: {t_total:.2f}s (Embed: {t_embedding:.2f}s | Graph: {t_candidates:.2f}s | Vector: {t_vector:.2f}s | Rank: {t_ranking:.4f}s)"
         )
         return filtered_results
 

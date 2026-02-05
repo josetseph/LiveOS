@@ -1,0 +1,3 @@
+# Roman Catholic Diocese of Yingkou
+
+The Roman Catholic Diocese of Yingkou/Yingkow (Latin: "Imcheuven(sis)" , ) is a diocese located in the city of Yingkou in the Ecclesiastical province of Shenyang 瀋陽 in China.

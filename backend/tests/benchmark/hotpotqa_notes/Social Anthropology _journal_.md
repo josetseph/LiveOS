@@ -1,0 +1,3 @@
+# Social Anthropology (journal)
+
+Social Anthropology/Anthropologie Sociale is a quarterly academic journal published since 2007 by Wiley-Blackwell on behalf of the European Association of Social Anthropologists.  It was established in 1992 and originally published by Cambridge University Press.  The current editors-in-chief are Sarah Green and Patrick Laviolette.  Articles are published in English or French.

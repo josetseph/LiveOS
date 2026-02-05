@@ -1,0 +1,3 @@
+# Monica Lewinsky
+
+Monica Samille Lewinsky (born July 23, 1973) is an American activist, television personality, fashion designer, and former White House intern.

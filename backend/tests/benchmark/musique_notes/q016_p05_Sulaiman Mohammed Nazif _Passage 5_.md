@@ -1,0 +1,11 @@
+# Sulaiman Mohammed Nazif (Passage 5)
+
+Passage 6:
+Sulaiman Mohammed Nazif
+Sulaiman Mohammed Nazif (born 14 April 1970) is a Nigerian politician, who represented the Bauchi North constituency of Bauchi State, Nigeria, in the Senate of Nigeria. He took office on 29 May 2007. He was elected on the Action Congress (AC) platform.Nazif attended the Federal Polytechnic Staff School, Bauchi (1981–1983), the Nigerian Military School (1983–1988) and Ahmadu Bello University, Zaria, graduating in 1990 as an Engineer.
+After taking his seat in the Senate, he was appointed to committees on Women and Youth, Water Resources, Solid Minerals, Local & Foreign Debts, Land Transport (Vice Chairman), Drugs and Narcotics, Anti Corruption and Communications.
+He was also appointed the Publicity Secretary of the Northern Senators Forum.He was nominated to go to the U.S. to witness the inauguration of President Barack Obama. However, when he arrived at Washington Dulles International Airport he was told his visa was not in order and was not allowed to enter the country.
+In a mid-term evaluation of Senators in May 2009, ThisDay said that he had not sponsored any bill but co-sponsored some bills, including the Nigerian Railway Corporation (Repeal and Reenactment) Bill 2008. He co-sponsored fifteen motions and made brilliant contributions to debates in plenary.Nazif was a contender to become governor of Bauchi State in the 28 April 2011 elections, running on the All Nigeria People's Party (ANPP) platform. He came fourth with 102,093 votes, losing to the incumbent Governor Isa Yuguda, who won 771,503 votes.
+
+Incomplete project controversy
+In January 2022, WikkiTimes reported on several incomplete constituency projects from Nazif's term in office, specifically two nonexistent skills acquisition centres that cost over ₦41 million in public funds. One "centre" was entirely on paper with no evidence of any construction while the other "centre" was simply an abandoned building that had never been utilized. The investigation also found that the contract awarding process did not follow legally required procedures and the companies given the construction contracts did not have any physical or recent presence. Nazif did not respond to requests for comment.

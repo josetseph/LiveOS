@@ -95,7 +95,8 @@ class LLMService:
     def _clean_json(self, json_str: str) -> str:
         """
         Uses json_repair to robustly fix malformed JSON from LLMs.
-        Also strips markdown code blocks and sanitizes control characters.
+        Also strips markdown code blocks, sanitizes control characters,
+        and normalizes smart/curly quotes to straight quotes.
         """
         # 1. Unwrap markdown (Common failure mode)
         if "```" in json_str:
@@ -106,6 +107,12 @@ class LLMService:
         # 2. Remove control characters (except allowed ones: \n \r \t inside strings are handled by json_repair)
         # This handles \u0000-\u001F that break JSON parsing
         json_str = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", json_str)
+
+        # 3. Normalize smart/curly quotes to straight quotes
+        # Single quotes: ' ' ‛ → '
+        json_str = re.sub(r"[\u2018\u2019\u201B]", "'", json_str)
+        # Double quotes: " " „ → "
+        json_str = re.sub(r"[\u201C\u201D\u201E]", '"', json_str)
 
         try:
             from json_repair import repair_json
@@ -455,6 +462,12 @@ Extract:
         if not text or not text.strip():
             return "No content provided."
 
+        # Benchmark mode uses factual, objective prompts
+        if settings.BENCHMARK_MODE:
+            system_prompt = "You are a factual summarization engine. Summarize the content based ONLY on the provided text. Use third-person, objective language. Keep sentences concise. Do NOT add personal framing or address any 'user'. Example: 'The document discusses the 2011 Patras Open tennis tournament.'"
+        else:
+            system_prompt = "You are a personal knowledge assistant. Summarize the user's note based ONLY on the provided text. Keep sentences EXTREMELY short (max 15 words) and simple. Address the user as 'You'. If the note is just a link (e.g. [[...]]) or very short, simply state what it references. Do NOT ask for more content. Example: 'You referenced a meeting about Ceruba.'"
+
         # Select model based on provider
         if self.provider == "ollama":
             model = settings.MODEL_SUMMARIZATION
@@ -474,7 +487,7 @@ Extract:
                 messages=[
                     {
                         "role": "user",
-                        "content": f"You are a personal knowledge assistant. Summarize the user's note based ONLY on the provided text. Keep sentences EXTREMELY short (max 15 words) and simple. Address the user as 'You'. If the note is just a link (e.g. [[...]]) or very short, simply state what it references. Do NOT ask for more content. Example: 'You referenced a meeting about Ceruba.'\n\nNote content:\n{text}\n\nSummary:",
+                        "content": f"{system_prompt}\n\nContent:\n{text}\n\nSummary:",
                     }
                 ],
             )
@@ -488,9 +501,9 @@ Extract:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a personal knowledge assistant. Summarize the user's note based ONLY on the provided text. Keep sentences EXTREMELY short (max 15 words) and simple. Address the user as 'You'. If the note is just a link (e.g. [[...]]) or very short, simply state what it references. Do NOT ask for more content. Example: 'You referenced a meeting about Ceruba.'",
+                    "content": system_prompt,
                 },
-                {"role": "user", "content": f"Note content:\n{text}\n\nSummary:"},
+                {"role": "user", "content": f"Content:\n{text}\n\nSummary:"},
             ],
             extra_body=extra_body,
         )
@@ -555,7 +568,34 @@ Extract:
         - Use empathetic, personal language
             """
 
-        prompt = f"""
+        # Benchmark mode uses factual, objective prompts for accurate evaluation
+        if settings.BENCHMARK_MODE:
+            prompt = f"""
+        # ROLE
+        You are a factual question-answering system. Answer the question based ONLY on the provided context.
+        
+        # STYLE GUIDELINES
+        - **FACTUAL**: Use third-person, objective language. No personal framing.
+        - **GROUNDED**: Every claim must be based on the provided context.
+        - **CONCISE**: Answer directly without unnecessary elaboration.
+        - **NO PERSONAL FRAMING**: Do NOT use "you", "your", or address any user personally.
+        
+        # CONSTRAINTS
+        - **NO ADVICE**: Do not give recommendations.
+        - **NO PREAMBLE**: Start the answer directly.
+        - **NO CITATIONS**: Do not use citation markers.
+        - **NO FOLLOW-UP QUESTIONS**: Just answer and stop.
+        
+        # CONTEXT
+        {structured_context_str}
+        
+        # QUESTION
+        {query}
+        
+        # ANSWER (Factual and grounded)
+        """
+        else:
+            prompt = f"""
         # ROLE
         You are the User's "Second Brain"—a thoughtful, conversational AI partner.
         Your goal is to answer the query based on the retrieved knowledge from their life.
@@ -786,6 +826,7 @@ Extract:
         new_evidence: str,
         entity_name: str,
         entity_type: str,
+        related_context: str = "",
     ) -> dict:
         """
         Uses Architect to update Summary AND generate a Short Title.
@@ -793,25 +834,55 @@ Extract:
 
         NOTE: The `new_evidence` is already pre-isolated by the LLM extraction phase.
         It should only contain context relevant to this specific entity.
+
+        Args:
+            related_context: Optional context from related nodes (for richer summaries)
         """
+        # Build related context section if provided
+        related_section = ""
+        if related_context and related_context.strip():
+            related_section = f"""
+        Related Context (from connected entities - use for reference only):
+        "{related_context}"
+        """
+
+        # Benchmark mode uses factual, objective prompts
+        if settings.BENCHMARK_MODE:
+            format_rules = """### FORMAT RULES
+        - Use third-person, objective language (not "you" or "I").
+        - Be factual and grounded IN THE PROVIDED CONTEXT ONLY.
+        - Do NOT use personal framing or address any user."""
+            title_rules = f"""### TITLE RULES
+        Generate a short descriptive title (MAX 5 WORDS) for '{entity_name}'."""
+        else:
+            format_rules = """### FORMAT RULES
+        - ADDRESS USER AS "YOU" (not "I" or third person).
+        - Be factual and grounded IN THE PROVIDED CONTEXT ONLY."""
+            title_rules = f"""### TITLE RULES
+        Generate a punchy title (MAX 5 WORDS) capturing '{entity_name}''s role in the user's life."""
+
         prompt = f"""
         ### SYSTEM INSTRUCTIONS
         You are the LiveOS Core. Update the Knowledge Graph entry for '{entity_name}'.
         The context provided has already been filtered to only include information about this entity.
         
-        ### CONTENT RICHNESS RULES (CRITICAL)
-        1. This is NOT a brief summary - include ALL relevant details about '{entity_name}'.
-        2. Preserve specific facts: dates, numbers, names, outcomes, feelings, decisions.
+        ### ANTI-HALLUCINATION RULES (ABSOLUTELY CRITICAL)
+        ⚠️ NEVER invent, assume, or add information not explicitly present in the inputs below.
+        ⚠️ NEVER use your training knowledge to fill in gaps (no external facts, dates, names, numbers).
+        ⚠️ If something is unclear or missing, say "details pending" or "not yet known" - DO NOT GUESS.
+        ⚠️ ONLY include facts that are EXPLICITLY stated in the Existing Summary, New Evidence, or Related Context.
+        ⚠️ If the New Evidence is vague (e.g., "project went well"), keep it vague - don't elaborate.
+        
+        ### CONTENT RICHNESS RULES
+        1. Include ALL relevant details from the provided inputs about '{entity_name}'.
+        2. Preserve specific facts: dates, numbers, names, outcomes, feelings, decisions FROM THE INPUTS ONLY.
         3. Accumulate knowledge over time - never lose important details from the existing summary.
         4. If new evidence contradicts existing summary, keep both with temporal context if possible.
-        5. Write in a way that captures the FULL picture of this entity in the user's life.
+        5. Write in a way that captures what was ACTUALLY written, not what you think was meant.
         
-        ### TITLE RULES
-        Generate a punchy title (MAX 5 WORDS) capturing '{entity_name}''s role in the user's life.
+        {title_rules}
         
-        ### FORMAT RULES
-        - ADDRESS USER AS "YOU" (not "I" or third person).
-        - Be factual and grounded.
+        {format_rules}
 
         ### INPUT
         Entity: {entity_name} ({entity_type})
@@ -821,7 +892,7 @@ Extract:
         
         New Evidence (pre-isolated context about {entity_name}): 
         "{new_evidence}"
-        
+        {related_section}
         ### OUTPUT (JSON)
         {{
             "title": "Short Title Here",
@@ -834,29 +905,53 @@ Extract:
                 settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_ARCHITECT
             )
             logger.info(f"update_summary calling model: {model}")
-            extra_body = {} if self.is_gemini else {"keep_alive": -1, "format": "json"}
 
-            # We use extraction_client for JSON mode
-            response = self.extraction_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are a JSON-only definition engine. Valid JSON (RFC 8259). 
+            # For Ollama: use raw client to get JSON, then clean and validate manually
+            # This avoids Instructor's validation before we can sanitize control characters
+            if not self.is_gemini:
+                extra_body = {"keep_alive": -1, "format": "json"}
+                response = self.chat_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """You are a JSON-only definition engine. Valid JSON (RFC 8259). 
+Example:
+{
+  "title": "My Title",
+  "summary": "My summary."
+}
+Double-quote all keys. Use straight quotes, not curly quotes.""",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    extra_body=extra_body,
+                )
+                raw_content = response.choices[0].message.content
+                cleaned_json = self._clean_json(raw_content)
+                parsed = self.SummaryUpdate.model_validate_json(cleaned_json)
+                return {"title": parsed.title, "summary": parsed.summary}
+            else:
+                # For Gemini: use Instructor (handles JSON well)
+                response = self.extraction_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """You are a JSON-only definition engine. Valid JSON (RFC 8259). 
 Example:
 {
   "title": "My Title",
   "summary": "My summary."
 }
 Double-quote all keys.""",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                response_model=self.SummaryUpdate,
-                max_retries=2,
-                extra_body=extra_body,
-            )
-            return {"title": response.title, "summary": response.summary}
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    response_model=self.SummaryUpdate,
+                    max_retries=2,
+                )
+                return {"title": response.title, "summary": response.summary}
         except Exception as e:
             logger.error(f"Summary Update Failed: {e}")
             return {"title": entity_name, "summary": existing_summary}

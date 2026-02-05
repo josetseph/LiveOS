@@ -1,0 +1,3 @@
+# 122nd Division
+
+In military terms, 122nd Division or 122nd Infantry Division may refer to:

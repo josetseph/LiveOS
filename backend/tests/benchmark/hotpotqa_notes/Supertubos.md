@@ -1,0 +1,3 @@
+# Supertubos
+
+The Supertubos (Portuguese for "Supertubes") is a beach located in Peniche, Portugal, which due to its great conditions of surfing and its curvy waves and tubes helds every year the MEO Rip Curl Pro Portugal, one of the World Surf League Men's Championship Tour events.

@@ -1,0 +1,3 @@
+# Independent Spirit Award for Best Editing
+
+The Independent Spirit Award for Best Editing is one of the annual awards given by Independent Spirit Awards, a non-profit organization dedicated to independent film and independent filmmakers.

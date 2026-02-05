@@ -1,0 +1,3 @@
+# 1979–80 Wigan Athletic F.C. season
+
+The 1979–80 season was the 42nd season in the history of Wigan Athletic F.C. and their second as a professional club in the Football League.

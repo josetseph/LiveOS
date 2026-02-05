@@ -1,0 +1,3 @@
+# 2007–08 Wigan Athletic F.C. season
+
+The 2007–08 Wigan Athletic F.C. season was the club's 30th season in the Football League and their third season in the Premier League.

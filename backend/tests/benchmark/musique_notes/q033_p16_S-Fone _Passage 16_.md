@@ -1,0 +1,8 @@
+# S-Fone (Passage 16)
+
+Passage 17:
+S-Fone
+S-Fone was a mobile communication operator in Vietnam that used the CDMA technology. Founded on 1 July 2003 in Ho Chi Minh City, Vietnam, S-Fone became the third network of Vietnam, breaking the duopoly of the two VNPT operators. It is the trademark of S-Telecom (CDMA Mobile Phone Centre) (set up as a joint venture between Saigon Postel Corp. (SPT) and Korea SK Telecom). SK Telecom decided to leave the partnership in 2010. SPT has since then found it difficult to find a new partner, after a co-operation with Saigon Tel failed.As of the start of 2005, breaking the old rule of the calls fee from 10 second to 1 second (6+1)7, S-Fone has 1,500,000 to 1,800,000 subscribers, contributing 3% to the total market (after Mobifone with 41%, Viettel Mobile with 34% and Vinaphone with 20%. Its market share (estimated based on revenues) fell to 0.1% by 2012 after suffering from a lack of capital, a small number of subscribers and low network quality.S-Fone has become highly indebted and has been unable to pay salaries for several months in its Hanoi branch in late 2012. S-Fone ceased its operation, closed its stores and website, and released its staff from their contracts in July 2012. Its operating license expired in 2016.
+
+Achievements
+S-Fone is the first and biggest national cellular mobile phone network using CDMA in Vietnam (followed by EVN Telecom and HT Mobile). On 9 October 2006, S-Fone officially launched CDMA 2000 1x EV-DO value added services for the first time in Vietnam: VOD/MOD (Video, TV on demand, music on demand) and mobile Internet (enabling internet access for PCs and laptops via S-Fone network) beginning in Ho Chi Minh City, Hanoi, Da Nang, Hai Phong and Can Tho.

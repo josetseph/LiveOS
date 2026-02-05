@@ -1,0 +1,3 @@
+# MEO Rip Curl Pro Portugal 2016
+
+The MEO Rip Curl Pro Portugal 2016 was an event of the World Surf League for 2016 World Surf League Men's Championship Tour.

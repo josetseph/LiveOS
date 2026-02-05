@@ -1,0 +1,3 @@
+# The Roald Dahl Treasury
+
+The Roald Dahl Treasury is an anthology of works of the children's author Roald Dahl.  It was first published in the United Kingdom in 1997 by Puffin Books.

@@ -14,9 +14,9 @@ Usage:
 
 import asyncio
 import sys
+import os
 
-# Add parent directory to path
-sys.path.insert(0, "/Users/joey/Projects/LiveOS/backend")
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.services.graph import graph_service
 from app.core.logging_config import get_component_logger

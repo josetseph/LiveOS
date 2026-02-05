@@ -1,0 +1,5 @@
+# Sierra Linda High School (Passage 4)
+
+Passage 5:
+Sierra Linda High School
+Sierra Linda High School is a high school located in the west part of Phoenix, Arizona, USA, administered by the Tolleson Union High School District. It had 1,787 students as of October 1, 2013, but currently holds about 1,867 as of the 2018–19 school year. It opened in 2008; due to facility issues, students attended the first semester of classes at La Joya Community High School, then moved into the campus in January 2009. Students of the 2012 cohort were the first graduating class, with approximately 355 students.

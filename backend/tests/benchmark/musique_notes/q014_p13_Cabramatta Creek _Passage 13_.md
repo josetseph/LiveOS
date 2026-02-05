@@ -1,0 +1,11 @@
+# Cabramatta Creek (Passage 13)
+
+Passage 14:
+Cabramatta Creek
+Cabramatta Creek, an urban watercourse of the Georges River catchment, is located in the South Western Sydney, in New South Wales, Australia.
+
+Course and features
+Cabramatta Creek rises in the rural/residential suburb of Denham Court, east south-east of Leppington, within the Liverpool local government area. From here the creek flows in a northerly direction under Camden Valley Way towards Hoxton Park, and its junction with Hinchinbrook Creek. Substantial residential development has occurred in these areas, particularly to the west of Cowpasture Road. A number of detention basins have also been constructed in conjunction with the development.
+The Ingham's poultry farm also occupies a significant landholding in the area. Below Hoxton Park Road, Cabramatta Creek starts to flow in an easterly direction the Fairfield local government area, towards its confluence with the Georges River, to the east of Warwick Farm. A more prominent creek "corridor", up to 200 metres (660 ft) wide, becomes more evident throughout the lower catchment. This primarily consists of public open space, playing fields and golf courses. The Elouera Nature Reserve, which is an important pocket of native bushland, also forms part of this corridor.
+Cabramatta Creek flows through established residential suburbs, including Miller, Cartwright, Sadlier, Ashcroft, Liverpool, Mount Pritchard and Warwick Farm. Major transport routes that cross the catchment includes Hoxton Park Road, Elizabeth Drive, Orange Grove Road (the Cumberland Highway), the Hume Highway and the Main Southern railway line. The catchment area of the creek is approximately 74 square kilometres (29 sq mi), and within the catchment area are the Cabramatta Creek, Hinchinbrook Creek, Maxwells Creek, and Brickmakers Creek.The area around the creek was home to the Darug Aboriginal people. European settlement began on the site in the 1790s when they found good quality soil.
+In the area surrounding Cabramatta Creek is a large flying fox population; located behind the Sunnybrook Motel and called the Cabrammatta Creek Flying Fox Reserve.A concrete beam road bridge that carries the Hume Highway over Cabramatta Creek, constructed in 1951 and commonly known as Ireland's Bridge, is listed on the New South Wales State Heritage Register.

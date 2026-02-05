@@ -1,0 +1,5 @@
+# Jerome Quinn (Passage 9)
+
+Passage 10:
+Jerome Quinn
+Jerome Quinn (May 23, 1908 – February 29, 2008) was a Wisconsin politician and realtor.Born in Green Bay, Wisconsin, Quinn was a realtor and served on the Green Bay Common Council, the Brown County, Wisconsin Board of Supervisors, the local Board of Education, and the Wisconsin State Assembly from 1955 until 1973. He was a Republican.

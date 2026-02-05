@@ -1,0 +1,3 @@
+# Moroccan Ambassador to China
+
+The Moroccan ambassador in Beijing is the official representative of the Government in Rabat to the Government of the People's Republic of China.

@@ -3,8 +3,9 @@ Quick verification that existing graph data maintains quality after implementing
 """
 
 import sys
+import os
 
-sys.path.insert(0, "/Users/joey/Projects/LiveOS/backend")
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.services.graph import graph_service
 

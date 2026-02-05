@@ -1,0 +1,3 @@
+# Sela Ward
+
+Sela Ann Ward (born July 11, 1956) is an American actress, author and producer, best known for her roles on television beginning in the early '80s.

@@ -3,8 +3,9 @@ Test script to verify data validation utilities work correctly.
 """
 
 import sys
+import os
 
-sys.path.insert(0, "/Users/joey/Projects/LiveOS/backend")
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.utils.data_validation import (
     standardize_task_status,

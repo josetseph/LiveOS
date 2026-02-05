@@ -3,10 +3,11 @@ Test script to compare Ollama reranker vs HuggingFace reranker
 """
 
 import asyncio
-import sys
 import time
+import sys
+import os
 
-sys.path.append("/Users/joey/Projects/LiveOS/backend")
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.services.retrieval import retrieval_service
 

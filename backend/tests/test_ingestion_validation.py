@@ -4,8 +4,9 @@ Tests that a note with messy data gets properly standardized.
 """
 
 import sys
+import os
 
-sys.path.insert(0, "/Users/joey/Projects/LiveOS/backend")
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.schemas.extraction import Extraction, Task, ExternalReference, Entity, Concept
 from app.utils.data_validation import standardize_extraction

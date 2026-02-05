@@ -1,0 +1,3 @@
+# Army (Ellie Goulding song)
+
+"Army" is a song by English singer and songwriter Ellie Goulding from her third studio album, "Delirium" (2015).  The song was released on 9 January 2016 as the album's second single.

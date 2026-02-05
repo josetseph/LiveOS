@@ -1,0 +1,19 @@
+# Kim Yong-ju (Passage 4)
+
+Passage 5:
+Kim Yong-ju
+Kim Yong-ju (Korean: 김영주; 1920 – 14 December 2021) was a North Korean politician and the younger brother of Kim Il Sung, who ruled North Korea from 1948 to 1994. Under his brother's rule, Kim Yong-ju held key posts including Politburo member in the Workers' Party of Korea (WPK) during the 1960s and early 1970s, but he fell out of favour in 1974 following a power struggle with Kim Jong Il. From 1998 until his death in 2021, he held the ceremonial position of Honorary Vice President of the Presidium of the Supreme People's Assembly (SPA), North Korea's parliament.
+
+Biography
+Kim Yong-ju was born to Kim Hyong-jik and Kang Pan-sok in Taedong County in 1920, eight years after his elder brother Kim Il Sung. When Kim was three years old, his family moved to southern Manchuria.After graduating from the economics department at Moscow State University in 1945, where he also took a deep interest in philosophy, Kim Yong-ju joined the Workers' Party of Korea. His rise through the party's echelons was rapid; from the 1950s to the 1960s he was chief cadre (1954), vice-director (1957) and finally director (1960) of the WPK Organization and Guidance Department. He was appointed member of the WPK Central Committee at the Party's 4th Congress in 1961. In 1966, he was promoted to Organizing Secretary of the WPK Central Committee.
+In 1967, he proposed to his brother the "Ten Principles for the Establishment of the One-Ideology System" (whose first principle was: "We must give our all in the struggle to unify the entire society with the revolutionary ideology of the great leader Comrade Kim Il Sung"), which were published only in 1974.In 1972, he represented North Korea in secret negotiations with Park Chung Hee's government in South Korea. The discussions led to the signing of the July 4th North–South Korea Joint Statement by Kim and his South Korean counterpart Lee Hu-rak establishing agreed preconditions for potential Korean reunification.By 1970, when he was elected WPK Politburo member, Kim Yong-ju was widely believed to be Kim Il Sung's successor. He was also elected to the top Central People's Committee and the SPA Presidium in 1972. However, at the same time Kim Il Sung started grooming his own son Kim Jong Il to be his designated successor, and a power struggle erupted.It was the period when the WPK was focusing ideologically on Kim Il Sung's Juche; while Kim Jong Il actively stood for this process, Kim Yong-ju, having studied in the Soviet Union, supported a more classical view of Marxism and was not fond of the extensive personality cult built around his brother. This played to Kim Jong Il's advantage: Kim Yong-ju was increasingly marginalized, his key allies Kim To-man (director of propaganda) and Pak Yong-guk (director of international liaisons) were removed, and he himself was finally attacked by Kim Il Sung. After a Central Committee plenum in February 1974, Kim Jong Il was granted the position of heir apparent and Kim Yong-ju was demoted to vice-premier.Kim Yong-ju completely disappeared from the limelight until 1993, when he was called back to Pyongyang by Kim Il Sung to serve as one of North Korea's vice presidents, a ceremonial position with no real power. Kim Yong-ju was appointed Honorary Vice-President of the Presidium of the Supreme People's Assembly in 1998. In 2012, he was awarded the Order of Kim Jong Il. He was also a recipient of the Order of Kim Il Sung and the title Hero of the Republic. His death in Pyongyang at age 101 was announced by state media on 15 December 2021.
+
+See also
+Orwellian Korea (1984)
+North Korean people (Citizens of the DPRK)
+The Hermit Kingdom
+Tourism in North Korea
+Kim Il Sung bibliography
+The Mother of Pyongyang
+The Democratic People's Republic of Korea (North Korea or the DPRK)
+Soviet Occupation of Northern Korea (1945-1948)

@@ -1,0 +1,3 @@
+# CrissCross
+
+CrissCross is a 1992 American drama film directed by Chris Menges and written by Scott Sommer, based on his homonymous novel.  It stars Goldie Hawn, Arliss Howard, Keith Carradine, Steve Buscemi, and David Arnott.

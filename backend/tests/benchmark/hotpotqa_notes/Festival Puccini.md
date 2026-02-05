@@ -1,0 +1,3 @@
+# Festival Puccini
+
+The Festival Puccini (Puccini Festival) is an annual summer opera festival held in July and August to present the operas of the famous Italian composer Giacomo Puccini.

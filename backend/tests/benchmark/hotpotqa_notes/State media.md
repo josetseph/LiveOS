@@ -1,0 +1,3 @@
+# State media
+
+State media or state-owned media is media for mass communication which is "controlled financially and editorially by the state."  These news outlets may be the sole media outlet or may exist in competition with corporate and non-corporate media.

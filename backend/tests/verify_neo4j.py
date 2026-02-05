@@ -3,6 +3,11 @@ Neo4j Verification Script
 Checks that all notes and graph structures were properly ingested.
 """
 
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from app.services.graph import graph_service
 from app.core.logging_config import get_component_logger
 

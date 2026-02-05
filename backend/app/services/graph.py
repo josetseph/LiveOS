@@ -477,6 +477,12 @@ class GraphService:
             get_contradicting_types,
         )
 
+        # Validate relationship_type is not empty
+        if not relationship_type or not relationship_type.strip():
+            raise ValueError(
+                f"relationship_type cannot be empty for {source_name} -> {target_name}"
+            )
+
         # Bi-temporal: separate event time from ingestion time
         ingestion_time = (
             datetime.utcnow().isoformat()

@@ -1,0 +1,3 @@
+# Moche Rip Curl Pro Portugal 2014
+
+The Moche Rip Curl Pro Portugal 2014 is an event of the Association of Surfing Professionals for 2014 ASP World Tour.

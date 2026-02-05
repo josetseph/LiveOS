@@ -1,0 +1,3 @@
+# 11 Harrowhouse
+
+11 Harrowhouse is a 1974 British film directed by Aram Avakian.  It was adapted by Charles Grodin based upon the novel by Gerald A. Browne with the screenplay by Jeffrey Bloom.  It stars Charles Grodin, Candice Bergen, James Mason, Trevor Howard and John Gielgud.

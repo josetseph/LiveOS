@@ -1,0 +1,10 @@
+# Ron Smith (wide receiver) (Passage 2)
+
+Passage 3:
+Ron Smith (wide receiver)
+Ronnie Bernard Smith (born November 20, 1956) is a former professional American football wide receiver who played in the National Football League (NFL) for six seasons with the Los Angeles Rams, the San Diego Chargers, and the Philadelphia Eagles.
+Smith played defensive end at Kathleen High School in Lakeland, Florida. At 6 feet (1.8 m) and 185 pounds (84 kg), he received an offer to play for Cal State Fullerton, and instead enrolled at Fullerton College. He switched to playing wide receiver after his first year, and was a Junior College All-American the following season, when he earned a scholarship to play with San Diego State. As a senior in 1977, Smith caught 49 passes for around 700 yards and 14 touchdowns and was a key to the Aztecs' 10–1 season.In the 1978 NFL draft, Smith was selected in the second round by the Los Angeles Rams. He caught just one pass as a rookie in 1978. A seldom-used sophomore in 1979, he caught a 43-yard touchdown from Vince Ferragamo at the end of the first half to give the Rams a 14–5 lead in an eventual 21–19 win over Dallas in the divisional playoffs. In Super Bowl XIV, Smith caught a 24-yard touchdown on a halfback option pass from Lawrence McCutcheon, but the Rams loss 31–19 to Pittsburgh. The San Diego Chargers acquired him from the Rams at the end of the preseason in 1980 for a middle-round draft pick. He caught just four passes for 48 yards during the regular season for San Diego.  However, he came up with another key playoff touchdown when he caught a game-winning 50-yard score from Dan Fouts with 2:08 remaining in a 20–14 win over the Buffalo Bills, advancing the Chargers to the AFC Championship Game.After his NFL career, Smith signed with the Oakland Invaders of the United States Football League (USFL) in 1984.  Smith played in six games, starting five, and caught nine passes for 107 yards and one touchdown before being placed on injured reserve on May 30, 1984.
+
+External links
+
+Career statistics and player information from NFL.com · Pro Football Reference

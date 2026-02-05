@@ -1,0 +1,3 @@
+# Tongcheng Subdistrict, Fuding
+
+Tongcheng () is a subdistrict of the city of Fuding, Fujian, People's Republic of China.

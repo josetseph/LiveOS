@@ -4,8 +4,9 @@ Tests the hybrid_search pipeline without chat/synthesis.
 """
 
 import sys
+import os
 
-sys.path.insert(0, "/Users/joey/Projects/LiveOS/backend")
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import asyncio
 from datetime import datetime
@@ -204,10 +205,10 @@ async def run_all_tests():
     print("🔬" * 40)
 
     test_queries = [
-        "How is my job going at livecops?",
-        "What is the current state of my work with Votex365?",
-        "What are my recent notes about?",
-        "What are my recent thoughts?",
+        "Were Scott Derrickson and Ed Wood of the same nationality?",
+        "What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?",
+        "What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?",
+        "Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?",
     ]
 
     results = []

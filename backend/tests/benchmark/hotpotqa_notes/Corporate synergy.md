@@ -1,0 +1,3 @@
+# Corporate synergy
+
+Corporate synergy refers to a financial benefit that a corporation expects to realize when it merges with or acquires another corporation.  Corporate synergy occurs when corporations interact congruently.

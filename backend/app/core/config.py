@@ -80,5 +80,10 @@ class Settings(BaseSettings):
         "postgresql://user:password@127.0.0.1:5433/liveos"
     )
 
+    # Benchmark Mode
+    # When True, uses factual/objective prompts instead of personal "You" narrative
+    # This is for testing with external datasets (HotpotQA, MuSiQue) where personal framing is inappropriate
+    BENCHMARK_MODE: bool = True
+
 
 settings = Settings()

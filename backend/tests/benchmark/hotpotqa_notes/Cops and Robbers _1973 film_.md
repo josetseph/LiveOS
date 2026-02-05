@@ -1,0 +1,3 @@
+# Cops and Robbers (1973 film)
+
+Cops and Robbers is a 1973 crime comedy film directed by Aram Avakian with an original screenplay by Donald E. Westlake which Westlake subsequently expanded into a novel.  The film stars Cliff Gorman as Tom and Joseph Bologna as Joe.

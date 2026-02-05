@@ -1,0 +1,12 @@
+# 2013 Houphouët-Boigny stampede (Passage 3)
+
+Passage 4:
+2013 Houphouët-Boigny stampede
+The 2013 Houphouët-Boigny stampede occurred as crowds departed a New Year's Eve fireworks display in the early hours of 1 January 2013 near the Félix Houphouët-Boigny Stadium in Abidjan, Ivory Coast. It resulted in 61 deaths and over 200 injuries, mostly women and children. This was the second time in four years that a fatal stampede occurred at the stadium.
+President Alassane Ouattara declared three days of mourning and promised an investigation.
+
+Incident
+At some time between 1 and 4 am according to sources, following the New Year's Eve celebration and fireworks display, crowds stampeded as they exited the stadium into the Boulevard de la République near the Hotel Tirama. This was the second year that fireworks had been held by the government to commemorate the end of the 2010–2011 Ivorian crisis and the Second Ivorian Civil War, following the controversial 2010 presidential election. According to official reports, 61 individuals were killed, with upwards of 200 injured. According to Alain Lobognon, the Minister of Youth, 26 children were among the dead, most of whom were between the ages of 8 and 15, as well as 28 women and six men.
+
+Investigation and reaction
+The cause of the stampede is not yet clear, however a senior police spokesman has confirmed they are investigating. Lieutenant Colonel Issa Sako, the officer in charge of the military responding to the disaster, said that the deaths were caused when "people were walked over and suffocated by the crowd". According to an Ivorian government official, approximately "50,000 people [were] on the streets ... going home" after the New Year's celebrations. Witnesses have alternatively claimed that two large crowds moving in opposite directions collided, and that security forces attempting to break up the crowd leaving the stadium caused a panic.Visiting the injured in hospital, President Alassane Ouattara said that the national tragedy would be investigated. Minister of the Interior Hamed Bakayoko stated in a national television broadcast on Radiodiffusion Television Ivoirienne that "the government extends its condolences to the families of those deceased and assures them of its solidarity" and that the Ivorian government would help by "all means possible." Bakayoko went on to say that "the precise circumstances of this tragic occurrence are being looked into by the security services".

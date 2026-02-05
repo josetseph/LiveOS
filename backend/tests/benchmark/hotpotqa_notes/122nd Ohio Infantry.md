@@ -1,0 +1,3 @@
+# 122nd Ohio Infantry
+
+The 122nd Ohio Volunteer Infantry (or 122nd OVI) was an infantry regiment in the Union Army during the American Civil War.

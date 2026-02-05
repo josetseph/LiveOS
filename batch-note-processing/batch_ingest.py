@@ -115,7 +115,7 @@ def send_note(
         return None, str(e)
 
 
-def wait_for_ingestion_success(note_id: str, timeout: int = 600):
+def wait_for_ingestion_success(note_id: str, timeout: int = 1200):
     """
     Tail the ingestion log file and wait for SUCCESS message for the given note_id.
     Returns True if found within timeout, False otherwise.
@@ -218,22 +218,25 @@ def clear_progress():
         PROGRESS_FILE.unlink()
 
 
-def batch_ingest(dry_run: bool = False, resume: bool = False):
-    """Batch ingest all notes from the notes directory in chronological order."""
+def batch_ingest(notes_dir: Path = None, dry_run: bool = False, resume: bool = False):
+    """Batch ingest all notes from the specified directory in chronological order."""
 
-    if not NOTES_DIR.exists():
-        print(f"❌ Error: Notes directory not found: {NOTES_DIR}")
+    # Use provided directory or default
+    target_dir = notes_dir if notes_dir else NOTES_DIR
+
+    if not target_dir.exists():
+        print(f"❌ Error: Notes directory not found: {target_dir}")
         print(f"   Creating directory...")
-        NOTES_DIR.mkdir(parents=True, exist_ok=True)
+        target_dir.mkdir(parents=True, exist_ok=True)
         print(f"   ✅ Directory created. Please add .txt or .md files to it.")
         return
 
     # Find all text and markdown files
-    note_files = list(NOTES_DIR.glob("*.txt")) + list(NOTES_DIR.glob("*.md"))
+    note_files = list(target_dir.glob("*.txt")) + list(target_dir.glob("*.md"))
 
     if not note_files:
-        print(f"📂 No notes found in {NOTES_DIR}")
-        print(f"   Add .txt or .md files to the notes/ directory")
+        print(f"📂 No notes found in {target_dir}")
+        print(f"   Add .txt or .md files to the directory")
         return
 
     # Sort files by extracted date (chronologically - earliest first)
@@ -325,7 +328,7 @@ def batch_ingest(dry_run: bool = False, resume: bool = False):
 
             if not dry_run:
                 # Wait for ingestion to complete before proceeding
-                success = wait_for_ingestion_success(note_id, timeout=600)
+                success = wait_for_ingestion_success(note_id, timeout=1200)
                 if not success:
                     print("   ⚠️  Failed to confirm completion - stopping batch process")
                     print("   ‼️ Check logs for last processed note")
@@ -363,9 +366,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python batch_ingest.py                # Process all notes chronologically
-  python batch_ingest.py --dry-run      # Preview without sending
-  python batch_ingest.py --resume       # Resume from last successful note
+  python batch_ingest.py                           # Process notes/ directory
+  python batch_ingest.py /path/to/notes           # Process custom directory
+  python batch_ingest.py --dry-run                # Preview without sending
+  python batch_ingest.py --resume                 # Resume from last successful note
   
 Features:
   - Automatic date extraction from filenames (YYYY-MM-DD)
@@ -378,6 +382,13 @@ Features:
     )
 
     parser.add_argument(
+        "directory",
+        nargs="?",
+        type=Path,
+        default=None,
+        help="Directory containing notes to ingest (default: notes/)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Preview without actually sending notes"
     )
     parser.add_argument(
@@ -388,7 +399,7 @@ Features:
 
     args = parser.parse_args()
 
-    batch_ingest(dry_run=args.dry_run, resume=args.resume)
+    batch_ingest(notes_dir=args.directory, dry_run=args.dry_run, resume=args.resume)
 
 
 if __name__ == "__main__":

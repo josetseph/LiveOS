@@ -1,0 +1,3 @@
+# National Intelligence Board
+
+The National Intelligence Board (formerly the National Foreign Intelligence Board) is a body of senior U.S. intelligence community leaders led by the Director of National Intelligence (DNI).  The Board is tasked with reviewing and approving National Intelligence Estimates (NIEs).

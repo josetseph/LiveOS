@@ -1,5 +1,12 @@
 #!/usr/bin/env python
 """Check Neo4j graph state"""
+
+import sys
+import os
+
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from app.services.graph import graph_service
 
 # Check nodes

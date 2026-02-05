@@ -1,0 +1,3 @@
+# Independent Spirit Award for Best First Feature
+
+The Independent Spirit Award for Best First Feature is one of the annual Independent Spirit Awards.  It is usually given to the director (or directors) and producer (or producers).  The "first feature" designation is applied to the director not the producer(s).  Therefore, producers have been nominated multiple times.

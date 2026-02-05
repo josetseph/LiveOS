@@ -1,0 +1,3 @@
+# Küçük Hüseyin Pasha
+
+Küçük Hüseyin Pasha (1757 – 7 December 1803), also known as Tayazade Damat Küçük Hüseyin Pasha, was an Ottoman statesman and admiral who was Kapudan Pasha (Grand Admiral of the Ottoman Navy) from 11 March 1792 to 7 December 1803.  He was a "damat" ("bridegroom") to the Ottoman dynasty after he married an Ottoman princess, Esma Sultan.

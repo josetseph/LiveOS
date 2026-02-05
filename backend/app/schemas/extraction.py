@@ -127,7 +127,9 @@ class ExtractedRelationship(BaseModel):
     source_type: str = ""  # Person, Task, Entity, Concept, Event
     target_name: str = ""
     target_type: str = ""
-    relationship_type: str = ""  # From RelationshipType enum
+    relationship_type: str = (
+        "relates_to"  # From RelationshipType enum, defaults to relates_to
+    )
     confidence: float = 0.8
     context: str = ""  # Text snippet showing this relationship
 
@@ -137,6 +139,8 @@ class ExtractedRelationship(BaseModel):
         if v is None:
             if info.field_name == "confidence":
                 return 0.8
+            if info.field_name == "relationship_type":
+                return "relates_to"
             return ""
         # Handle LLM returning confidence as string ("High", "Medium", "Low")
         if info.field_name == "confidence" and isinstance(v, str):
@@ -149,6 +153,13 @@ class ExtractedRelationship(BaseModel):
                 "very low": 0.3,
             }
             return confidence_map.get(v.lower().strip(), 0.8)
+        # Handle empty relationship_type string
+        if (
+            info.field_name == "relationship_type"
+            and isinstance(v, str)
+            and not v.strip()
+        ):
+            return "relates_to"
         return v
 
 

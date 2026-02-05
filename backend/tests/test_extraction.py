@@ -1,5 +1,10 @@
 #!/usr/bin/env python
 """Quick test script to check LLM extraction"""
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from app.services.llm import LLMService
 from app.schemas.extraction import Extraction
 

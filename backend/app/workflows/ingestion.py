@@ -209,13 +209,17 @@ class IngestionWorkflow:
             },
         )
 
-        # Helper to normalize names: strip # prefix and extra whitespace
+        # Helper to normalize names: strip # prefix, extra whitespace, and lowercase
         def normalize_name(name: str) -> str:
-            """Normalize names to prevent duplicates like #svtlottery vs svtlottery"""
+            """Normalize names to prevent duplicates like #svtlottery vs Svtlottery vs SVTLottery.
+
+            All node names are stored in lowercase for consistent merging.
+            """
             if not name:
                 return ""
             # Remove leading # (common in task references like #project)
-            name = name.lstrip("#").strip()
+            # Then lowercase for consistent storage
+            name = name.lstrip("#").strip().lower()
             return name
 
         # 1. ENTITIES (Batch)
@@ -265,8 +269,9 @@ class IngestionWorkflow:
 
             concept_embeddings = {}
             for c in extraction.concepts:
-                text_to_embed = f"{c.name}: {c.definition or ''}"
-                concept_embeddings[c.name.title()] = embedding_service.embed_query(
+                normalized_name = c.name.lower().strip()
+                text_to_embed = f"{normalized_name}: {c.definition or ''}"
+                concept_embeddings[normalized_name] = embedding_service.embed_query(
                     text_to_embed
                 )
 
@@ -284,9 +289,9 @@ class IngestionWorkflow:
             """
             concept_data = [
                 {
-                    "name": c.name.title(),
+                    "name": c.name.lower().strip(),
                     "definition": c.definition,
-                    "embedding": concept_embeddings[c.name.title()],
+                    "embedding": concept_embeddings[c.name.lower().strip()],
                 }
                 for c in extraction.concepts
             ]
@@ -398,14 +403,14 @@ class IngestionWorkflow:
 
             def normalize_task_name(name: str) -> str:
                 """Normalize task names for consistent merging.
-                - Strips # prefix (e.g., 'complete #svtlottery' -> 'Complete Svtlottery')
-                - Applies .title() for consistent casing
+                - Strips # prefix (e.g., 'complete #svtlottery' -> 'complete svtlottery')
+                - Lowercases for consistent storage
                 """
                 if not name:
                     return ""
-                # Remove # symbols from task names
-                name = name.replace("#", "").strip()
-                return name.lower().title()
+                # Remove # symbols from task names, then lowercase
+                name = name.replace("#", "").strip().lower()
+                return name
 
             task_data = [
                 {
@@ -537,18 +542,41 @@ class IngestionWorkflow:
 
             for rel in extraction.relationships:
                 try:
+                    # Validate required fields
+                    if not rel.source_name or not rel.target_name:
+                        logger.warning(
+                            f"[Relationship] Skipping - missing source or target name: "
+                            f"{rel.source_name} -> {rel.target_name}"
+                        )
+                        continue
+
+                    # Default to "relates_to" if no relationship type provided
+                    rel_type = (
+                        rel.relationship_type.strip() if rel.relationship_type else ""
+                    )
+                    if not rel_type:
+                        rel_type = "relates_to"
+                        logger.warning(
+                            f"[Relationship] No type provided for {rel.source_name} -> {rel.target_name}, "
+                            f"defaulting to 'relates_to'"
+                        )
+
                     # Map types to Neo4j labels
                     source_label = type_mapping.get(rel.source_type, "Entity")
                     target_label = type_mapping.get(rel.target_type, "Entity")
 
+                    # Normalize names to lowercase to match node storage
+                    source_name_normalized = rel.source_name.lower().strip()
+                    target_name_normalized = rel.target_name.lower().strip()
+
                     # Create or update relationship with bi-temporal support
                     # event_time = when this fact became true (note's date)
                     result = graph_service.create_or_update_relationship(
-                        source_name=rel.source_name,
+                        source_name=source_name_normalized,
                         source_label=source_label,
-                        target_name=rel.target_name,
+                        target_name=target_name_normalized,
                         target_label=target_label,
-                        relationship_type=rel.relationship_type,
+                        relationship_type=rel_type,
                         confidence=rel.confidence,
                         context=rel.context,
                         note_id=note_id,
@@ -557,7 +585,7 @@ class IngestionWorkflow:
 
                     logger.info(
                         f"[Relationship] {result['action']}: "
-                        f"({rel.source_name})-[{rel.relationship_type}]->({rel.target_name})"
+                        f"({source_name_normalized})-[{rel_type}]->({target_name_normalized})"
                     )
 
                 except Exception as e:
@@ -681,7 +709,8 @@ Summarize the common themes and key insights that connect these items."""
 
         # Update Concepts - use LLM-provided isolated_context
         for concept in concepts or []:
-            name = concept.name.strip().title()
+            # Normalize to match storage (lowercase)
+            name = concept.name.strip().lower()
             if not name:
                 continue
             # Use isolated_context from LLM if available, fall back to full content
@@ -693,8 +722,8 @@ Summarize the common themes and key insights that connect these items."""
             name = entity.name.strip()
             if not name:
                 continue
-            # Normalize entity names (strip # prefix) to match storage
-            name = name.lstrip("#").strip()
+            # Normalize entity names to match storage (lowercase, strip # prefix)
+            name = name.lstrip("#").strip().lower()
             # Use isolated_context from LLM if available, fall back to full content
             context = getattr(entity, "isolated_context", "") or new_content
             tasks_list.append(self._update_node_summary("Entity", name, context))
@@ -704,9 +733,9 @@ Summarize the common themes and key insights that connect these items."""
             """Normalize task names for consistent lookup (must match storage normalization)"""
             if not name:
                 return ""
-            # Remove # symbols to match how tasks are stored
-            name = name.replace("#", "").strip()
-            return name.lower().title()
+            # Remove # symbols and lowercase to match how tasks are stored
+            name = name.replace("#", "").strip().lower()
+            return name
 
         for task in tasks or []:
             # Prefer name for node label, fall back to description
@@ -760,6 +789,9 @@ Summarize the common themes and key insights that connect these items."""
         """
         Updates a node's summary using LLM-provided isolated context.
 
+        Now includes RETRIEVAL: fetches related nodes to provide richer context,
+        preventing hallucinations when new notes have incomplete context.
+
         Args:
             label: Node label (Entity, Concept, Task, etc.)
             name: Node identifier
@@ -779,11 +811,50 @@ Summarize the common themes and key insights that connect these items."""
             res = await loop.run_in_executor(None, _get_existing)
             existing_summary = res[0].get("summary") if res else ""
 
-            # 2. Generate Delta Update using pre-isolated context
-            # No need to call get_entity_context() - LLM already provided isolated context
+            # 2. NEW: Fetch related nodes for additional context
+            # This prevents hallucinations when new notes lack full context
+            def _get_related_context():
+                related_context_parts = []
+                try:
+                    # Get directly connected nodes (1-hop neighbors)
+                    related_nodes = graph_service.get_related_nodes(
+                        node_name=name,
+                        node_label=label,
+                        max_depth=1,
+                        min_confidence=0.5,
+                    )
+                    # Extract summaries from related nodes (limit to top 3)
+                    for node in related_nodes[:3]:
+                        node_summary = node.get("summary")
+                        if node_summary:
+                            node_name_rel = node.get("name", "Unknown")
+                            node_label_rel = node.get("label", "Entity")
+                            rel_path = " → ".join(node.get("relationship_path", []))
+                            related_context_parts.append(
+                                f"[{node_label_rel}: {node_name_rel}] (via {rel_path}): {node_summary[:300]}"
+                            )
+                except Exception as e:
+                    logger.debug(
+                        f"  [Ingestion] Could not fetch related context for {name}: {e}"
+                    )
+
+                return "\n".join(related_context_parts) if related_context_parts else ""
+
+            related_context = await loop.run_in_executor(None, _get_related_context)
+
+            if related_context:
+                logger.info(
+                    f"  [Ingestion] Found related context for {name} ({len(related_context)} chars)"
+                )
+
+            # 3. Generate Delta Update using pre-isolated context + related context
             def _call_llm():
                 return llm_service.update_summary(
-                    existing_summary or "None yet.", isolated_context, name, label
+                    existing_summary or "None yet.",
+                    isolated_context,
+                    name,
+                    label,
+                    related_context=related_context,
                 )
 
             update_data = await loop.run_in_executor(None, _call_llm)

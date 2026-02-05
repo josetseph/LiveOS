@@ -1,0 +1,3 @@
+# Bordan Tkachuk
+
+Bordan Tkachuk ( ) is a British business executive, the former CEO of Viglen, also known from his appearances on the BBC-produced British version of "The Apprentice," interviewing for his boss Lord Sugar.

@@ -1,0 +1,3 @@
+# Lempster, New Hampshire
+
+Lempster is a town in Sullivan County, New Hampshire, United States.  The population was 1,154 at the 2010 census.  Settlements include the town center (Lempster village) and the village of East Lempster.

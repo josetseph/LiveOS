@@ -6,9 +6,9 @@ import asyncio
 import sys
 import time
 from pathlib import Path
+import os
 
-# Add backend to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.core.config import settings
 from app.services.multimedia import MultimediaService

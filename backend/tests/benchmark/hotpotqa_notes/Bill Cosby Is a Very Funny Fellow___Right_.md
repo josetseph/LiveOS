@@ -1,0 +1,3 @@
+# Bill Cosby Is a Very Funny Fellow...Right!
+
+Bill Cosby is a Very Funny Fellow...Right!  is the debut album release by Bill Cosby.  It was recorded live at the nightclub The Bitter End in New York City's Greenwich Village during early 1963.  The album includes three sketches about Noah.
