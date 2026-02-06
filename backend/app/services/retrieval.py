@@ -249,30 +249,25 @@ class RetrievalService:
 
     async def hybrid_search(self, query: str, top_k: int = 20) -> List[dict]:
         """
-        Graph-First Retrieval Pipeline (True GraphRAG):
+        Vector-First Retrieval Pipeline:
 
-        The knowledge graph IS the primary source of truth. Node summaries contain
-        isolated, deduplicated knowledge about each entity. Notes are only used
-        for grounding when specific evidence is needed.
+        Uses vector search as the primary entry point, with 1-hop neighbor expansion
+        to find related context. This is simpler and more effective than entity name
+        matching, which often returns noisy results.
 
         Flow:
-        1. Query Analysis: Extract entities/concepts via LLM
-        2. Graph Entry: Find matching nodes by name (not vectors!)
-        3. Primary Evidence: Node summaries (isolated context)
-        4. Expansion: Related nodes + their summaries via graph traversal
-        5. Multi-Hop: Paths connecting query entities (if multiple mentioned)
-        6. Fallback: Vector search only if entity lookup fails
-        7. Grounding: Minimal note content only if needed for specific quotes
+        1. Query Analysis: Extract expected entity types and question attributes via LLM
+        2. Vector Search: Find semantically similar nodes (primary entry point)
+        3. Neighbor Expansion: Get 1-hop neighbors of top vector results
+        4. Scoring: Rank candidates by type match + attribute relevance
+        5. Grounding: Minimal note content only if needed for specific quotes
 
         Returns node summaries as primary evidence, not chunked note snippets.
         """
         import time
         from app.services.embedding import embedding_service
-        from app.core.database import AsyncSessionLocal
-        from app.models.note import Note
-        from sqlalchemy import select
 
-        logger.info(f"  [Retrieval] Graph-First Search for: '{query}'")
+        logger.info(f"  [Retrieval] Hybrid Search for: '{query}'")
         t_start = time.perf_counter()
         t_phase_start = time.perf_counter()
 
@@ -281,190 +276,213 @@ class RetrievalService:
 
         query_analysis = llm_service.analyze_query(query)
 
-        # Use LLM analysis as primary source, with heuristic fallback
+        # Extract expected entity types for filtering/boosting
+        expected_entity_types = query_analysis.get("expected_entity_types", [])
+        question_attribute = query_analysis.get("question_attribute", None)
         is_temporal_query = query_analysis.get(
             "is_temporal", False
         ) or self._is_temporal_query(query)
 
-        # Combine entities from LLM with heuristic extraction for comprehensive coverage
+        # ============ ENTITY EXTRACTION ============
+        # Extract named entities from query using the same logic as ingestion
+        # This ensures we can find explicitly named entities like "Albert Einstein"
         llm_entities = query_analysis.get("entities", [])
-        llm_concepts = query_analysis.get("concepts", [])
-        heuristic_entities = self._extract_query_entities(query)
 
-        # Filter out stopwords and short entities to prevent garbage matches
-        # e.g., "i", "does", "the" were causing 2x boosts on everything
+        # Also extract proper names using Title Case pattern detection
+        proper_names = self._extract_proper_names(query)
+
+        # Filter out stopwords and short entities
         def is_valid_entity(e: str) -> bool:
             e_lower = e.lower().strip()
             return len(e_lower) >= 2 and e_lower not in ENTITY_STOPWORDS
 
         llm_entities = [e for e in llm_entities if is_valid_entity(e)]
-        heuristic_entities = [e for e in heuristic_entities if is_valid_entity(e)]
 
-        # Merge all entities and concepts (LLM entities take priority, add unique heuristic ones)
-        query_entities = llm_entities + [
-            e for e in heuristic_entities if e not in llm_entities
-        ]
-        query_concepts = llm_concepts
+        # Merge proper names with LLM entities (proper names may catch multi-word names LLM splits)
+        query_entities = list(set(llm_entities))
+        for pn in proper_names:
+            if pn.lower() not in [e.lower() for e in query_entities]:
+                query_entities.append(pn)
 
         logger.info(
             f"  [LLM Analysis] Intent: {query_analysis.get('intent')}, "
             f"Temporal: {is_temporal_query}, "
             f"Entities: {query_entities}, "
-            f"Concepts: {query_concepts}"
+            f"Expected Types: {expected_entity_types}, "
+            f"Attribute: {question_attribute}"
         )
 
-        # Generate query embedding
+        # Generate query embedding for vector search
         full_vector = embedding_service.embed_query(query)
         t_embedding = time.perf_counter() - t_phase_start
         logger.info(f"  [⏱️ Timing] Query embedding: {t_embedding:.2f}s")
 
-        # ============ ADAPTIVE GRAPH DEPTH ============
-        # Determine traversal depth based on query characteristics
-        query_intent = query_analysis.get("intent", "search")
+        # ============ HYBRID RETRIEVAL ============
+        # Combines entity name matching (for explicit mentions) with vector search
+        # (for semantic similarity). This ensures we find both "Albert Einstein"
+        # AND "Marie Curie" in comparison questions.
 
-        # Base depth on query complexity and intent
-        # - More entities = need deeper paths to connect them
-        # - Exploratory queries ("how", "why", "connected") = deeper exploration
-        # - Specific queries ("what is", "list") = shallower, more focused
-        exploratory_keywords = [
-            "how",
-            "why",
-            "connected",
-            "related",
-            "relationship",
-            "evolved",
-            "changed",
-        ]
-        is_exploratory = any(kw in query.lower() for kw in exploratory_keywords)
-
-        if len(query_entities) >= 3 or is_exploratory:
-            multi_hop_depth = 4  # Deep exploration for complex queries
-            expansion_depth = 2  # 2-hop neighbors
-        elif len(query_entities) >= 2:
-            multi_hop_depth = 3  # Standard multi-entity query
-            expansion_depth = 2
-        else:
-            multi_hop_depth = 2  # Simple query
-            expansion_depth = 1  # Just immediate neighbors
-
-        logger.info(
-            f"  [Adaptive Depth] Exploratory: {is_exploratory}, "
-            f"Multi-hop: {multi_hop_depth}, Expansion: {expansion_depth}"
-        )
-
-        # ============ MULTI-HOP REASONING ============
-        # If query mentions multiple entities, find paths connecting them in the graph
-        multi_hop_paths = []
-        multi_hop_note_ids = set()
-        if len(query_entities) >= 2:
-            t_multihop_start = time.perf_counter()
-            try:
-                # Find paths between query entities
-                multi_hop_paths = graph_service.find_paths_between_nodes(
-                    node_names=query_entities,
-                    max_depth=multi_hop_depth,  # Adaptive based on query complexity
-                    min_confidence=0.5,
-                )
-                if multi_hop_paths:
-                    logger.info(
-                        f"  [Multi-Hop] Found {len(multi_hop_paths)} paths connecting {query_entities}"
-                    )
-                    # Get notes linked to nodes along these paths
-                    path_node_names = set()
-                    for path in multi_hop_paths:
-                        path_node_names.update(path.get("path_nodes", []))
-                    if path_node_names:
-                        path_evidence = graph_service.get_linked_evidence(
-                            list(path_node_names), limit_per_node=2
-                        )
-                        for row in path_evidence:
-                            for note in row.get("evidence", []):
-                                multi_hop_note_ids.add(note["id"])
-                        logger.info(
-                            f"  [Multi-Hop] Found {len(multi_hop_note_ids)} notes from path nodes"
-                        )
-            except Exception as e:
-                logger.warning(f"  [Multi-Hop] Path finding failed: {e}")
-            t_multihop = time.perf_counter() - t_multihop_start
-            logger.info(f"  [⏱️ Timing] Multi-hop reasoning: {t_multihop:.2f}s")
-
-        # ============ FETCH CANDIDATES ============
         t_phase_start = time.perf_counter()
+        entity_nodes = []  # Found by name matching
+        vector_nodes = []  # Found by vector search
+        neighbor_nodes = []  # Found by neighbor expansion
+        node_names_found = set()  # Track names to avoid duplicates
 
-        # ============ GRAPH-FIRST RETRIEVAL ============
-        # The knowledge graph IS the primary source. Node summaries contain isolated,
-        # deduplicated knowledge. We enter via entity names, not vectors.
-
-        graph_nodes = []
-        entity_found_nodes = []
-        related_nodes = []
-
-        # STEP 1: Look up query entities BY NAME (true GraphRAG entry point)
+        # STEP 1: ENTITY NAME MATCHING - Find nodes by extracted entity names
+        # This is critical for comparison questions where we need both entities
         if query_entities:
-            entity_found_nodes = graph_service.find_nodes_by_name(
-                names=query_entities, fuzzy=True
-            )
-            if entity_found_nodes:
-                logger.info(
-                    f"  [GraphRAG] Found {len(entity_found_nodes)} nodes by entity name: "
-                    f"{[n['name'] for n in entity_found_nodes[:5]]}"
+            t_entity_start = time.perf_counter()
+            try:
+                entity_found = graph_service.find_nodes_by_name(
+                    names=query_entities, fuzzy=True
                 )
-                graph_nodes.extend(entity_found_nodes)
+                for node in entity_found:
+                    if node["name"] not in node_names_found:
+                        node["_source"] = "entity_match"
+                        entity_nodes.append(node)
+                        node_names_found.add(node["name"])
 
-        # STEP 2: Get related nodes via graph traversal (neighbors, not vectors)
-        node_names_found = {n["name"] for n in graph_nodes}
-        if graph_nodes:
-            for node in graph_nodes[:10]:  # Limit to top 10 to avoid explosion
-                try:
-                    neighbors = graph_service.get_related_nodes(
-                        node_name=node["name"],
-                        node_label=node.get("labels", ["Entity"])[0],
-                        max_depth=expansion_depth,
-                        min_confidence=0.6,
+                # STEP 1.5: NAME VARIANT EXPANSION
+                # Search for variants of found names to catch fuller/alternate versions
+                # e.g., "Robert Smith" → also find "Robert Smith Jr."
+                variant_nodes = []
+                for node in entity_found[:5]:  # Top 5 to avoid explosion
+                    node_name = node.get("name", "")
+                    node_type = (node.get("entity_type") or "").lower()
+                    # Only expand Person entities with multi-word names
+                    if (
+                        node_name
+                        and len(node_name.split()) >= 2
+                        and node_type == "person"
+                    ):
+                        try:
+                            variants = graph_service.find_name_variants(node_name)
+                            for v in variants[:3]:  # Top 3 variants per name
+                                if (
+                                    v["name"] not in node_names_found
+                                    and v["name"] != node_name
+                                ):
+                                    v["_source"] = "name_variant"
+                                    v["_variant_of"] = node_name
+                                    variant_nodes.append(v)
+                                    node_names_found.add(v["name"])
+                        except Exception as e:
+                            logger.debug(f"  [Variant] Failed for {node_name}: {e}")
+
+                if variant_nodes:
+                    logger.info(
+                        f"  [Entity] Found {len(variant_nodes)} name variants: "
+                        f"{[(v['name'], v.get('_variant_of')) for v in variant_nodes]}"
                     )
-                    # Filter duplicates and add
-                    for neighbor in neighbors[:5]:  # Top 5 per node
-                        if neighbor["name"] not in node_names_found:
-                            related_nodes.append(neighbor)
-                            node_names_found.add(neighbor["name"])
-                except Exception:
-                    pass
+                    entity_nodes.extend(variant_nodes)
 
-            if related_nodes:
-                logger.info(
-                    f"  [GraphRAG] Expanded to {len(related_nodes)} related nodes via traversal"
-                )
+                if entity_nodes:
+                    logger.info(
+                        f"  [Entity] Found {len(entity_nodes)} nodes by name: "
+                        f"{[n['name'] for n in entity_nodes[:10]]}"
+                    )
+            except Exception as e:
+                logger.warning(f"  [Entity] Name matching failed: {e}")
+            t_entity = time.perf_counter() - t_entity_start
+            logger.info(f"  [⏱️ Timing] Entity name matching: {t_entity:.2f}s")
 
-        # STEP 3: HYBRID VECTOR SEARCH - Find semantically similar nodes
-        # This supplements name-based lookup to catch nodes the user didn't name explicitly
-        # e.g., query about "financial struggles" should find "Debt", "Budget", etc.
-        vector_similar_nodes = []
+        # STEP 2: VECTOR SEARCH - Find semantically similar nodes
+        # This catches entities the user didn't name explicitly
         t_vector_start = time.perf_counter()
         try:
             vector_results = graph_service.search_knowledge_graph(
-                full_vector, top_k=15, min_score=0.65  # Higher threshold for quality
+                full_vector, top_k=20, min_score=0.60  # Wider net for vector search
             )
-            # Filter out nodes we already found by name (avoid duplicates)
             for vnode in vector_results:
                 if vnode["name"] not in node_names_found:
-                    vnode["_source"] = "vector"  # Mark source for scoring
-                    vector_similar_nodes.append(vnode)
+                    vnode["_source"] = "vector"
+                    vector_nodes.append(vnode)
                     node_names_found.add(vnode["name"])
 
-            if vector_similar_nodes:
+            # STEP 2.5: NAME VARIANT EXPANSION for vector-found person entities
+            # Catches "Margaret Johnson" → "Margaret Johnson-Williams" for multi-hop queries
+            vector_variant_nodes = []
+            for vnode in vector_nodes[:10]:  # Check top 10 vector results
+                vnode_name = vnode.get("name", "")
+                vnode_type = (vnode.get("entity_type") or "").lower()
+                # Only expand Person entities with multi-word names
+                if (
+                    vnode_name
+                    and len(vnode_name.split()) >= 2
+                    and vnode_type == "person"
+                ):
+                    try:
+                        variants = graph_service.find_name_variants(vnode_name)
+                        for v in variants[:2]:  # Top 2 variants per name
+                            if (
+                                v["name"] not in node_names_found
+                                and v["name"] != vnode_name
+                            ):
+                                v["_source"] = "vector_variant"
+                                v["_variant_of"] = vnode_name
+                                vector_variant_nodes.append(v)
+                                node_names_found.add(v["name"])
+                    except Exception as e:
+                        logger.debug(f"  [Variant] Failed for {vnode_name}: {e}")
+
+            if vector_variant_nodes:
                 logger.info(
-                    f"  [Hybrid] Vector search added {len(vector_similar_nodes)} semantically similar nodes: "
-                    f"{[n['name'] for n in vector_similar_nodes[:5]]}"
+                    f"  [Vector] Found {len(vector_variant_nodes)} name variants from vector results: "
+                    f"{[(v['name'], v.get('_variant_of')) for v in vector_variant_nodes]}"
+                )
+                vector_nodes.extend(vector_variant_nodes)
+
+            if vector_nodes:
+                logger.info(
+                    f"  [Vector] Found {len(vector_nodes)} semantically similar nodes: "
+                    f"{[n['name'] for n in vector_nodes[:10]]}"
                 )
         except Exception as e:
-            logger.debug(f"  [Hybrid] Vector search failed: {e}")
+            logger.warning(f"  [Vector] Vector search failed: {e}")
 
         t_vector = time.perf_counter() - t_vector_start
         logger.info(f"  [⏱️ Timing] Vector search: {t_vector:.2f}s")
 
-        all_node_names = [
-            n["name"] for n in graph_nodes + related_nodes + vector_similar_nodes
-        ]
+        # STEP 3: NEIGHBOR EXPANSION - Get 1-hop neighbors of top results
+        # Expand from both entity matches and vector matches
+        # This finds related context (e.g., "Albert Einstein" → "Princeton")
+        all_primary_nodes = entity_nodes + vector_nodes
+        if all_primary_nodes:
+            t_expand_start = time.perf_counter()
+            for node in all_primary_nodes[:15]:  # Top 15 primary results
+                try:
+                    label = (
+                        node.get("labels", ["Entity"])[0]
+                        if isinstance(node.get("labels"), list)
+                        else "Entity"
+                    )
+                    neighbors = graph_service.get_related_nodes(
+                        node_name=node["name"],
+                        node_label=label,
+                        max_depth=1,  # Only 1-hop neighbors
+                        min_confidence=0.5,
+                    )
+                    # Filter duplicates and add
+                    for neighbor in neighbors[:3]:  # Top 3 neighbors per node
+                        if neighbor["name"] not in node_names_found:
+                            neighbor["_source"] = "neighbor"
+                            neighbor["_expanded_from"] = node["name"]
+                            neighbor_nodes.append(neighbor)
+                            node_names_found.add(neighbor["name"])
+                except Exception as e:
+                    logger.debug(f"  [Neighbor] Failed to expand {node['name']}: {e}")
+
+            if neighbor_nodes:
+                logger.info(
+                    f"  [Neighbor] Expanded to {len(neighbor_nodes)} 1-hop neighbors: "
+                    f"{[n['name'] for n in neighbor_nodes[:10]]}"
+                )
+            t_expand = time.perf_counter() - t_expand_start
+            logger.info(f"  [⏱️ Timing] Neighbor expansion: {t_expand:.2f}s")
+
+        # Combine all found nodes
+        all_found_nodes = entity_nodes + vector_nodes + neighbor_nodes
+        all_node_names = [n["name"] for n in all_found_nodes]
 
         # STEP 4: Community summaries for broad queries
         # If query is exploratory ("what have I learned", "what's happening with X")
@@ -480,28 +498,22 @@ class RetrievalService:
             "all about",
         ]
         is_broad_query = any(kw in query.lower() for kw in broad_query_keywords)
+        exploratory_keywords = ["how", "why", "connected", "related", "relationship"]
+        is_exploratory = any(kw in query.lower() for kw in exploratory_keywords)
 
         if is_broad_query or is_exploratory:
             try:
-                # Get communities that contain our query entities
-                if query_entities:
-                    community_summaries = graph_service.get_communities_for_query(
-                        query_entities
-                    )
-                else:
-                    # For very broad queries, get all communities
-                    community_summaries = graph_service.get_all_communities()[
-                        :5
-                    ]  # Top 5
+                # For broad queries, get top communities
+                community_summaries = graph_service.get_all_communities()[:5]  # Top 5
 
                 if community_summaries:
                     logger.info(
-                        f"  [GraphRAG] Found {len(community_summaries)} relevant communities"
+                        f"  [Vector] Found {len(community_summaries)} relevant communities"
                     )
             except Exception as e:
                 logger.debug(f"  [Community] Failed to fetch communities: {e}")
 
-        # STEP 5: Minimal note grounding (only fetch for linked evidence, not chunking)
+        # STEP 4: Minimal note grounding (only fetch for linked evidence, not chunking)
         # We don't chunk notes anymore - node summaries ARE the distilled knowledge
         # Build a mapping from node name -> linked notes for reference traceability
         # Use lowercase keys for case-insensitive lookup
@@ -520,17 +532,17 @@ class RetrievalService:
                 for note in evidence:
                     grounding_note_ids.add(note["id"])
             logger.info(
-                f"  [GraphRAG] Found {len(grounding_note_ids)} grounding notes (for source links)"
+                f"  [Retrieval] Found {len(grounding_note_ids)} grounding notes (for source links)"
             )
             # Debug: log the node→notes mapping
             logger.debug(
-                f"  [GraphRAG] node_to_notes keys: {list(node_to_notes.keys())}"
+                f"  [Retrieval] node_to_notes keys: {list(node_to_notes.keys())}"
             )
 
         t_candidates = time.perf_counter() - t_phase_start
         logger.info(
-            f"  [⏱️ Timing] Graph lookup: {t_candidates:.2f}s "
-            f"({len(graph_nodes)} primary + {len(related_nodes)} related nodes)"
+            f"  [⏱️ Timing] Retrieval phase: {t_candidates:.2f}s "
+            f"({len(entity_nodes)} entity + {len(vector_nodes)} vector + {len(neighbor_nodes)} neighbor nodes)"
         )
 
         # ============ PREPARE CANDIDATES (NODE SUMMARIES FIRST) ============
@@ -538,15 +550,8 @@ class RetrievalService:
         # Label as "Consensus" to help LLM recognize these as Distilled Wisdom
         candidates = []
 
-        # A. Primary Graph Nodes (direct entity matches)
-        node_names_for_lookup = [
-            node["name"]
-            for node in graph_nodes
-            if node.get("summary") or node.get("description")
-        ]
-        logger.debug(f"  [GraphRAG] Looking up nodes: {node_names_for_lookup}")
-
-        for node in graph_nodes:
+        # A. Entity Nodes (highest priority - direct name matches from query)
+        for node in entity_nodes:
             summary = node.get("summary") or node.get("description", "")
             if not summary:
                 continue  # Skip nodes without summaries
@@ -556,34 +561,62 @@ class RetrievalService:
                 if isinstance(node.get("labels"), list)
                 else "Entity"
             )
-            # Use [Consensus: Name] to signal this is distilled knowledge, not a raw note
+            # Use [Consensus: Name] to signal this is distilled knowledge
             text = f"[Consensus - {label}: {node['name']}]: {summary}"
 
             # Attach linked notes for reference traceability (case-insensitive lookup)
             linked_notes = node_to_notes.get(node["name"].lower(), [])
-            if linked_notes:
-                logger.debug(
-                    f"  [GraphRAG] Node '{node['name']}' has {len(linked_notes)} linked notes"
-                )
 
             candidates.append(
                 {
                     "text": text,
-                    "type": "graph_consensus",
+                    "type": "entity_match",
                     "original_obj": node,
                     "is_recent": False,
-                    "priority": "primary",  # Direct entity match
+                    "priority": "primary",  # Entity matches are highest priority
+                    "vector_score": 1.0,  # Give entity matches high score
                     "linked_notes": linked_notes,
                 }
             )
 
-        # B. Related Nodes (via graph traversal)
-        for node in related_nodes:
+        # B. Vector Nodes (semantically similar to query)
+        for node in vector_nodes:
+            summary = node.get("summary") or node.get("description", "")
+            if not summary:
+                continue  # Skip nodes without summaries
+
+            label = (
+                node.get("labels", ["Entity"])[0]
+                if isinstance(node.get("labels"), list)
+                else "Entity"
+            )
+            vector_score = node.get("score", 0.0)
+            # Use [Consensus: Name] to signal this is distilled knowledge, not a raw note
+            text = f"[Consensus - {label}: {node['name']}] (similarity: {vector_score:.2f}): {summary}"
+
+            # Attach linked notes for reference traceability (case-insensitive lookup)
+            linked_notes = node_to_notes.get(node["name"].lower(), [])
+
+            candidates.append(
+                {
+                    "text": text,
+                    "type": "vector_match",
+                    "original_obj": node,
+                    "is_recent": False,
+                    "priority": "primary",  # Vector matches are primary
+                    "vector_score": vector_score,
+                    "linked_notes": linked_notes,
+                }
+            )
+
+        # C. Neighbor Nodes (1-hop expansion from entity/vector results)
+        for node in neighbor_nodes:
             summary = node.get("summary") or node.get("description", "")
             if not summary:
                 continue
 
             label = node.get("label", "Entity")
+            expanded_from = node.get("_expanded_from", "")
             rel_path = " → ".join(node.get("relationship_path", []))
 
             # Include relationship context if available (the "Why" behind the link)
@@ -593,11 +626,12 @@ class RetrievalService:
                 # Filter out None values and join
                 contexts = [c for c in context_path if c]
                 if contexts:
-                    rel_context = (
-                        f" Context: {'; '.join(contexts[:2])}"  # Limit to 2 contexts
-                    )
+                    rel_context = f" Context: {'; '.join(contexts[:2])}"
 
-            text = f"[Related - {label}: {node['name']}] (via {rel_path}){rel_context}: {summary}"
+            if expanded_from:
+                text = f"[Neighbor - {label}: {node['name']}] (expanded from {expanded_from}): {summary}"
+            else:
+                text = f"[Neighbor - {label}: {node['name']}] (via {rel_path}){rel_context}: {summary}"
 
             # Attach linked notes for reference traceability (case-insensitive lookup)
             linked_notes = node_to_notes.get(node["name"].lower(), [])
@@ -605,10 +639,10 @@ class RetrievalService:
             candidates.append(
                 {
                     "text": text,
-                    "type": "related_node",
+                    "type": "neighbor_node",
                     "original_obj": node,
                     "is_recent": False,
-                    "priority": "secondary",  # Graph expansion
+                    "priority": "secondary",  # Neighbor expansion
                     "relationship_path": node.get("relationship_path", []),
                     "linked_notes": linked_notes,
                 }
@@ -655,199 +689,209 @@ class RetrievalService:
                     "type": "community_summary",
                     "original_obj": community,
                     "is_recent": False,
-                    "priority": "primary",  # Community summaries are high-value for broad queries
-                    "linked_notes": linked_notes,
-                }
-            )
-
-        # D. Multi-Hop Paths (connections between query entities)
-        for path in multi_hop_paths:
-            path_nodes = path.get("path_nodes", [])
-            path_labels = path.get("path_labels", [])
-            path_summaries = path.get("path_summaries", [])
-            rel_types = path.get("relationship_types", [])
-
-            # Build path description
-            path_parts = []
-            for i, (name, label, summary) in enumerate(
-                zip(path_nodes, path_labels, path_summaries)
-            ):
-                node_desc = f"[{label}: {name}]"
-                if summary:
-                    node_desc += (
-                        f" ({summary[:100]}...)"
-                        if len(summary) > 100
-                        else f" ({summary})"
-                    )
-                path_parts.append(node_desc)
-
-            # Interleave with relationship types
-            if rel_types:
-                path_text = ""
-                for i, part in enumerate(path_parts):
-                    path_text += part
-                    if i < len(rel_types):
-                        path_text += f" --{rel_types[i]}--> "
-            else:
-                path_text = " → ".join(path_parts)
-
-            text = f"[Multi-Hop Path]: {path.get('source_name')} connects to {path.get('target_name')}: {path_text}"
-
-            # Collect linked notes from all nodes in the path (case-insensitive lookup)
-            path_linked_notes = []
-            for node_name in path_nodes:
-                if node_name:  # Skip None values
-                    path_linked_notes.extend(node_to_notes.get(node_name.lower(), []))
-            # Deduplicate by note id
-            seen_ids = set()
-            unique_notes = []
-            for note in path_linked_notes:
-                if note.get("id") not in seen_ids:
-                    seen_ids.add(note.get("id"))
-                    unique_notes.append(note)
-
-            candidates.append(
-                {
-                    "text": text,
-                    "type": "multi_hop_path",
-                    "original_obj": path,
-                    "is_recent": False,
-                    "path_depth": path.get("depth", 0),
-                    "priority": "secondary",
-                    "linked_notes": unique_notes[:5],  # Limit to 5 notes per path
-                }
-            )
-
-        # E. Vector-Similar Nodes (semantic matches from hybrid search)
-        for node in vector_similar_nodes:
-            summary = node.get("summary") or node.get("description", "")
-            if not summary:
-                continue
-
-            label = (
-                node.get("labels", ["Entity"])[0]
-                if isinstance(node.get("labels"), list)
-                else "Entity"
-            )
-            vector_score = node.get("score", 0.0)
-            text = f"[Semantic Match - {label}: {node['name']}] (similarity: {vector_score:.2f}): {summary}"
-
-            # Attach linked notes for reference traceability (case-insensitive lookup)
-            linked_notes = node_to_notes.get(node["name"].lower(), [])
-
-            candidates.append(
-                {
-                    "text": text,
-                    "type": "vector_similar",
-                    "original_obj": node,
-                    "is_recent": False,
-                    "priority": "tertiary",  # Lower than name matches but still valuable
-                    "vector_score": vector_score,
+                    "priority": "tertiary",  # Community summaries for context
                     "linked_notes": linked_notes,
                 }
             )
 
         logger.info(
-            f"  [GraphRAG] Prepared {len(candidates)} candidates from graph "
-            f"(hybrid: name + vector search)"
+            f"  [Retrieval] Prepared {len(candidates)} candidates "
+            f"({len(entity_nodes)} entity + {len(vector_nodes)} vector + {len(neighbor_nodes)} neighbor + {len(community_summaries)} community)"
         )
 
-        # ============ HYBRID RANKING (Symbolic + Vector) ============
-        # Primary: Name matches (symbolic) get highest priority
-        # Secondary: Graph traversal results
-        # Tertiary: Vector-similar nodes (semantic matches)
-        # Vector scores are used to boost/prune within each tier
-
+        # ============ RANKING ============
         if not candidates:
-            logger.warning("  [Retrieval] No candidates found from graph")
+            logger.warning("  [Retrieval] No candidates found")
             return []
 
         t_ranking_start = time.perf_counter()
 
-        # Score candidates based on symbolic priority + vector similarity
-        all_results = []
-        for cand in candidates:
-            # Base score by priority tier
-            if cand.get("priority") == "primary":
-                # Direct entity matches (from find_nodes_by_name) - highest priority
-                base_score = 100.0
-                cand["symbolic_immune"] = True
-            elif cand.get("priority") == "secondary":
-                # Related nodes, community summaries, multi-hop paths
-                base_score = 50.0
-            else:
-                # Tertiary: Vector-similar nodes (semantic matches)
-                # Start at 30, boosted by vector similarity score
-                vector_sim = cand.get("vector_score", 0.0)
-                base_score = 30.0 + (
-                    vector_sim * 20.0
-                )  # 30-50 range based on similarity
+        # ============ ENTITY TYPE SCORING ============
+        # If we know the expected entity types (e.g., "Person" for nationality questions),
+        # boost candidates that match and penalize those that don't
+        def get_type_score(candidate) -> float:
+            """Score based on entity type match. 1.0 = match, 0.5 = unknown, 0.0 = mismatch"""
+            if not expected_entity_types:
+                return 0.5  # No type filtering
 
-            final_score = base_score
+            node = candidate.get("original_obj", {})
+            entity_type = node.get("entity_type", None)
 
-            # Entity Match Boost (if result mentions query entities)
-            entity_boost = 1.0
-            if query_entities:
-                text_lower = cand["text"].lower()
-                matched_entities = [
-                    e for e in query_entities if e.lower() in text_lower
-                ]
-                if matched_entities:
-                    entity_boost = 1.0 + (0.5 * len(matched_entities))  # +0.5 per match
-                    final_score *= entity_boost
+            if not entity_type:
+                return 0.3  # Unknown type - slight penalty
 
-            # Keyword Boost (exact query terms in the text)
-            keyword_boost = self._calculate_keyword_boost(query, cand["text"])
-            if keyword_boost > 1.0:
-                final_score *= keyword_boost
+            # Normalize types for comparison
+            entity_type_lower = entity_type.lower()
+            expected_lower = [t.lower() for t in expected_entity_types]
 
-            # Vector similarity boost for non-primary candidates
-            vector_boost = 1.0
-            if cand.get("vector_score"):
-                vector_boost = 1.0 + (cand["vector_score"] * 0.3)  # Up to 30% boost
-                final_score *= vector_boost
+            # Direct match
+            if entity_type_lower in expected_lower:
+                return 1.0
 
-            cand["final_score"] = final_score
-            cand["rerank_score"] = 0.0  # No reranker used
-            cand["boosts"] = {
-                "priority": base_score,
-                "entity_match": entity_boost,
-                "keyword_match": keyword_boost,
-                "vector_sim": vector_boost,
+            # Handle synonyms (e.g., "Film" == "Movie")
+            type_synonyms = {
+                "film": ["movie", "cinema"],
+                "movie": ["film", "cinema"],
+                "person": ["actor", "director", "writer", "musician", "artist"],
+                "venue": ["arena", "stadium", "theater", "place"],
+                "place": ["venue", "location", "city", "country"],
+                "organization": ["company", "corporation", "institution"],
             }
-            all_results.append(cand)
+
+            for exp_type in expected_lower:
+                synonyms = type_synonyms.get(exp_type, [])
+                if entity_type_lower in synonyms or exp_type in type_synonyms.get(
+                    entity_type_lower, []
+                ):
+                    return 0.9  # Synonym match
+
+            return 0.1  # Type mismatch
+
+        def get_attribute_relevance(candidate) -> float:
+            """
+            Score based on whether the summary content is relevant to the question attribute.
+            For nationality questions, prefer entities with nationality/country mentioned.
+            """
+            if not question_attribute:
+                return 0.5  # No attribute filtering
+
+            node = candidate.get("original_obj", {})
+            summary = (node.get("summary") or node.get("description") or "").lower()
+            name = node.get("name", "").lower()
+
+            # Attribute-specific keywords to look for in summary
+            attribute_keywords = {
+                "nationality": [
+                    "american",
+                    "british",
+                    "canadian",
+                    "australian",
+                    "french",
+                    "german",
+                    "japanese",
+                    "chinese",
+                    "korean",
+                    "indian",
+                    "italian",
+                    "spanish",
+                    "mexican",
+                    "born in",
+                    "from ",
+                    "nationality",
+                ],
+                "occupation": [
+                    "director",
+                    "actor",
+                    "writer",
+                    "musician",
+                    "singer",
+                    "producer",
+                    "artist",
+                    "engineer",
+                    "doctor",
+                    "lawyer",
+                    "filmmaker",
+                    "screenwriter",
+                ],
+                "birth_date": ["born", "birthday", "birth date", "born on"],
+                "death_date": ["died", "death", "passed away", "deceased"],
+                "location": ["located in", "in ", "city", "country", "state"],
+                "director": ["directed by", "director", "directed"],
+                "capacity": ["seats", "capacity", "holds", "accommodates"],
+            }
+
+            keywords = attribute_keywords.get(question_attribute, [])
+            if not keywords:
+                return 0.5  # No specific keywords for this attribute
+
+            # Count keyword matches in summary
+            matches = sum(1 for kw in keywords if kw in summary)
+
+            if matches >= 2:
+                return 1.0  # Strong relevance
+            elif matches >= 1:
+                return 0.8  # Some relevance
+            else:
+                return 0.3  # No relevance - penalize
+
+        # Score all candidates
+        for cand in candidates:
+            # Calculate type score and attribute relevance for each candidate
+            cand["type_score"] = get_type_score(cand)
+            cand["attr_score"] = get_attribute_relevance(cand)
+            # Combined score: type match is most important, then attribute relevance
+            cand["combined_score"] = cand["type_score"] * 0.6 + cand["attr_score"] * 0.4
+            # Add vector score if available
+            cand["vector_score"] = cand.get("vector_score", 0.0)
+
+        # Sort by combined score, then by priority, then by vector score
+        def sort_key(c):
+            priority_order = {"primary": 0, "secondary": 1, "tertiary": 2}
+            priority_score = priority_order.get(c.get("priority", "tertiary"), 2)
+            combined_score = c.get("combined_score", 0.5)
+            vector_score = c.get("vector_score", 0)
+            # Lower is better: -combined_score puts high matches first
+            return (-combined_score, priority_score, -vector_score)
+
+        candidates.sort(key=sort_key)
+
+        # Log type filtering if active
+        if expected_entity_types:
+            logger.info(
+                f"  [Type Filter] Expected types: {expected_entity_types}, "
+                f"Attribute: {question_attribute}"
+            )
+            # Log top matches with their type scores
+            for cand in candidates[:5]:
+                node = cand.get("original_obj", {})
+                logger.debug(
+                    f"    - {node.get('name', 'N/A')} | "
+                    f"Type: {node.get('entity_type', 'N/A')} | "
+                    f"Score: {cand.get('type_score', 0):.2f}"
+                )
+
+        # Take top_k candidates
+        combined_results = candidates[:top_k]
+
+        # Add simple scores for logging
+        for cand in combined_results:
+            cand["final_score"] = cand.get("combined_score", 0.5)
+            cand["rerank_score"] = 0.0
+            cand["boosts"] = {"source": cand.get("type", "unknown")}
 
         t_ranking = time.perf_counter() - t_ranking_start
-        logger.info(f"  [⏱️ Timing] Hybrid ranking: {t_ranking:.4f}s")
+        logger.info(f"  [⏱️ Timing] Ranking: {t_ranking:.4f}s")
 
-        # ============ FINAL RANKING ============
-        all_results.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-
-        # Apply limit (no cutoff needed - symbolic matches are already high quality)
-        filtered_results = all_results[:top_k]
-
-        # Log Top Results (brief version to console)
-        logger.info(f"  [Retrieval] Final Selection ({len(filtered_results)} results):")
-        for i, doc in enumerate(filtered_results[:10]):
-            display_text = doc["text"][:80].replace("\n", " ")
-            boosts = doc.get("boosts", {})
-            immune_flag = "🔒" if doc.get("symbolic_immune", False) else ""
+        # Log what we're sending to LLM
+        logger.info(
+            f"  [Retrieval] Top {len(combined_results)} results by source: "
+            f"entity={sum(1 for c in combined_results if c.get('type') == 'entity_match')}, "
+            f"vector={sum(1 for c in combined_results if c.get('type') == 'vector_match')}, "
+            f"neighbor={sum(1 for c in combined_results if c.get('type') == 'neighbor_node')}, "
+            f"community={sum(1 for c in combined_results if c.get('type') == 'community_summary')}"
+        )
+        for i, doc in enumerate(combined_results[:10]):
+            name = doc.get("original_obj", {}).get("name", "N/A")
+            dtype = doc.get("type", "unknown")
+            score = doc.get("combined_score", 0)
+            vector_score = doc.get("vector_score", 0)
             logger.info(
-                f"    {i+1}. [{doc.get('type')}]{immune_flag} Score: {doc.get('final_score', 0):.1f} "
-                f"(P:{boosts.get('priority', 0):.0f} × E:{boosts.get('entity_match', 1.0):.1f} × K:{boosts.get('keyword_match', 1.0):.1f}) "
-                f"{display_text}..."
+                f"    {i+1}. [{dtype}] {name} (combined: {score:.2f}, vector: {vector_score:.2f})"
             )
 
         # Detailed logging to file (full summaries, not truncated)
         self._log_retrieval_details(
-            query, filtered_results, query_entities, query_concepts
+            query,
+            combined_results,
+            query_entities,
+            [],  # Pass extracted entities for logging
         )
 
         t_total = time.perf_counter() - t_start
         logger.info(
-            f"  [⏱️ Timing] Total: {t_total:.2f}s (Embed: {t_embedding:.2f}s | Graph: {t_candidates:.2f}s | Vector: {t_vector:.2f}s | Rank: {t_ranking:.4f}s)"
+            f"  [⏱️ Timing] Total: {t_total:.2f}s (Embed: {t_embedding:.2f}s | Retrieval: {t_candidates:.2f}s | Ranking: {t_ranking:.4f}s)"
         )
-        return filtered_results
+        return combined_results
 
     def _calculate_keyword_boost(self, query: str, text: str) -> float:
         """
@@ -951,6 +995,92 @@ class RetrievalService:
                 return True
 
         return False
+
+    def _extract_proper_names(self, query: str) -> List[str]:
+        """
+        Extract proper names from query by finding consecutive Title Case words.
+        This catches multi-word names like "Albert Einstein", "New York City", "The Great Gatsby".
+
+        Returns list of proper names found in query.
+        """
+        import re
+
+        proper_names = []
+
+        # Clean query - remove punctuation except apostrophes within words
+        clean_query = re.sub(r"[^\w\s\'-]", " ", query)
+        words = clean_query.split()
+
+        # Skip these words when they appear between capitalized words
+        # (e.g., "Lord of the Rings" - "of" and "the" connect title case words)
+        connectors = {"and", "of", "the", "in", "for", "on", "at", "to", "vs", "or"}
+
+        # Common question starters to skip at position 0
+        question_starters = {
+            "what",
+            "where",
+            "when",
+            "who",
+            "which",
+            "how",
+            "why",
+            "is",
+            "are",
+            "was",
+            "were",
+            "do",
+            "does",
+            "did",
+            "can",
+            "could",
+        }
+
+        i = 0
+        while i < len(words):
+            word = words[i]
+            # Strip quotes from word
+            clean_word = word.strip("\"'")
+
+            # Skip question starters at beginning
+            if i == 0 and clean_word.lower() in question_starters:
+                i += 1
+                continue
+
+            # Check if this word starts a proper name (Title Case)
+            if clean_word and clean_word[0].isupper() and len(clean_word) >= 2:
+                # Start collecting a potential multi-word name
+                name_parts = [clean_word]
+                j = i + 1
+
+                while j < len(words):
+                    next_word = words[j].strip("\"'")
+                    next_lower = next_word.lower()
+
+                    # If it's a connector, peek ahead to see if another Title Case word follows
+                    if next_lower in connectors and j + 1 < len(words):
+                        peek_word = words[j + 1].strip("\"'")
+                        if peek_word and peek_word[0].isupper():
+                            name_parts.append(next_word)
+                            j += 1
+                            continue
+
+                    # If it's another Title Case word, add it
+                    if next_word and next_word[0].isupper() and len(next_word) >= 2:
+                        name_parts.append(next_word)
+                        j += 1
+                    else:
+                        break
+
+                # Only keep if it's a multi-word name (single words handled elsewhere)
+                if len(name_parts) >= 2:
+                    full_name = " ".join(name_parts)
+                    proper_names.append(full_name)
+
+                i = j
+            else:
+                i += 1
+
+        return proper_names
 
     def _extract_query_entities(self, query: str) -> List[str]:
         """

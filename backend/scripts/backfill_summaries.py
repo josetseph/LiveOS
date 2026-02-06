@@ -45,15 +45,15 @@ def update_node_summary(name: str, label: str, context: str):
     if not context or not context.strip():
         print(f"  Skipping {name} - no context available")
         return False
-    
+
     try:
         # Generate fresh summary
         summary_data = llm_service.generate_entity_summary(context, name, label)
-        
+
         # Generate embedding
         text_to_embed = f"{summary_data['title']}: {summary_data['summary']}"
         new_embedding = embedding_service.embed_query(text_to_embed)
-        
+
         # Save to graph
         graph_service.execute_query(
             f"MATCH (n:{label} {{name: $name}}) SET n.summary = $summary, n.title = $title, n.embedding = $embedding",
@@ -75,56 +75,64 @@ def main():
     print("=" * 60)
     print("BACKFILL SUMMARIES FOR ENTITIES WITH 'None yet.'")
     print("=" * 60)
-    
+
     # Get counts first
-    entity_count = graph_service.execute_query("""
+    entity_count = graph_service.execute_query(
+        """
         MATCH (e:Entity)
         WHERE e.summary IS NULL OR e.summary = "" OR e.summary = "None yet."
         RETURN count(e) as cnt
-    """)[0]["cnt"]
-    
-    concept_count = graph_service.execute_query("""
+    """
+    )[0]["cnt"]
+
+    concept_count = graph_service.execute_query(
+        """
         MATCH (c:Concept)
         WHERE c.summary IS NULL OR c.summary = "" OR c.summary = "None yet."
         RETURN count(c) as cnt
-    """)[0]["cnt"]
-    
+    """
+    )[0]["cnt"]
+
     print(f"\nEntities needing summaries: {entity_count}")
     print(f"Concepts needing summaries: {concept_count}")
-    
+
     if entity_count == 0 and concept_count == 0:
         print("\n✅ All nodes already have summaries!")
         return
-    
+
     batch_size = 50
     total_updated = 0
-    
+
     # Process entities
     print(f"\n--- Processing Entities (batch size: {batch_size}) ---")
     while True:
         entities = get_entities_needing_summaries(batch_size)
         if not entities:
             break
-        
+
         for entity in entities:
-            if update_node_summary(entity["name"], "Entity", entity.get("note_summary", "")):
+            if update_node_summary(
+                entity["name"], "Entity", entity.get("note_summary", "")
+            ):
                 total_updated += 1
-        
+
         print(f"  Batch complete. Total updated: {total_updated}")
-    
+
     # Process concepts
     print(f"\n--- Processing Concepts (batch size: {batch_size}) ---")
     while True:
         concepts = get_concepts_needing_summaries(batch_size)
         if not concepts:
             break
-        
+
         for concept in concepts:
-            if update_node_summary(concept["name"], "Concept", concept.get("note_summary", "")):
+            if update_node_summary(
+                concept["name"], "Concept", concept.get("note_summary", "")
+            ):
                 total_updated += 1
-        
+
         print(f"  Batch complete. Total updated: {total_updated}")
-    
+
     print(f"\n{'=' * 60}")
     print(f"COMPLETE: Updated {total_updated} node summaries")
     print("=" * 60)

@@ -106,7 +106,7 @@ class GraphService:
             fuzzy: If True, uses CONTAINS for partial matching; if False, exact match
 
         Returns:
-            List of matching nodes with name, labels, summary, and description
+            List of matching nodes with name, labels, summary, description, and entity_type
         """
         if not names:
             return []
@@ -126,6 +126,7 @@ class GraphService:
                 n.description as description,
                 n.trait as trait,
                 n.status as status,
+                n.type as entity_type,
                 [name_param IN $names WHERE toLower(n.name) CONTAINS name_param][0] as matched_query
             LIMIT 50
             """
@@ -141,11 +142,275 @@ class GraphService:
                 n.description as description,
                 n.trait as trait,
                 n.status as status,
+                n.type as entity_type,
                 toLower(n.name) as matched_query
             LIMIT 50
             """
 
         return self.execute_query(query, {"names": names_lower})
+
+    def find_name_variants(self, base_name: str, limit: int = 5) -> list[dict]:
+        """
+        Find name variants for an entity, including:
+        1. ALIAS_OF relationships (highest priority - verified aliases)
+        2. Names that start with the base name (e.g., "Robert Smith" → "Robert Smith Jr.")
+        3. Names that contain the base name
+
+        Args:
+            base_name: The base name to search variants for
+            limit: Maximum variants to return
+
+        Returns:
+            List of nodes with variant names and their source (alias or pattern match)
+        """
+        base_lower = base_name.lower().strip()
+
+        # Combined query: ALIAS_OF relationships take priority, then pattern matching
+        query = """
+        // First, check for ALIAS_OF relationships (verified aliases)
+        OPTIONAL MATCH (source:Entity {name: $base_name})-[:ALIAS_OF]-(alias:Entity)
+        WITH collect(DISTINCT {
+            name: alias.name,
+            labels: labels(alias),
+            summary: alias.summary,
+            description: alias.description,
+            entity_type: alias.type,
+            source: 'alias'
+        }) as aliases
+        
+        // Then, find pattern-based name variants
+        MATCH (n:Indexable)
+        WHERE toLower(n.name) STARTS WITH $base_name + ' '
+           OR (toLower(n.name) CONTAINS $base_name AND size(n.name) > size($base_name) + 2)
+        WITH aliases, collect(DISTINCT {
+            name: n.name,
+            labels: labels(n),
+            summary: n.summary,
+            description: n.description,
+            entity_type: n.type,
+            source: 'pattern'
+        }) as patterns
+        
+        // Combine and deduplicate (aliases first)
+        WITH [x IN aliases WHERE x.name IS NOT NULL] + 
+             [p IN patterns WHERE p.name IS NOT NULL AND NOT any(a IN aliases WHERE a.name = p.name)] as combined
+        UNWIND combined as item
+        RETURN item.name as name,
+               item.labels as labels,
+               item.summary as summary,
+               item.description as description,
+               item.entity_type as entity_type,
+               item.source as variant_source
+        LIMIT $limit
+        """
+
+        return self.execute_query(query, {"base_name": base_lower, "limit": limit})
+
+    def find_potential_aliases(
+        self, entity_name: str, entity_type: str = "Person", limit: int = 10
+    ) -> list[dict]:
+        """
+        Find existing entities that might be aliases of the given entity.
+
+        Checks for:
+        1. Names that contain the new name (e.g., "Margaret Johnson-Williams" for "Margaret Johnson")
+        2. Names that the new name contains (e.g., "Robert Smith" for "Robert Smith III")
+        3. Names with same first/last name (for Person entities)
+
+        EXCLUDES:
+        - Sr./Jr. mismatches (these are always different people)
+        - Roman numeral suffixes that differ (I, II, III, IV, V)
+
+        Args:
+            entity_name: Name of the new entity being ingested
+            entity_type: Type of entity (Person, Place, Organization, etc.)
+            limit: Maximum potential aliases to return
+
+        Returns:
+            List of potential alias entities with name, summary, and type
+        """
+        name_lower = entity_name.lower().strip()
+        name_parts = name_lower.split()
+
+        # Check for generational suffixes that should NEVER match across
+        has_sr = any(p in ["sr", "sr.", "senior"] for p in name_parts)
+        has_jr = any(p in ["jr", "jr.", "junior"] for p in name_parts)
+        has_roman = any(p in ["i", "ii", "iii", "iv", "v", "vi"] for p in name_parts)
+
+        # For Person entities with multi-word names, check for related names
+        if entity_type.lower() == "person" and len(name_parts) >= 2:
+            first_name = name_parts[0]
+            last_name = name_parts[-1]
+            # Exclude suffix from last_name if it's a generational marker
+            if last_name in [
+                "sr",
+                "sr.",
+                "jr",
+                "jr.",
+                "senior",
+                "junior",
+                "i",
+                "ii",
+                "iii",
+                "iv",
+                "v",
+                "vi",
+            ]:
+                last_name = name_parts[-2] if len(name_parts) > 2 else name_parts[0]
+
+            query = """
+            MATCH (e:Entity)
+            WHERE e.type = 'Person'
+              AND toLower(e.name) <> $name
+              AND (
+                // New name contains existing name (shorter → longer)
+                toLower($name) STARTS WITH toLower(e.name) + ' '
+                // Existing name contains new name (longer → shorter) 
+                OR toLower(e.name) STARTS WITH toLower($name) + ' '
+                // Same first AND last name (different middle parts)
+                OR (toLower(e.name) STARTS WITH $first_name + ' '
+                    AND toLower(e.name) ENDS WITH ' ' + $last_name)
+              )
+              // EXCLUDE Sr./Jr. mismatches - these are ALWAYS different people
+              AND NOT (
+                // One has Sr. and the other has Jr.
+                (toLower(e.name) CONTAINS ' sr' AND toLower($name) CONTAINS ' jr')
+                OR (toLower(e.name) CONTAINS ' jr' AND toLower($name) CONTAINS ' sr')
+                // One has generational suffix and the other doesn't
+                OR (toLower(e.name) =~ '.* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$' 
+                    AND NOT toLower($name) =~ '.* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$')
+                OR (toLower($name) =~ '.* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$'
+                    AND NOT toLower(e.name) =~ '.* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$')
+              )
+            RETURN 
+                e.name as name,
+                e.summary as summary,
+                e.type as entity_type,
+                labels(e) as labels
+            LIMIT $limit
+            """
+            return self.execute_query(
+                query,
+                {
+                    "name": name_lower,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "limit": limit,
+                },
+            )
+        else:
+            # For non-Person entities or single-word names, just check containment
+            query = """
+            MATCH (e:Entity)
+            WHERE toLower(e.name) <> $name
+              AND (
+                toLower($name) CONTAINS toLower(e.name)
+                OR toLower(e.name) CONTAINS toLower($name)
+              )
+              AND abs(size(e.name) - size($name)) >= 2
+            RETURN 
+                e.name as name,
+                e.summary as summary,
+                e.type as entity_type,
+                labels(e) as labels
+            LIMIT $limit
+            """
+            return self.execute_query(query, {"name": name_lower, "limit": limit})
+
+    def create_alias_relationship(
+        self,
+        name1: str,
+        name2: str,
+        confidence: float = 0.9,
+        note_id: str = None,
+    ) -> dict:
+        """
+        Create a bidirectional ALIAS_OF relationship between two entities.
+
+        This indicates that the two entity names refer to the same real-world entity.
+        E.g., "Robert Smith" and "Bob Smith" are the same person.
+
+        Args:
+            name1: First entity name
+            name2: Second entity name
+            confidence: Confidence score (0.0-1.0)
+            note_id: ID of the note where this alias was discovered
+
+        Returns:
+            Dict with action performed (created, exists)
+        """
+        from datetime import datetime
+
+        name1_lower = name1.lower().strip()
+        name2_lower = name2.lower().strip()
+        created_at = datetime.utcnow().isoformat()
+
+        # Check if alias relationship already exists (in either direction)
+        check_query = """
+        MATCH (e1:Entity {name: $name1})-[r:ALIAS_OF]-(e2:Entity {name: $name2})
+        RETURN count(r) > 0 as exists
+        """
+        result = self.execute_query(
+            check_query, {"name1": name1_lower, "name2": name2_lower}
+        )
+
+        if result and result[0].get("exists"):
+            return {"action": "exists", "name1": name1_lower, "name2": name2_lower}
+
+        # Create bidirectional ALIAS_OF relationship
+        create_query = """
+        MATCH (e1:Entity {name: $name1})
+        MATCH (e2:Entity {name: $name2})
+        MERGE (e1)-[r1:ALIAS_OF]->(e2)
+        SET r1.confidence = $confidence,
+            r1.created_at = $created_at,
+            r1.note_id = $note_id,
+            r1.is_active = true
+        MERGE (e2)-[r2:ALIAS_OF]->(e1)
+        SET r2.confidence = $confidence,
+            r2.created_at = $created_at,
+            r2.note_id = $note_id,
+            r2.is_active = true
+        RETURN e1.name as name1, e2.name as name2
+        """
+        result = self.execute_query(
+            create_query,
+            {
+                "name1": name1_lower,
+                "name2": name2_lower,
+                "confidence": confidence,
+                "created_at": created_at,
+                "note_id": note_id,
+            },
+        )
+
+        if result:
+            logger.info(f"[Alias] Created ALIAS_OF: {name1_lower} <-> {name2_lower}")
+            return {"action": "created", "name1": name1_lower, "name2": name2_lower}
+
+        return {"action": "failed", "name1": name1_lower, "name2": name2_lower}
+
+    def get_aliases(self, entity_name: str) -> list[dict]:
+        """
+        Get all aliases of an entity through ALIAS_OF relationships.
+
+        Args:
+            entity_name: Name of the entity to find aliases for
+
+        Returns:
+            List of alias entities with name, summary, and type
+        """
+        name_lower = entity_name.lower().strip()
+
+        query = """
+        MATCH (e:Entity {name: $name})-[:ALIAS_OF]-(alias:Entity)
+        RETURN DISTINCT
+            alias.name as name,
+            alias.summary as summary,
+            alias.type as entity_type,
+            labels(alias) as labels
+        """
+        return self.execute_query(query, {"name": name_lower})
 
     def find_paths_between_nodes(
         self,
@@ -852,6 +1117,7 @@ class GraphService:
             labels(related)[0] as label,
             related.summary as summary,
             related.description as description,
+            related.type as entity_type,
             depth,
             [rel in rels | type(rel)] as relationship_path,
             [rel in rels | rel.confidence] as confidence_path,

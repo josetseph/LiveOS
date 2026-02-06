@@ -363,7 +363,7 @@ class LLMService:
     def analyze_query(self, query: str) -> dict:
         """
         Analyzes user query with structured outputs for better retrieval.
-        Returns intent, entities, temporal info, etc.
+        Uses the same extraction approach as ingestion for consistency.
         """
         from pydantic import Field
         from typing import Literal, Optional
@@ -381,7 +381,7 @@ class LLMService:
             )
             entities: list[str] = Field(
                 default_factory=list,
-                description="Named entities mentioned (people, places, organizations, tools)",
+                description="Named entities mentioned in the query",
             )
             concepts: list[str] = Field(
                 default_factory=list,
@@ -394,52 +394,76 @@ class LLMService:
             requires_recent_context: bool = Field(
                 description="Whether answer requires recent notes/events"
             )
-
-        try:
-            model = (
-                settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_ARCHITECT
+            expected_entity_types: list[str] = Field(
+                default_factory=list,
+                description="Types of entities the answer should be about: Person, Film, Place, Organization, etc.",
+            )
+            question_attribute: Optional[str] = Field(
+                default=None,
+                description="What attribute is being asked about: nationality, occupation, birth_date, location, director, capacity, etc.",
             )
 
-            prompt = f"""Analyze this user query and extract structured information:
+        # Use the same prompt style as ingestion - concrete JSON examples
+        prompt = f"""Analyze this search query and extract structured information.
 
-Query: "{query}"
+QUERY: "{query}"
 
-Extract:
-- Intent (search, summarize, compare, explain, list, or recent)
-- Whether it's asking for recent/latest/newest content
-- Time range if mentioned
-- Named entities (people, places, organizations, tools)
-- Abstract concepts or topics
-- Important keywords
-- Whether answer requires recent notes/events
+ENTITY EXTRACTION RULES (CRITICAL):
+- Extract COMPLETE multi-word names as SINGLE strings
+- Person names: "Albert Einstein", "Marie Curie", "James P. Sullivan" (NOT split into individual words)
+- Movie/Book titles: "The Great Gatsby", "Jurassic Park" (NOT split)
+- Place names: "Eiffel Tower", "New York City" (NOT split)
+- Organization names: "Yale University", "Microsoft Corporation" (NOT split)
+
+ENTITY TYPE INFERENCE (CRITICAL):
+Based on what the question is asking about, determine what types of entities the answer requires.
+- "nationality", "born", "age", "occupation", "married" → expected_entity_types: ["Person"]
+- "directed by", "starring", "released" (for films) → expected_entity_types: ["Film", "Person"]
+- "located in", "capital of", "population" → expected_entity_types: ["Place"]
+- "founded", "headquarters", "CEO" → expected_entity_types: ["Organization", "Person"]
+- "capacity", "seats", "arena" → expected_entity_types: ["Venue", "Place"]
+
+QUESTION ATTRIBUTE:
+Identify what specific attribute is being asked about:
+- "nationality" for questions about country of origin
+- "occupation" for job/profession questions
+- "director" for who directed a film
+- "location" for where something is
+- "capacity" for size/seats
+- "birth_date", "death_date" for dates
+
+EXAMPLES:
+Query: "Were Albert Einstein and Marie Curie of the same nationality?"
+{{"entities": ["Albert Einstein", "Marie Curie"], "expected_entity_types": ["Person"], "question_attribute": "nationality"}}
+
+Query: "What award did the author of 1984 win?"
+{{"entities": ["1984"], "expected_entity_types": ["Book", "Person"], "question_attribute": "award"}}
+
+Query: "How many seats does Madison Square Garden have?"
+{{"entities": ["Madison Square Garden"], "expected_entity_types": ["Venue", "Place"], "question_attribute": "capacity"}}
+
+Query: "Who directed the movie Inception?"
+{{"entities": ["Inception"], "expected_entity_types": ["Film", "Person"], "question_attribute": "director"}}
+
+Now analyze the query above and return a JSON object with:
+- intent: The primary goal (search/summarize/compare/explain/list/recent)
+- is_temporal: true if asking about recent/latest content, false otherwise
+- time_range: "today"/"yesterday"/"last week"/"last month" if mentioned, null otherwise
+- entities: List of COMPLETE named entities (never split names)
+- concepts: List of abstract topics
+- keywords: List of important search terms
+- requires_recent_context: true if answer needs recent notes, false otherwise
+- expected_entity_types: List of entity types the answer should be about (Person, Film, Place, Organization, Venue, etc.)
+- question_attribute: What attribute is being asked about (nationality, occupation, director, location, capacity, etc.)
 """
 
-            if self.is_gemini:
-                response = self.extraction_client.chat.completions.create(
-                    model=model,
-                    response_model=QueryAnalysis,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                return response.model_dump()
+        try:
+            # Use extract_structured - same as ingestion
+            result = self.extract_structured(prompt, QueryAnalysis, temperature=0)
+            if result:
+                return result.model_dump()
             else:
-                extra_body = {
-                    "keep_alive": -1,
-                    "format": QueryAnalysis.model_json_schema(),
-                }
-
-                response = self.chat_client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    extra_body=extra_body,
-                    temperature=0,  # Deterministic analysis
-                )
-
-                # Clean markdown code fences from LLM response
-                raw_content = response.choices[0].message.content
-                cleaned_json = self._clean_json(raw_content)
-
-                analysis = QueryAnalysis.model_validate_json(cleaned_json)
-                return analysis.model_dump()
+                raise ValueError("Empty extraction result")
 
         except Exception as e:
             logger.error(f"Query analysis failed: {e}")
@@ -452,6 +476,8 @@ Extract:
                 "concepts": [],
                 "keywords": query.split(),
                 "requires_recent_context": False,
+                "expected_entity_types": [],
+                "question_attribute": None,
             }
 
     def summarize(self, text: str) -> str:
@@ -572,19 +598,35 @@ Extract:
         if settings.BENCHMARK_MODE:
             prompt = f"""
         # ROLE
-        You are a factual question-answering system. Answer the question based ONLY on the provided context.
+        You are a factual question-answering system for benchmark evaluation.
+        Answer ONLY using the provided context.
         
-        # STYLE GUIDELINES
-        - **FACTUAL**: Use third-person, objective language. No personal framing.
-        - **GROUNDED**: Every claim must be based on the provided context.
-        - **CONCISE**: Answer directly without unnecessary elaboration.
-        - **NO PERSONAL FRAMING**: Do NOT use "you", "your", or address any user personally.
+        # REASONING PROCESS (MANDATORY)
+        Before answering, work through these steps in your head:
+        
+        Step 1: Identify what the question is asking
+        Step 2: Find the relevant facts in the context for EACH entity mentioned
+        Step 3: For comparison questions, extract the specific attribute being compared
+        Step 4: Compare the values and determine the answer
+        Step 5: State your answer, then explain your reasoning
+        
+        # ANSWER FORMAT RULES
+        - For yes/no questions: Answer "yes" or "no" FIRST, then explain.
+          CRITICAL: If you find that both entities share the same attribute (e.g., both are American), the answer is "yes".
+        - For "who/what/where/when" questions: Start with the direct answer.
+        - For multi-hop questions ("What position was held by the woman who played X?"):
+          1. First find who played X
+          2. Then find what position that person held
+          3. Answer with the position
+        
+        # NAME MATCHING
+        - Match short names to their full biographical entries
+        - "Bob Smith" the person = "Robert James Smith" if context matches
+        - Distinguish between people with similar names using context (profession, time period)
         
         # CONSTRAINTS
-        - **NO ADVICE**: Do not give recommendations.
-        - **NO PREAMBLE**: Start the answer directly.
-        - **NO CITATIONS**: Do not use citation markers.
-        - **NO FOLLOW-UP QUESTIONS**: Just answer and stop.
+        - Use ONLY facts from the provided context
+        - If the answer is not in the context, say "The answer is not in the provided context"
         
         # CONTEXT
         {structured_context_str}
@@ -592,7 +634,7 @@ Extract:
         # QUESTION
         {query}
         
-        # ANSWER (Factual and grounded)
+        # ANSWER
         """
         else:
             prompt = f"""
@@ -1084,6 +1126,7 @@ Double-quote all keys.""",
 
         Labels:
         - [CORE CONSENSUS]: Direct entity/concept matches (distilled knowledge)
+        - [SEMANTIC MATCH]: Vector-similar entities (may include aliases, full names)
         - [RELATED CONTEXT]: Expanded neighbors from graph traversal
         - [DOMAIN OVERVIEW]: Community-level summaries for broad context
         - [CONNECTION PATH]: Multi-hop paths showing how entities relate
@@ -1102,6 +1145,10 @@ Double-quote all keys.""",
             if dtype == "graph_consensus":
                 # Primary entity matches - highest authority
                 parts.append(f"[CORE CONSENSUS]: {text}")
+            elif dtype == "vector_similar":
+                # Semantic matches - may contain aliases, full names, related entities
+                # These are equally important as they catch name variations
+                parts.append(f"[SEMANTIC MATCH]: {text}")
             elif dtype == "related_node":
                 # Graph neighbors - supporting context
                 parts.append(f"[RELATED CONTEXT]: {text}")
@@ -1120,6 +1167,127 @@ Double-quote all keys.""",
                 parts.append(f"[CONTEXT]: {text}")
 
         return "\n\n".join(parts)
+
+    def verify_alias(
+        self,
+        name1: str,
+        name2: str,
+        context1: str = "",
+        context2: str = "",
+    ) -> tuple[bool, float]:
+        """
+        Use LLM to verify if two entity names refer to the same real-world entity.
+
+        This is used during ingestion to create ALIAS_OF relationships when
+        we detect potential aliases (e.g., "Robert Smith" vs "Bob Smith").
+
+        Args:
+            name1: First entity name
+            name2: Second entity name
+            context1: Summary/description of entity1 (if available)
+            context2: Summary/description of entity2 (if available)
+
+        Returns:
+            Tuple of (is_alias: bool, confidence: float)
+        """
+        import json
+
+        prompt = f"""Determine if these two names refer to the SAME real-world entity (person, place, organization, etc.).
+
+NAME 1: "{name1}"
+CONTEXT 1: {context1 if context1 else "No additional context"}
+
+NAME 2: "{name2}"  
+CONTEXT 2: {context2 if context2 else "No additional context"}
+
+CRITICAL RULES:
+1. "Sr." and "Jr." ALWAYS indicate DIFFERENT people (father and son)
+2. Roman numerals (I, II, III) indicate DIFFERENT people in a family line
+3. Context MUST be consistent - same profession, time period, and relationships
+4. If contexts describe different professions or time periods, they are DIFFERENT people
+5. When in doubt, say DIFFERENT (false positives are worse than false negatives)
+
+SAME PERSON examples:
+- "Robert Smith" and "Bob Smith" -> SAME (nickname)
+- "Margaret Johnson" and "Margaret Johnson-Williams" -> SAME (married name)
+- "William Gates III" and "Bill Gates" -> SAME (nickname, same person despite numeral)
+
+DIFFERENT PERSON examples:
+- "John Adams" and "John Adams Jr." -> DIFFERENT (father and son)
+- "James Wilson Sr." and "James Wilson" -> DIFFERENT (could be father/son)
+- "George Bush" (41st president) and "George Bush" (43rd president) -> DIFFERENT
+- "Thomas Anderson" (farmer, 1800s) and "Thomas Anderson" (programmer, 2000s) -> DIFFERENT
+
+Respond with ONLY a JSON object:
+{{"is_same_entity": true/false, "confidence": 0.0-1.0, "reason": "brief explanation"}}
+
+JSON response:"""
+
+        try:
+            # Select model based on provider
+            if self.provider == "ollama":
+                model = settings.MODEL_SUMMARIZATION
+                extra_body = {"keep_alive": -1}
+            elif self.provider == "openai":
+                model = settings.OPENAI_MODEL
+                extra_body = {}
+            elif self.provider == "gemini":
+                model = settings.GEMINI_MODEL
+                extra_body = {}
+            elif self.provider == "anthropic":
+                model = settings.ANTHROPIC_MODEL
+                # Anthropic uses different API
+                response = self.chat_client.messages.create(
+                    model=model,
+                    max_tokens=200,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        }
+                    ],
+                )
+                response_text = response.content[0].text.strip()
+            else:
+                model = settings.MODEL_SUMMARIZATION
+                extra_body = {}
+
+            # Non-Anthropic providers use OpenAI-compatible API
+            if self.provider != "anthropic":
+                response = self.chat_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=200,
+                    extra_body=extra_body,
+                )
+                response_text = response.choices[0].message.content.strip()
+
+            # Parse JSON response
+            # Handle markdown code blocks
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+
+            result = json.loads(response_text)
+            is_same = result.get("is_same_entity", False)
+            confidence = float(result.get("confidence", 0.0))
+            reason = result.get("reason", "")
+
+            logger.info(
+                f"[Alias Check] {name1} <-> {name2}: "
+                f"{'SAME' if is_same else 'DIFFERENT'} "
+                f"(confidence={confidence:.2f}, reason={reason})"
+            )
+
+            return is_same, confidence
+
+        except Exception as e:
+            logger.warning(f"[Alias Check] Failed for {name1} <-> {name2}: {e}")
+            # Default to not creating alias if we can't verify
+            return False, 0.0
 
     def _extract_relevant_snippet(
         self, content: str, query_terms: set, window_size: int = 300

@@ -262,6 +262,9 @@ class IngestionWorkflow:
                 {"data": entity_data, "note_id": note_id, "created_at": created_at},
             )
 
+            # ALIAS DETECTION: Check for potential aliases and create ALIAS_OF relationships
+            self._detect_and_create_aliases(extraction.entities, note_id)
+
         # 2. CONCEPTS (Batch with Academic Relationships)
         if extraction.concepts:
             # Generate embeddings for concepts
@@ -600,6 +603,106 @@ class IngestionWorkflow:
         self._assign_to_communities(extraction, content)
 
         return title
+
+    def _detect_and_create_aliases(
+        self, entities: list, note_id: str, min_confidence: float = 0.8
+    ):
+        """
+        Detect and create ALIAS_OF relationships for entities that might refer to the same real-world entity.
+
+        This is called during ingestion after entities are created/merged.
+        For each Person entity, we check if existing entities might be aliases.
+
+        Args:
+            entities: List of Entity objects from extraction
+            note_id: ID of the note being ingested
+            min_confidence: Minimum confidence threshold for creating alias relationships
+        """
+        from app.services.llm import llm_service
+
+        # Helper to normalize names
+        def normalize_name(name: str) -> str:
+            if not name:
+                return ""
+            return name.lstrip("#").strip().lower()
+
+        # Only check Person entities with multi-word names (most likely to have aliases)
+        person_entities = [
+            e
+            for e in entities
+            if e.type.lower() == "person" and len(e.name.split()) >= 2
+        ]
+
+        if not person_entities:
+            return
+
+        logger.info(
+            f"[Alias] Checking {len(person_entities)} Person entities for potential aliases..."
+        )
+
+        for entity in person_entities:
+            entity_name = normalize_name(entity.name)
+
+            try:
+                # Find potential aliases in the graph
+                potential_aliases = graph_service.find_potential_aliases(
+                    entity_name=entity_name, entity_type=entity.type, limit=5
+                )
+
+                if not potential_aliases:
+                    continue
+
+                logger.info(
+                    f"[Alias] Found {len(potential_aliases)} potential aliases for '{entity_name}': "
+                    f"{[p['name'] for p in potential_aliases]}"
+                )
+
+                # Get the summary of the new entity for context
+                entity_summary = entity.isolated_context or ""
+
+                for potential in potential_aliases:
+                    potential_name = potential.get("name", "")
+                    potential_summary = potential.get("summary", "") or ""
+
+                    # Skip if already an alias
+                    existing_aliases = graph_service.get_aliases(entity_name)
+                    if any(a["name"] == potential_name for a in existing_aliases):
+                        logger.debug(
+                            f"[Alias] {entity_name} <-> {potential_name} already linked"
+                        )
+                        continue
+
+                    # Use LLM to verify if they're truly the same entity
+                    is_same, confidence = llm_service.verify_alias(
+                        name1=entity_name,
+                        name2=potential_name,
+                        context1=entity_summary,
+                        context2=potential_summary,
+                    )
+
+                    if is_same and confidence >= min_confidence:
+                        # Create bidirectional ALIAS_OF relationship
+                        result = graph_service.create_alias_relationship(
+                            name1=entity_name,
+                            name2=potential_name,
+                            confidence=confidence,
+                            note_id=note_id,
+                        )
+                        logger.info(
+                            f"[Alias] {result['action'].upper()}: "
+                            f"'{entity_name}' <-> '{potential_name}' (confidence={confidence:.2f})"
+                        )
+                    else:
+                        logger.debug(
+                            f"[Alias] Rejected: '{entity_name}' <-> '{potential_name}' "
+                            f"(same={is_same}, confidence={confidence:.2f})"
+                        )
+
+            except Exception as e:
+                logger.warning(
+                    f"[Alias] Failed to check aliases for '{entity_name}': {e}"
+                )
+                continue
 
     def _assign_to_communities(self, extraction: Extraction, content: str):
         """
