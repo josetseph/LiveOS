@@ -51,19 +51,7 @@ unset BENCHMARK_MODE
 
 ## Quick Start
 
-### Step 1: Prepare Dataset
-
-```bash
-cd backend
-
-# For MuSiQue using LOCAL data (no download required!)
-python tests/benchmark/prepare_musique_local.py --samples 30
-
-# For HotpotQA using LOCAL data (no download required!)
-python tests/benchmark/prepare_hotpotqa_local.py --samples 30
-```
-
-### Step 2: Ingest Notes
+### Step 1: Ingest Notes
 
 ```bash
 # Make sure your backend services are running (Neo4j, PostgreSQL)
@@ -71,7 +59,7 @@ python ../batch-note-processing/batch_ingest.py tests/benchmark/musique_notes/ #
 python ../batch-note-processing/batch_ingest.py tests/benchmark/hotpotqa_notes/ # HotPotQA
 ```
 
-### Step 3: Run Evaluation
+### Step 2: Run Evaluation
 
 ```bash
 # With RAGAS metrics (uses local Ollama by default)

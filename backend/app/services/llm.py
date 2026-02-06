@@ -1271,6 +1271,18 @@ JSON response:"""
                 if response_text.startswith("json"):
                     response_text = response_text[4:]
 
+            # Try to extract JSON object from response if it's wrapped in other text
+            import re
+
+            json_match = re.search(
+                r'\{[^{}]*"is_same_entity"[^{}]*\}', response_text, re.DOTALL
+            )
+            if json_match:
+                response_text = json_match.group(0)
+
+            # Clean up common issues
+            response_text = response_text.strip()
+
             result = json.loads(response_text)
             is_same = result.get("is_same_entity", False)
             confidence = float(result.get("confidence", 0.0))
@@ -1284,6 +1296,13 @@ JSON response:"""
 
             return is_same, confidence
 
+        except json.JSONDecodeError as e:
+            logger.warning(f"[Alias Check] Failed for {name1} <-> {name2}: {e}")
+            logger.debug(
+                f"[Alias Check] Raw response was: {response_text[:200] if 'response_text' in dir() else 'N/A'}"
+            )
+            # Default to not creating alias if we can't verify
+            return False, 0.0
         except Exception as e:
             logger.warning(f"[Alias Check] Failed for {name1} <-> {name2}: {e}")
             # Default to not creating alias if we can't verify

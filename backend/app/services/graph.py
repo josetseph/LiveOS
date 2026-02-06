@@ -179,9 +179,21 @@ class GraphService:
         }) as aliases
         
         // Then, find pattern-based name variants
+        // EXCLUDE Sr./Jr./Roman numeral mismatches - these are different people!
         MATCH (n:Indexable)
-        WHERE toLower(n.name) STARTS WITH $base_name + ' '
-           OR (toLower(n.name) CONTAINS $base_name AND size(n.name) > size($base_name) + 2)
+        WHERE (toLower(n.name) STARTS WITH $base_name + ' '
+           OR (toLower(n.name) CONTAINS $base_name AND size(n.name) > size($base_name) + 2))
+          // CRITICAL: Exclude generational suffixes that indicate different people
+          AND NOT (
+            // One has Sr. and the other has Jr.
+            (toLower(n.name) CONTAINS ' sr' AND toLower($base_name) CONTAINS ' jr')
+            OR (toLower(n.name) CONTAINS ' jr' AND toLower($base_name) CONTAINS ' sr')
+            // One has generational suffix and the other doesn't
+            OR (toLower(n.name) =~ '.* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$' 
+                AND NOT toLower($base_name) =~ '.* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$')
+            OR (toLower($base_name) =~ '.* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$'
+                AND NOT toLower(n.name) =~ '.* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$')
+          )
         WITH aliases, collect(DISTINCT {
             name: n.name,
             labels: labels(n),

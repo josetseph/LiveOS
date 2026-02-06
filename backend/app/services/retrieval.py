@@ -747,91 +747,66 @@ class RetrievalService:
 
             return 0.1  # Type mismatch
 
-        def get_attribute_relevance(candidate) -> float:
+        def get_attribute_relevance(candidate, query_vector: list[float]) -> float:
             """
-            Score based on whether the summary content is relevant to the question attribute.
-            For nationality questions, prefer entities with nationality/country mentioned.
+            Score based on semantic similarity between the candidate's summary
+            and the query. Uses embedding-based cosine similarity for general-purpose
+            attribute relevance without hardcoded keywords.
             """
-            if not question_attribute:
-                return 0.5  # No attribute filtering
-
             node = candidate.get("original_obj", {})
-            summary = (node.get("summary") or node.get("description") or "").lower()
-            name = node.get("name", "").lower()
+            summary = node.get("summary") or node.get("description") or ""
 
-            # Attribute-specific keywords to look for in summary
-            attribute_keywords = {
-                "nationality": [
-                    "american",
-                    "british",
-                    "canadian",
-                    "australian",
-                    "french",
-                    "german",
-                    "japanese",
-                    "chinese",
-                    "korean",
-                    "indian",
-                    "italian",
-                    "spanish",
-                    "mexican",
-                    "born in",
-                    "from ",
-                    "nationality",
-                ],
-                "occupation": [
-                    "director",
-                    "actor",
-                    "writer",
-                    "musician",
-                    "singer",
-                    "producer",
-                    "artist",
-                    "engineer",
-                    "doctor",
-                    "lawyer",
-                    "filmmaker",
-                    "screenwriter",
-                ],
-                "birth_date": ["born", "birthday", "birth date", "born on"],
-                "death_date": ["died", "death", "passed away", "deceased"],
-                "location": ["located in", "in ", "city", "country", "state"],
-                "director": ["directed by", "director", "directed"],
-                "capacity": ["seats", "capacity", "holds", "accommodates"],
-            }
+            if not summary or len(summary.strip()) < 10:
+                return 0.3  # No meaningful content
 
-            keywords = attribute_keywords.get(question_attribute, [])
-            if not keywords:
-                return 0.5  # No specific keywords for this attribute
+            # Use the vector_score if already computed from Neo4j vector search
+            # This is the cosine similarity between query and node's stored embedding
+            existing_score = candidate.get("vector_score", 0.0)
+            if existing_score > 0:
+                return existing_score
 
-            # Count keyword matches in summary
-            matches = sum(1 for kw in keywords if kw in summary)
+            # Fallback: compute similarity if not available
+            # This handles entity_match candidates that don't have vector scores
+            try:
+                summary_vector = embedding_service.embed_query(
+                    summary[:500]
+                )  # Limit for performance
+                # Cosine similarity
+                dot_product = sum(a * b for a, b in zip(query_vector, summary_vector))
+                norm_q = sum(a * a for a in query_vector) ** 0.5
+                norm_s = sum(a * a for a in summary_vector) ** 0.5
+                if norm_q > 0 and norm_s > 0:
+                    return dot_product / (norm_q * norm_s)
+            except Exception as e:
+                logger.warning(f"Failed to compute semantic similarity: {e}")
 
-            if matches >= 2:
-                return 1.0  # Strong relevance
-            elif matches >= 1:
-                return 0.8  # Some relevance
-            else:
-                return 0.3  # No relevance - penalize
+            return 0.5  # Neutral if computation fails
 
         # Score all candidates
         for cand in candidates:
-            # Calculate type score and attribute relevance for each candidate
-            cand["type_score"] = get_type_score(cand)
-            cand["attr_score"] = get_attribute_relevance(cand)
-            # Combined score: type match is most important, then attribute relevance
-            cand["combined_score"] = cand["type_score"] * 0.6 + cand["attr_score"] * 0.4
-            # Add vector score if available
+            # Get vector score first (used by semantic scoring)
             cand["vector_score"] = cand.get("vector_score", 0.0)
 
-        # Sort by combined score, then by priority, then by vector score
+            # Calculate type score and semantic relevance for each candidate
+            cand["type_score"] = get_type_score(cand)
+            cand["semantic_score"] = get_attribute_relevance(cand, full_vector)
+
+            # Combined score: semantic similarity is primary, type match is secondary
+            # Weights: semantic (50%), type (30%), source priority (20% via sort)
+            # Vector score is already factored into semantic_score
+            cand["combined_score"] = (
+                cand["semantic_score"] * 0.5
+                + cand["type_score"] * 0.3
+                + cand["vector_score"] * 0.2  # Direct vector score contribution
+            )
+
+        # Sort by combined score, then by priority
         def sort_key(c):
             priority_order = {"primary": 0, "secondary": 1, "tertiary": 2}
             priority_score = priority_order.get(c.get("priority", "tertiary"), 2)
             combined_score = c.get("combined_score", 0.5)
-            vector_score = c.get("vector_score", 0)
             # Lower is better: -combined_score puts high matches first
-            return (-combined_score, priority_score, -vector_score)
+            return (-combined_score, priority_score)
 
         candidates.sort(key=sort_key)
 
@@ -874,9 +849,10 @@ class RetrievalService:
             name = doc.get("original_obj", {}).get("name", "N/A")
             dtype = doc.get("type", "unknown")
             score = doc.get("combined_score", 0)
-            vector_score = doc.get("vector_score", 0)
+            semantic_score = doc.get("semantic_score", 0)
+            type_score = doc.get("type_score", 0)
             logger.info(
-                f"    {i+1}. [{dtype}] {name} (combined: {score:.2f}, vector: {vector_score:.2f})"
+                f"    {i+1}. [{dtype}] {name} (combined: {score:.2f}, semantic: {semantic_score:.2f}, type: {type_score:.2f})"
             )
 
         # Detailed logging to file (full summaries, not truncated)

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     NEO4J_PASSWORD: str = "password"
 
     # LLM Provider Selection
-    LLM_PROVIDER: str = "ollama"  # "ollama", "openai", "gemini", "anthropic"
+    LLM_PROVIDER: str = "gemini"  # "ollama", "openai", "gemini", "anthropic"
     LLM_FALLBACK_PROVIDER: str | None = None  # Optional fallback if primary fails
 
     # LLM (Local - Ollama)

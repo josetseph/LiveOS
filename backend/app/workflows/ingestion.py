@@ -262,8 +262,10 @@ class IngestionWorkflow:
                 {"data": entity_data, "note_id": note_id, "created_at": created_at},
             )
 
-            # ALIAS DETECTION: Check for potential aliases and create ALIAS_OF relationships
-            self._detect_and_create_aliases(extraction.entities, note_id)
+            # ALIAS DETECTION: Disabled - too risky for false positives
+            # The deterministic find_name_variants() handles common patterns
+            # (Bob→Robert, Jr. variants, etc.) without LLM-based guessing
+            # self._detect_and_create_aliases(extraction.entities, note_id)
 
         # 2. CONCEPTS (Batch with Academic Relationships)
         if extraction.concepts:
