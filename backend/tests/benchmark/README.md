@@ -63,18 +63,16 @@ python ../batch-note-processing/batch_ingest.py tests/benchmark/hotpotqa_notes/ 
 
 ```bash
 # With RAGAS metrics (uses local Ollama by default)
-python tests/benchmark/evaluate_ragas.py --dataset musique --use-ragas --verbose # MuSiQue
-python tests/benchmark/evaluate_ragas.py --dataset hotpotqa --use-ragas --verbose # HotPotQA
-
-# Without RAGAS (basic metrics only)
-python tests/benchmark/evaluate_ragas.py --dataset musique --verbose
+python tests/benchmark/evaluate.py --dataset musique --verbose  # MuSiQue
+python tests/benchmark/evaluate.py --dataset hotpotqa --verbose  # HotPotQA
 ```
 
 ## Metrics Explained
 
-### Answer Quality (Basic)
-- **Exact Match**: Answer matches ground truth exactly (after normalization)
-- **Fuzzy Match**: Answers are similar (Jaccard similarity ≥ 0.8)
+### Answer Quality
+- **Exact Match (EM)**: Answer matches ground truth exactly (after normalization)
+- **F1 Score**: ⭐ **Standard QA benchmark metric** - Token-level overlap between predicted and ground truth answers (used in SQuAD, HotpotQA papers)
+- **Fuzzy Match**: Answers are similar (Jaccard similarity ≥ 0.6)
 - **Contains Answer**: Ground truth appears in the response
 
 ### Retrieval Quality

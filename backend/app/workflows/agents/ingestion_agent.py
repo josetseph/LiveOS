@@ -4,15 +4,15 @@ from app.services.llm import llm_service
 from app.services.embedding import embedding_service
 from app.services.multimedia import multimedia_service
 from app.schemas.extraction import Extraction, NoteInput
-from app.core.logging_config import get_component_logger
+from app.core.log import get_logger
 import uuid
 from datetime import datetime
 import asyncio
 
-logger = get_component_logger("IngestionPipeline")
+logger = get_logger("IngestionPipeline")
 
-# Global Concurrency Limit: 2 parallel ingestions max to protect Supabase/Ollama
-concurrency_limit = asyncio.Semaphore(2)
+# Global Concurrency Limit: 1 (sequential) to prevent Gemini API rate limiting/slowdown
+concurrency_limit = asyncio.Semaphore(1)
 
 
 # 1. Define Agent State
@@ -46,7 +46,7 @@ async def multimodal_node(state: IngestionState):
     # BUT, we can add it here as a "Gatekeeper" in the first node.
     async with concurrency_limit:
         logger.info(
-            f"Sempahore Acquired. (Active: {2 - concurrency_limit._value + 1 if hasattr(concurrency_limit, '_value') else '?'})"
+            f"Sempahore Acquired. (Active: {1 - concurrency_limit._value + 1 if hasattr(concurrency_limit, '_value') else '?'})"
         )
         # Proceed logic...
         content = state["input"].content or ""
@@ -92,6 +92,38 @@ async def multimodal_node(state: IngestionState):
                 content += f"\n\n[PDF Extraction ({filename})]: {pdf_text}"
                 changed = True
 
+            # --- WORD DOCUMENT ---
+            elif lower_url.endswith(".docx"):
+                logger.info("Detected Word document. Extracting text...")
+                doc_text = await asyncio.to_thread(
+                    multimedia_service.extract_text_from_docx, url
+                )
+                snippet = (
+                    doc_text[:100].replace("\n", " ") + "..."
+                    if len(doc_text) > 100
+                    else doc_text
+                )
+                logger.info(f'Word Result ({len(doc_text)} chars): "{snippet}"')
+                content += f"\n\n[Word Extraction ({filename})]: {doc_text}"
+                changed = True
+
+            # --- SPREADSHEETS ---
+            elif lower_url.endswith((".xlsx", ".xls", ".csv", ".tsv")):
+                logger.info("Detected spreadsheet. Extracting text...")
+                sheet_text = await asyncio.to_thread(
+                    multimedia_service.extract_text_from_spreadsheet, url
+                )
+                snippet = (
+                    sheet_text[:100].replace("\n", " ") + "..."
+                    if len(sheet_text) > 100
+                    else sheet_text
+                )
+                logger.info(
+                    f'Spreadsheet Result ({len(sheet_text)} chars): "{snippet}"'
+                )
+                content += f"\n\n[Spreadsheet Extraction ({filename})]: {sheet_text}"
+                changed = True
+
             # --- IMAGE ---
             elif lower_url.endswith((".jpg", ".jpeg", ".png", ".webp")):
                 logger.info(f"Detected Image. Describing...")
@@ -120,11 +152,12 @@ async def multimodal_node(state: IngestionState):
         )
 
     # Calculate Complexity for "Refiner" Level
-    # Heuristic: If content is very long (>3000 chars), mark as complex.
+    # Heuristic: Mark as complex if note is long OR extraction will likely be rich
+    # Will be re-evaluated after extraction based on actual entity/concept count
     is_complex = len(content) > 3000
     if is_complex:
         logs.append(
-            f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Note marked as COMPLEX (Tier 2 Refinement Enabled)."
+            f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Note marked as COMPLEX by length (Tier 2 Refinement Enabled)."
         )
 
     t_end = time.perf_counter()
@@ -184,9 +217,9 @@ async def extraction_node(state: IngestionState):
     1. Return ONLY a single valid JSON object.
     
     2. ENTITY EXTRACTION (CRITICAL - ISOLATED CONTEXT):
-       - TYPES: Person, Place, Tool, Organization, Anonymous
-       - ANONYMOUS ENTITIES: If someone is described but not named (e.g., "the guy who stole from me", "my neighbor"), 
-         extract them with type "Anonymous" and a descriptive name (e.g., "The Thief", "My Neighbor").
+       - TYPES: Person, Place, Tool, Organization, OR any descriptive type that fits the context
+       - DESCRIPTIVE TYPES: Always infer a meaningful type from context. If someone is not named, use a descriptive type.
+         Examples: "Thief" (not Anonymous), "Neighbor", "Colleague", "Friend", "Doctor", "Teacher"
        - **isolated_context**: For EACH entity, provide ALL sentences/paragraphs that discuss THIS entity specifically.
          * Include sentences where the entity is named
          * Include follow-up sentences using pronouns (he/she/they/him/her) that refer to THIS entity
@@ -197,7 +230,7 @@ async def extraction_node(state: IngestionState):
        Note: "I like John. He is my friend. The guy who stole from me, I hate him."
        Entities:
        - name: "John", type: "Person", isolated_context: "I like John. He is my friend."
-       - name: "The Thief", type: "Anonymous", isolated_context: "The guy who stole from me, I hate him."
+       - name: "The thief", type: "Thief", isolated_context: "The guy who stole from me, I hate him."
        
        EXAMPLE 2 (Multi-paragraph):
        Note: "I saw John today. He was happy about his math test results.
@@ -299,9 +332,27 @@ async def extraction_node(state: IngestionState):
             f"Extracted: {len(extraction.entities)} entities, {len(extraction.concepts)} concepts, {len(extraction.references)} references."
         )
         logger.info(f"Domain: {extraction.domain}")
+
+        # HYBRID COMPLEXITY CHECK: Re-evaluate after extraction
+        # If extraction found many entities/concepts, note is complex (needs refinement)
+        extraction_quality = len(extraction.entities) + len(extraction.concepts)
+        if extraction_quality >= 8:  # Rich extraction = complex note
+            state["is_complex"] = True
+            logs.append(
+                f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Note marked as COMPLEX by extraction richness ({extraction_quality} nodes) - Refinement enabled."
+            )
+            logger.info(
+                f"Note complexity upgraded: {extraction_quality} entities+concepts extracted"
+            )
+
         t_end = time.perf_counter()
         logger.info(f"Extraction took: {t_end - t_start:.4f}s")
-        return {"extraction": extraction, "logs": logs, "status": "EXTRACTED"}
+        return {
+            "extraction": extraction,
+            "logs": logs,
+            "status": "EXTRACTED",
+            "is_complex": state.get("is_complex", False),
+        }
     except Exception as e:
         logger.error(f"Extraction Error: {e}")
         logs.append(f"ERROR: Extraction failed: {e}")
@@ -319,11 +370,16 @@ async def embedding_node(state: IngestionState):
     from app.core.config import settings
 
     logger.info(f"Generating {settings.EMBEDDING_DIMENSIONS}-dim Embedding...")
-    full_vector = await asyncio.to_thread(
-        embedding_service.embed_query, state["content"]
-    )
+    # NOTE: Note-level embeddings are currently unused in retrieval (only node embeddings searched)
+    # Commenting out to save processing time - can re-enable for temporal/narrative features
+    # full_vector = await asyncio.to_thread(
+    #     embedding_service.embed_query, state["content"]
+    # )
+    full_vector = []  # Empty vector (not used)
     t_end = time.perf_counter()
-    logger.info(f"Embedding took: {t_end - t_start:.4f}s")
+    logger.info(
+        f"Embedding generation skipped (note embeddings unused) - {t_end - t_start:.4f}s"
+    )
     return {"embedding": full_vector, "logs": logs, "status": "EMBEDDED"}
 
 
@@ -341,6 +397,7 @@ async def storage_node(state: IngestionState):
     t_start = time.perf_counter()
     note_id = state.get("note_id") or str(uuid.uuid4())
     created_at = state.get("input").created_at or datetime.now().isoformat()
+    custom_title = state.get("input").title  # May be None
 
     from app.workflows.ingestion import ingestion_workflow
 
@@ -353,6 +410,7 @@ async def storage_node(state: IngestionState):
             state["extraction"],
             state["embedding"],
             created_at,
+            custom_title,  # Pass custom title if provided
         )
 
         # 2. Sync to Postgres (The Body)
@@ -443,7 +501,6 @@ async def refinement_node(state: IngestionState):
     3. Return valid JSON.
     """
     try:
-        # Use DeepSeek-R1 (Architect) to find what it missed
         patch = await asyncio.to_thread(
             llm_service.extract_structured, prompt, Extraction
         )

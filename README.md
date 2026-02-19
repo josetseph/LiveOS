@@ -221,42 +221,57 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 ## 2. The Retrieval System ("The Voice")
 
-1.  **Semantic Snippet Retrieval Pipeline**:
-    *   **Step 1: LLM Query Analysis**: Uses structured outputs to extract intent, entities, concepts, and temporal signals from the query
-    *   **Step 2: Graph Nodes** (Long-Term Wisdom): Search unified knowledge graph index (20 distilled Concepts, Entities, Tasks, Personas, References)
-    *   **Step 3: Recent Notes** (Short-Term Memory): Fetch 20 most recent notes for current context
-    *   **Step 4: Linked Evidence**: Trace back from graph nodes to source notes that formed them
-    *   **Step 5: Chunking**: Split all note content into overlapping snippets (400 chars, 100 overlap)
-    *   **Step 6: Relationship Expansion**: Expand graph nodes with related nodes before ranking
-    *   **Step 7: Symbolic Ranking**: Score all candidates using pure priority-based scoring (no neural reranker)
+LiveOS uses an **empirically optimized GraphRAG retrieval system** that was systematically tested and refined (Feb 9-10, 2026). After testing 6 refinements, the system achieved **45% exact match, 75% fuzzy match, 32.8s avg latency** on HotpotQA multi-hop questions with 0% error rate.
 
-2.  **Pure Symbolic Ranking**:
-    *   **Philosophy**: Trust the graph. If the user asks about "svtlottery", nodes named "svtlottery" are definitionally relevant.
-    *   **Primary Nodes** (name matches query entities): `base_score = 100.0`, marked `symbolic_immune = True`
-    *   **Secondary Nodes** (related via graph): `base_score = 50.0`
-    *   **Final Score**: `base_score × entity_boost × keyword_boost`
-    *   **Performance**: Instant ranking (~0.0001s vs ~2.0s with neural reranker)
+### Empirically Validated Design
 
-3.  **Smart Query Analysis**:
-    *   **LLM-Powered**: Uses Gemma3 structured outputs to extract intent, entities, and concepts
-    *   **Heuristic Fallback**: Detects capitalized words, quoted terms, words after "at/with/about/for/working"
-    *   **Entity Detection**: Extracts mentioned entity/concept names for priority scoring
-    *   **Example Behavior**: "job at livecops" → "livecops" detected as entity, nodes named "livecops" get primary priority
+**What Makes It Work:**
+*   **Pure Symbolic Ranking**: No neural reranking. Consensus summaries + semantic similarity + type matching + vector scores already capture relevance optimally for GraphRAG.
+*   **Wider Vector Nets** (`min_score=0.60`): GraphRAG's consensus-based node summaries benefit from broader recall than traditional RAG.
+*   **Focused Neighbor Expansion** (15 nodes): Empirically optimal balance between context breadth and noise reduction.
+*   **LLM-Only Temporal Detection**: Disabled keyword heuristics ("recent", "latest") which added false positives. LLM analysis alone is more accurate.
+*   **Domain Boost** (2.0x/1.3x/1.0x tiered): Lightweight cross-domain query support without latency impact.
 
-4.  **Fact Pool Context Format**:
-    *   **Unified Format**: Single pool of evidence with semantic labels instead of rigid sections
-    *   **`[CORE CONSENSUS]`**: Graph consensus summaries (highest trust)
-    *   **`[RELATED CONTEXT]`**: Related node summaries
-    *   **`[DOMAIN OVERVIEW]`**: Community-level summaries
-    *   **`[CONNECTION PATH]`**: Multi-hop relationship chains
-    *   **Design**: LLM synthesizes across all facts naturally rather than treating sections separately
+**What Was Tested and Didn't Work:**
+*   ❌ **Adaptive Vector Thresholds** (min_score 0.50-0.70): Stricter thresholds filtered relevant multi-hop context, degraded quality by 1%.
+*   ❌ **More Neighbor Expansion** (20 vs 15 nodes): Added noise and graph overhead, degraded quality by 4.3% and increased latency by 46%.
+*   ❌ **Neural Reranking** (qwen3-reranker CrossEncoder): Catastrophic failure—degraded quality by 4.3%, increased latency by 237% (31s→104s), introduced 7% error rate due to model inference bottleneck.
 
-5.  **Conversational "Thoughtful Peer" Synthesis**: **Gemma3 4B** with persona-based prompting:
-    *   **Style**: "Write like a thoughtful peer reflecting back"
-    *   **No Rigid Headers**: Avoids formulaic "DIRECT ANSWER:" or "KEY INSIGHTS:" patterns
-    *   **Natural Voice**: "You mentioned..." rather than "The notes reveal..."
-    *   **Strict Grounding**: Every claim must trace to context, no invented information
-    *   **Domain-Aware**: Adapts tone for Academic/Personal/Professional/Creative content
+**Lesson:** GraphRAG's consensus-based node summaries already distill meaning. Complexity (adaptive thresholds, neural models) degrades performance. Simplification (disable heuristics) improves both quality (+2%) and speed (-23%).
+
+### Retrieval Pipeline
+
+1.  **LLM Query Analysis** (Gemma3 structured outputs):
+    *   Extracts intent, entities, concepts, temporal signals
+    *   No keyword heuristics—LLM analysis is more accurate
+    *   Example: "job at livecops" → detected entity "livecops"
+
+2.  **Graph-First Search** (Long-Term Wisdom):
+    *   Search 20 knowledge nodes (Concepts, Entities, Tasks, Personas, References)
+    *   Use neighborhood summaries (incrementally updated consensus knowledge)
+    *   Expand from top 15 primary nodes only (precision over breadth)
+
+3.  **Domain-Aware Boosting**:
+    *   **2.0x boost**: Exact domain match (Academic query → Academic notes)
+    *   **1.3x boost**: Related domains (Academic ↔ Professional, Personal ↔ Creative)
+    *   **1.0x boost**: No domain match
+
+4.  **Pure Symbolic Scoring** (50% semantic + 30% type + 20% vector):
+    *   Primary nodes (name matches query entities): high priority
+    *   Secondary nodes (related via graph): lower priority
+    *   Instant ranking (~0.0001s vs ~2s with neural reranker)
+
+5.  **Fact Pool Context Format**:
+    *   Unified evidence pool with semantic labels: `[CORE CONSENSUS]`, `[RELATED CONTEXT]`, `[DOMAIN OVERVIEW]`, `[CONNECTION PATH]`
+    *   LLM synthesizes across all facts naturally (no rigid sections)
+
+6.  **Conversational "Thoughtful Peer" Synthesis** (Gemma3 4B):
+    *   Domain-aware tone (Academic: pedagogical, Personal: empathetic, Professional: action-focused, Creative: thematic)
+    *   Natural voice: "You mentioned..." not "The notes reveal..."
+    *   Strict grounding: Every claim traces to context
+    *   No formulaic headers or invented information
+
+**Performance:** 45% exact match, 62% F1 score, 75% fuzzy match on multi-hop questions (HotpotQA benchmark, 100 questions, Feb 2026). Note: F1 score is the standard QA benchmark metric using token-level overlap.
 
 ---
 

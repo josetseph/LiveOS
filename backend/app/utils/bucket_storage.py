@@ -1,10 +1,10 @@
 from botocore.client import Config
 from aioboto3 import session as aioboto3_session
 from app.core.config import settings
-from app.core.logging_config import get_component_logger
+from app.core.log import get_logger
 
 # Initialize logging
-logger = get_component_logger("BucketStorage")
+logger = get_logger("BucketStorage")
 
 # Configuration for the S3 client, including retry strategy
 my_config = Config(

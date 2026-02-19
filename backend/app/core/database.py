@@ -2,9 +2,9 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.pool import NullPool
 from app.core.config import settings
-from app.core.logging_config import get_component_logger
+from app.core.log import get_logger
 
-logger = get_component_logger("DatabaseService")
+logger = get_logger("DatabaseService")
 
 # Use Transaction Pooler URL (Preferred for Asyncpg/Supabase/Local Docker)
 DATABASE_URL = settings.DATABASE_TRANSACTION_POOLER_URL

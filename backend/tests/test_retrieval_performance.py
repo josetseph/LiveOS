@@ -9,11 +9,13 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import asyncio
+import json
 from datetime import datetime
+from pathlib import Path
 from app.services.retrieval import retrieval_service
 
 
-async def test_retrieval(query: str, test_number: int):
+async def test_retrieval(query: str, test_number: int, markdown_lines=None):
     """Test retrieval for a single query and display detailed results."""
 
     print("\n" + "=" * 80)
@@ -28,9 +30,32 @@ async def test_retrieval(query: str, test_number: int):
     print(f"\n⏱️  Retrieval Time: {duration:.2f}s")
     print(f"📊 Total Results: {len(results)}")
 
+    section_lines = [
+        f"## Test {test_number}",
+        "",
+        f"**Query:** {query}",
+        "",
+        f"- Retrieval Time: `{duration:.2f}s`",
+        f"- Total Results: `{len(results)}`",
+    ]
+
     if not results:
         print("\n❌ No results returned!")
-        return
+        section_lines.append("- No results returned.")
+        section_lines.append("")
+        if markdown_lines is not None:
+            markdown_lines.extend(section_lines)
+        return {
+            "query": query,
+            "duration": duration,
+            "total_results": 0,
+            "temporal_count": 0,
+            "graph_count": 0,
+            "evidence_count": 0,
+            "relevance_pct": 0.0,
+            "scores_descending": False,
+            "query_entities": [],
+        }
 
     # Analyze result distribution
     temporal_count = sum(
@@ -46,15 +71,27 @@ async def test_retrieval(query: str, test_number: int):
     print(f"   • Graph Nodes: {graph_count}")
     print(f"   • Evidence (Linked Notes): {evidence_count}")
 
-    # Show top results in detail
-    print(f"\n🔍 Top 10 Results:")
+    section_lines.extend(
+        [
+            "",
+            "### Result Breakdown",
+            "",
+            f"- Temporal (Recent Notes): `{temporal_count}`",
+            f"- Graph Nodes: `{graph_count}`",
+            f"- Evidence (Linked Notes): `{evidence_count}`",
+            "",
+        ]
+    )
+
+    # Show all results in detail without truncation
+    print(f"\n🔍 All Results ({len(results)}):")
     print("-" * 80)
 
-    for i, result in enumerate(results[:10], 1):
+    for i, result in enumerate(results, 1):
         result_type = result.get("type", "unknown")
         score = result.get("score", 0.0)
         is_recent = result.get("is_recent", False)
-        text = result.get("text", "")
+        text = result.get("text", "") or ""
 
         # Format display
         type_label = (
@@ -62,11 +99,6 @@ async def test_retrieval(query: str, test_number: int):
             if is_recent and result_type == "note"
             else "🧠 GRAPH NODE" if result_type == "graph_consensus" else "🔗 EVIDENCE"
         )
-
-        # Truncate text for display
-        display_text = text[:150].replace("\n", " ").strip()
-        if len(text) > 150:
-            display_text += "..."
 
         # Additional metadata
         metadata = []
@@ -90,7 +122,41 @@ async def test_retrieval(query: str, test_number: int):
         print(f"\n{i}. [{type_label}] Score: {score:.4f}")
         if metadata:
             print(f"   {' | '.join(metadata)}")
-        print(f"   {display_text}")
+        print("   Full Text:")
+        print(text if text else "   <empty>")
+        print("   Full Payload:")
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+        section_lines.extend(
+            [
+                f"### Result {i}",
+                "",
+                f"- Type: `{result_type}`",
+                f"- Label: `{type_label}`",
+                f"- Score: `{score:.4f}`",
+                f"- Is Recent: `{is_recent}`",
+            ]
+        )
+        if metadata:
+            section_lines.append(f"- Metadata: {' | '.join(metadata)}")
+
+        section_lines.extend(
+            [
+                "",
+                "#### Full Text",
+                "",
+                "```text",
+                text if text else "<empty>",
+                "```",
+                "",
+                "#### Full Payload",
+                "",
+                "```json",
+                json.dumps(result, indent=2, ensure_ascii=False, default=str),
+                "```",
+                "",
+            ]
+        )
 
     # Show score distribution
     print(f"\n📊 Score Distribution:")
@@ -99,6 +165,16 @@ async def test_retrieval(query: str, test_number: int):
         print(f"   • Highest: {max(scores):.4f}")
         print(f"   • Lowest: {min(scores):.4f}")
         print(f"   • Average: {sum(scores)/len(scores):.4f}")
+        section_lines.extend(
+            [
+                "### Score Distribution",
+                "",
+                f"- Highest: `{max(scores):.4f}`",
+                f"- Lowest: `{min(scores):.4f}`",
+                f"- Average: `{sum(scores)/len(scores):.4f}`",
+                "",
+            ]
+        )
 
     # Check if results are relevant (basic heuristic)
     print(f"\n🎯 Relevance Check:")
@@ -115,9 +191,18 @@ async def test_retrieval(query: str, test_number: int):
     print(
         f"   {relevant_count}/10 top results contain query terms ({relevance_pct:.0f}%)"
     )
+    section_lines.extend(
+        [
+            "### Relevance Check",
+            "",
+            f"- `{relevant_count}/10` top results contain query terms (`{relevance_pct:.0f}%`)",
+            "",
+        ]
+    )
 
     # Priority order verification (NEW: Check weighted scoring works correctly)
     print(f"\n📋 Weighted Scoring Verification:")
+    section_lines.extend(["### Weighted Scoring Verification", ""])
 
     # Extract query entities for checking
     import re
@@ -136,7 +221,7 @@ async def test_retrieval(query: str, test_number: int):
     # Check that results are sorted by final_score descending
     scores_descending = True
     prev_score = float("inf")
-    for result in results[:20]:
+    for result in results:
         current_score = result.get("final_score", result.get("score", 0))
         if current_score > prev_score:
             scores_descending = False
@@ -145,44 +230,61 @@ async def test_retrieval(query: str, test_number: int):
 
     if scores_descending:
         print(f"   ✓ Results correctly sorted by weighted final_score (descending)")
+        section_lines.append("- Results correctly sorted by weighted final_score (descending): `True`")
     else:
         print(f"   ✗ Results NOT sorted by score - ranking issue!")
+        section_lines.append("- Results correctly sorted by weighted final_score (descending): `False`")
 
     # Check that entity matches get boosted for entity queries
     if query_entities:
         entity_boosted_count = 0
-        for i, result in enumerate(results[:10]):
+        for i, result in enumerate(results):
             boosts = result.get("boosts", {})
             if boosts.get("entity_match", 1.0) > 1.0:
                 entity_boosted_count += 1
-        print(f"   • Entity-matched results in top 10: {entity_boosted_count}/10")
+        print(f"   • Entity-matched results: {entity_boosted_count}/{len(results)}")
         if entity_boosted_count > 0:
             print(
                 f"   ✓ Entity boosting working for detected entities: {query_entities}"
             )
+        section_lines.append(
+            f"- Entity-matched results: `{entity_boosted_count}/{len(results)}`"
+        )
+        section_lines.append(f"- Detected query entities: `{query_entities}`")
 
     # Check keyword boost
     keyword_boosted_count = 0
-    for i, result in enumerate(results[:10]):
+    for i, result in enumerate(results):
         boosts = result.get("boosts", {})
         if boosts.get("keyword_match", 1.0) > 1.0:
             keyword_boosted_count += 1
     if keyword_boosted_count > 0:
-        print(f"   • Keyword-matched results in top 10: {keyword_boosted_count}/10")
+        print(f"   • Keyword-matched results: {keyword_boosted_count}/{len(results)}")
         print(f"   ✓ Keyword boosting working")
+    section_lines.append(
+        f"- Keyword-matched results: `{keyword_boosted_count}/{len(results)}`"
+    )
 
     # Check temporal boost for temporal queries
     temporal_query_detected = any(
         "temporal_query" in result.get("boosts", {})
         and result.get("boosts", {}).get("temporal_query", 1.0) > 1.0
-        for result in results[:10]
+        for result in results
     )
     if temporal_query_detected:
         print(f"   ✓ Temporal query boost applied (detected as temporal query)")
+        section_lines.append("- Temporal query boost applied: `True`")
     else:
         print(f"   • No temporal query boost (semantic/entity query)")
+        section_lines.append("- Temporal query boost applied: `False`")
 
     print(f"\n{'='*80}")
+    section_lines.append("")
+    section_lines.append("---")
+    section_lines.append("")
+
+    if markdown_lines is not None:
+        markdown_lines.extend(section_lines)
 
     return {
         "query": query,
@@ -200,6 +302,21 @@ async def test_retrieval(query: str, test_number: int):
 async def run_all_tests():
     """Run all test queries and summarize results."""
 
+    run_timestamp = datetime.now()
+    report_dir = Path(__file__).resolve().parent / "benchmark" / "results"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"retrieval_performance_{run_timestamp:%Y%m%d_%H%M%S}.md"
+
+    markdown_lines = [
+        "# Retrieval & Ranking Performance Test Report",
+        "",
+        f"- Generated At: `{run_timestamp.isoformat(timespec='seconds')}`",
+        f"- Script: `{Path(__file__).name}`",
+        "",
+        "---",
+        "",
+    ]
+
     print("\n" + "🔬" * 40)
     print("RETRIEVAL & RANKING PERFORMANCE TEST SUITE")
     print("🔬" * 40)
@@ -213,7 +330,7 @@ async def run_all_tests():
 
     results = []
     for i, query in enumerate(test_queries, 1):
-        result = await test_retrieval(query, i)
+        result = await test_retrieval(query, i, markdown_lines=markdown_lines)
         results.append(result)
 
         # Brief pause between tests
@@ -267,6 +384,44 @@ async def run_all_tests():
         print("   Consider further optimization of speed or relevance tuning.")
 
     print("=" * 80)
+
+    markdown_lines.extend(
+        [
+            "## Overall Summary",
+            "",
+            f"- Average retrieval time: `{avg_duration:.2f}s`",
+            f"- Total time: `{total_duration:.2f}s`",
+            f"- Average results per query: `{avg_results:.1f}`",
+            f"- Average relevance: `{avg_relevance:.0f}%`",
+            f"- Weighted scoring working: `{'Yes' if weighted_scoring_works else 'No'}`",
+            "",
+            "### Per-Query Breakdown",
+            "",
+        ]
+    )
+
+    for r in results:
+        markdown_lines.extend(
+            [
+                f"- Query: {r['query']}",
+                f"  - Time: `{r['duration']:.2f}s`",
+                f"  - Results: `{r['total_results']}`",
+                f"  - Relevance: `{r['relevance_pct']:.0f}%`",
+                f"  - Distribution: `{r['temporal_count']} temporal, {r['graph_count']} graph, {r['evidence_count']} evidence`",
+            ]
+        )
+
+    markdown_lines.append("")
+    if avg_duration < 20.0 and avg_relevance > 60 and weighted_scoring_works:
+        markdown_lines.append("**Overall Assessment:** `EXCELLENT`")
+    elif avg_duration < 40.0 and avg_relevance > 40 and weighted_scoring_works:
+        markdown_lines.append("**Overall Assessment:** `GOOD`")
+    else:
+        markdown_lines.append("**Overall Assessment:** `NEEDS IMPROVEMENT`")
+    markdown_lines.append("")
+
+    report_path.write_text("\n".join(markdown_lines), encoding="utf-8")
+    print(f"\n📝 Markdown report written to: {report_path}")
 
 
 if __name__ == "__main__":

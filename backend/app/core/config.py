@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     NEO4J_PASSWORD: str = "password"
 
     # LLM Provider Selection
-    LLM_PROVIDER: str = "gemini"  # "ollama", "openai", "gemini", "anthropic"
+    LLM_PROVIDER: str = "ollama"  # "ollama", "openai", "gemini", "anthropic"
     LLM_FALLBACK_PROVIDER: str | None = None  # Optional fallback if primary fails
 
     # LLM (Local - Ollama)
@@ -34,8 +34,6 @@ class Settings(BaseSettings):
     MODEL_FLORENCE_LOCAL: str = "florence-2-large"
     MODEL_WHISPER_HF: str = "openai/whisper-large-v3-turbo"
     MODEL_WHISPER_LOCAL: str = "whisper-large-v3-turbo"
-    MODEL_RERANKER_HF: str = "tomaarsen/qwen3-reranker-0.6b-seq-cls"
-    MODEL_RERANKING_LOCAL: str = "qwen3-reranker-0.6b-seq-cls"
 
     # Model Storage Path
     MODELS_PATH: str = "models"  # Relative to backend root
@@ -80,10 +78,19 @@ class Settings(BaseSettings):
         "postgresql://user:password@127.0.0.1:5433/liveos"
     )
 
+    # Logging
+    LOG_LEVEL: str = "DEBUG"  # "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+
     # Benchmark Mode
     # When True, uses factual/objective prompts instead of personal "You" narrative
     # This is for testing with external datasets (HotpotQA, MuSiQue) where personal framing is inappropriate
     BENCHMARK_MODE: bool = True
+
+    # Embedding Configuration
+    # Dynamic Instruction Generation: When True, uses LLM to generate query-specific
+    # embedding instructions for Qwen3 models. Adds ~0.1-0.2s per query but may improve precision.
+    # When False, uses static PKM-specific instruction.
+    USE_DYNAMIC_EMBEDDING_INSTRUCTION: bool = True
 
 
 settings = Settings()

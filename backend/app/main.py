@@ -4,9 +4,10 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 
 # Setup logging before any other imports
-from app.core.logging_config import setup_logging
+from app.core.log import setup_logging, get_logger
 
 setup_logging()
+logger = get_logger("uvicorn.access")  # Start with API logger to capture startup
 
 app = FastAPI(title="LiveOS Brain API", version="0.1.0")
 
@@ -20,12 +21,19 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Application startup: LiveOS Brain API online")
+
+
 @app.post("/api/v1/upload")
 async def upload_file(file: UploadFile = File(...)):
     """
     Upload a file to R2 Cloud Storage.
     """
     from app.utils.bucket_storage import send_files, get_files
+
+    logger.info(f"Uploading file: {file.filename}")
 
     # Generate unique key
     ext = file.filename.split(".")[-1]
@@ -38,6 +46,8 @@ async def upload_file(file: UploadFile = File(...)):
     # Get Public URL
     url = get_files(filename)
 
+    logger.info(f"File uploaded successfully: {filename} -> {url}")
+
     return {
         "filename": file.filename,
         "url": url,
@@ -48,6 +58,7 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.get("/")
 async def root():
+    logger.debug("Health check hit")
     return {"message": "LiveOS Brain is online", "status": "active"}
 
 

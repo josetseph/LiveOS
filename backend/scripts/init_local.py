@@ -140,7 +140,7 @@ def init_neo4j():
         print(f"❌ Note Vector Index creation failed: {e}")
         raise
 
-    # Create unified knowledge graph vector index for Concepts, Entities, Tasks, Personas, References
+    # Create unified knowledge graph vector index for Concepts, Entities, Tasks, Personas, References, Communities
     print(f"🔄 Creating Unified Knowledge Graph Vector Index...")
     try:
         # Drop old index if exists
@@ -162,7 +162,7 @@ def init_neo4j():
         """
         graph_service.execute_query(query_knowledge_index)
         print(
-            f"✅ Knowledge Graph Vector Index created for :Indexable nodes (Concept, Entity, Task, Persona, Reference)."
+            f"✅ Knowledge Graph Vector Index created for :Indexable nodes (Concept, Entity, Task, Persona, Reference, Community)."
         )
     except Exception as e:
         print(f"❌ Knowledge Graph Vector Index creation failed: {e}")

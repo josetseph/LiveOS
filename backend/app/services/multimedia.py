@@ -3,30 +3,9 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForCausalLM, AutoModelForSpeechSeq2Seq
 from app.core.config import settings
-from app.core.logging_config import get_component_logger
+from app.core.log import get_logger
 
-# Shim for PaddleOCR's dependency on legacy LangChain paths
-import sys
-
-logger = get_component_logger("MultimediaService")
-
-try:
-    import langchain_community.docstore.document as doc
-    import langchain_community.docstore as docstore
-    import langchain_text_splitters as ts
-
-    sys.modules["langchain.docstore"] = docstore
-    sys.modules["langchain.docstore.document"] = doc
-    sys.modules["langchain.text_splitter"] = ts
-    # Sometimes they want specific classes from vectorstores
-    try:
-        import langchain_community.vectorstores as vs
-
-        sys.modules["langchain.vectorstores"] = vs
-    except ImportError:
-        pass
-except ImportError:
-    pass
+logger = get_logger("MultimediaService")
 
 
 class MultimediaService:
@@ -42,7 +21,6 @@ class MultimediaService:
         self.florence_processor = None
         self.whisper_model = None
         self.whisper_processor = None
-        self.ocr = None
 
     def _load_whisper(self):
         if not self.whisper_model:
@@ -116,10 +94,18 @@ class MultimediaService:
             prompt = "<MORE_DETAILED_CAPTION>"
 
             # Wraps inputs in lists to ensure correct processing
-            inputs = self.florence_processor(
+            raw = self.florence_processor(
                 text=[prompt], images=[image], return_tensors="pt"
             )
-            inputs = {k: v.to(self.device) for k, v in inputs.items() if v is not None}
+            model_dtype = next(self.florence_model.parameters()).dtype
+            inputs = {}
+            for k, v in raw.items():
+                if v is None:
+                    continue
+                if torch.is_floating_point(v):
+                    inputs[k] = v.to(device=self.device, dtype=model_dtype)
+                else:
+                    inputs[k] = v.to(self.device)
 
             with torch.no_grad():
                 generated_ids = self.florence_model.generate(
@@ -202,19 +188,15 @@ class MultimediaService:
 
     def extract_text_from_pdf(self, pdf_path: str) -> str:
         """
-        Extracts text from PDF.
-        Strategy:
-        1. Attempt native text extraction via PyMuPDF (fast, accurate for digital PDFs).
-        2. If native text is sparse (< 50 chars/page), fallback to DeepSeek-OCR / VLM (slow, handles scans).
+        Extract text from a PDF using only the native text layer (PyMuPDF).
+        OCR fallback is intentionally disabled.
         """
         import os
 
         local_path = self._download_temp_file(pdf_path)
         extracted_text = []
-        used_ocr = False
 
         try:
-            # --- Strategy 1: Native Text Extraction (PyMuPDF) ---
             try:
                 import fitz  # PyMuPDF
 
@@ -222,87 +204,25 @@ class MultimediaService:
 
                 for i, page in enumerate(doc):
                     text = page.get_text().strip()
-                    # Check text density. If page is mostly empty/scanned, this will be short.
-                    if len(text) > 50:
-                        extracted_text.append(f"--- Page {i+1} ---\n{text}")
-                    else:
-                        # Page might be an image/scan.
-                        # We could mix strategies, but for simplicity, if a page has no text, mark it for OCR?
-                        # For now, let's just collect what we can.
-                        # If the WHOLE document yields little text, we fallback.
-                        pass
+                    extracted_text.append(f"--- Page {i+1} ---\n{text}")
 
                 doc.close()
-
-                full_native_text = "\n\n".join(extracted_text)
-
-                # Heuristic: If we got a decent amount of text, return it.
-                if len(full_native_text) > 100:
+                full_native_text = "\n\n".join(extracted_text).strip()
+                if not full_native_text:
                     logger.info(
-                        "PDF Text Extraction: Used Native Text Layer (PyMuPDF)."
+                        "PDF Text Extraction: No native text layer content found."
                     )
-                    return full_native_text
+                    return "PDF contains no extractable native text."
 
-                logger.info(
-                    "PDF Text Extraction: Native text too sparse. Falling back to OCR..."
-                )
-                extracted_text = []  # Reset for OCR
+                logger.info("PDF Text Extraction: Used native text layer (PyMuPDF).")
+                return full_native_text
 
             except ImportError:
-                logger.error(
-                    "PyMuPDF (fitz) not installed. Skipping native text check."
-                )
+                logger.error("PyMuPDF (fitz) not installed.")
+                return "PDF extraction unavailable: PyMuPDF (fitz) is not installed."
             except Exception as e:
-                logger.error(f"PyMuPDF failed: {e}. Falling back to OCR.")
-
-            # --- Strategy 2: Vision Model (DeepSeek-OCR) ---
-            # Fallback for Scanned PDFs or images
-            from pdf2image import convert_from_path
-            import io
-            import base64
-            from app.core.config import settings
-            from openai import OpenAI
-
-            logger.info(f"Converting PDF {local_path} to images for OCR...")
-            images = convert_from_path(local_path)
-
-            client = OpenAI(
-                base_url=f"{settings.OLLAMA_BASE_URL}/v1",
-                api_key="ollama",
-            )
-
-            for i, img in enumerate(images):
-                logger.info(f"Processing PDF Page {i+1}/{len(images)} (OCR)...")
-
-                # Convert PIL image to base64
-                buffered = io.BytesIO()
-                img.save(buffered, format="JPEG")
-                img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-                response = client.chat.completions.create(
-                    model=settings.MODEL_VISION,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": "Extract all text from this document image. Return only the text content, no markdown or comments. Preserve layout.",
-                                },
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{img_str}"
-                                    },
-                                },
-                            ],
-                        }
-                    ],
-                )
-                page_text = response.choices[0].message.content
-                extracted_text.append(f"--- Page {i+1} ---\n{page_text}")
-
-            return "\n\n".join(extracted_text)
+                logger.error(f"PyMuPDF failed: {e}")
+                return f"PDF extraction failed: {e}"
 
         except Exception as e:
             return f"PDF Extraction Failed: {e}"
@@ -310,6 +230,133 @@ class MultimediaService:
             if (
                 "local_path" in locals()
                 and local_path != pdf_path
+                and os.path.exists(local_path)
+            ):
+                os.remove(local_path)
+
+    def extract_text_from_docx(self, docx_path: str) -> str:
+        """
+        Extract text from a Word document (.docx) using native parsing only.
+        """
+        import os
+
+        local_path = self._download_temp_file(docx_path)
+        parts = []
+
+        try:
+            try:
+                import docx
+
+                document = docx.Document(local_path)
+
+                # Paragraph content
+                for paragraph in document.paragraphs:
+                    text = paragraph.text.strip()
+                    if text:
+                        parts.append(text)
+
+                # Table content
+                for idx, table in enumerate(document.tables, start=1):
+                    rows = []
+                    for row in table.rows:
+                        cells = [cell.text.strip() for cell in row.cells]
+                        if any(cells):
+                            rows.append(" | ".join(cells))
+                    if rows:
+                        parts.append(f"--- Table {idx} ---\n" + "\n".join(rows))
+
+                full_text = "\n\n".join(parts).strip()
+                if not full_text:
+                    return "Word document contains no extractable text."
+                return full_text
+
+            except ImportError:
+                return "Word extraction unavailable: python-docx is not installed."
+            except Exception as e:
+                logger.error(f"DOCX extraction failed: {e}")
+                return f"Word extraction failed: {e}"
+
+        finally:
+            if (
+                "local_path" in locals()
+                and local_path != docx_path
+                and os.path.exists(local_path)
+            ):
+                os.remove(local_path)
+
+    def extract_text_from_spreadsheet(self, sheet_path: str) -> str:
+        """
+        Extract text from spreadsheet-like files using native parsing:
+        - .xlsx via openpyxl
+        - .csv/.tsv via stdlib csv
+        """
+        import csv
+        import os
+
+        local_path = self._download_temp_file(sheet_path)
+        lower_path = local_path.lower()
+
+        try:
+            if lower_path.endswith(".xlsx"):
+                try:
+                    from openpyxl import load_workbook
+
+                    workbook = load_workbook(
+                        filename=local_path,
+                        read_only=True,
+                        data_only=True,
+                    )
+                    parts = []
+                    for sheet_name in workbook.sheetnames:
+                        sheet = workbook[sheet_name]
+                        rows = []
+                        for row in sheet.iter_rows(values_only=True):
+                            values = [
+                                str(cell).strip() for cell in row if cell is not None
+                            ]
+                            if values:
+                                rows.append("\t".join(values))
+                        if rows:
+                            parts.append(
+                                f"--- Sheet: {sheet_name} ---\n" + "\n".join(rows)
+                            )
+
+                    workbook.close()
+                    full_text = "\n\n".join(parts).strip()
+                    if not full_text:
+                        return "Spreadsheet contains no extractable text."
+                    return full_text
+
+                except ImportError:
+                    return (
+                        "Spreadsheet extraction unavailable: openpyxl is not installed."
+                    )
+                except Exception as e:
+                    logger.error(f"XLSX extraction failed: {e}")
+                    return f"Spreadsheet extraction failed: {e}"
+
+            if lower_path.endswith((".csv", ".tsv")):
+                delimiter = "\t" if lower_path.endswith(".tsv") else ","
+                rows = []
+                with open(local_path, "r", encoding="utf-8", errors="ignore") as f:
+                    reader = csv.reader(f, delimiter=delimiter)
+                    for row in reader:
+                        values = [cell.strip() for cell in row if cell and cell.strip()]
+                        if values:
+                            rows.append("\t".join(values))
+
+                if not rows:
+                    return "Spreadsheet contains no extractable text."
+                return "\n".join(rows)
+
+            if lower_path.endswith(".xls"):
+                return "Legacy .xls is not supported. Please convert to .xlsx."
+
+            return "Unsupported spreadsheet format."
+        finally:
+            if (
+                "local_path" in locals()
+                and local_path != sheet_path
                 and os.path.exists(local_path)
             ):
                 os.remove(local_path)

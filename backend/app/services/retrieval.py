@@ -1,31 +1,16 @@
 import os
 import logging
+import time
 from datetime import datetime
 from typing import List
 from app.core.config import settings
-from app.core.logging_config import get_component_logger
+from app.core.log import get_logger
 from app.services.graph import graph_service
 
 # Suppress noisy tokenizer warnings
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
-logger = get_component_logger("RetrievalService")
-
-# Create a dedicated retrieval debug logger that writes full details to file
-retrieval_debug_logger = logging.getLogger("retrieval_debug")
-retrieval_debug_logger.setLevel(logging.DEBUG)
-# Only add handler if not already present
-if not retrieval_debug_logger.handlers:
-    # Create logs directory if needed
-    logs_dir = os.path.join(os.path.dirname(__file__), "../../logs")
-    os.makedirs(logs_dir, exist_ok=True)
-    # File handler for detailed retrieval logs
-    retrieval_log_path = os.path.join(logs_dir, "retrieval_debug.log")
-    file_handler = logging.FileHandler(retrieval_log_path, mode="a", encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
-    retrieval_debug_logger.addHandler(file_handler)
-    logger.info(f"Retrieval debug logging enabled: {retrieval_log_path}")
+logger = get_logger("RetrievalService")
 
 # Stopwords to filter from LLM-extracted entities
 # These are common words that match everything and provide no signal
@@ -149,8 +134,7 @@ class RetrievalService:
         self.models_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), f"../../{settings.MODELS_PATH}")
         )
-        # No reranker needed - using pure symbolic ranking for GraphRAG
-        logger.info("RetrievalService initialized (symbolic ranking mode)")
+        logger.info("RetrievalService initialized (hybrid symbolic+rerank mode)")
 
     def _log_retrieval_details(
         self,
@@ -163,89 +147,134 @@ class RetrievalService:
         Log detailed retrieval results to dedicated file for debugging.
         Includes full node summaries, not truncated versions.
         """
-        retrieval_debug_logger.debug("=" * 100)
-        retrieval_debug_logger.debug(f"RETRIEVAL SESSION: {datetime.now().isoformat()}")
-        retrieval_debug_logger.debug(f"QUERY: {query}")
-        retrieval_debug_logger.debug(f"EXTRACTED ENTITIES: {query_entities}")
-        retrieval_debug_logger.debug(f"EXTRACTED CONCEPTS: {query_concepts}")
-        retrieval_debug_logger.debug("=" * 100)
+        logger.debug("=" * 100)
+        logger.debug(f"RETRIEVAL SESSION: {datetime.now().isoformat()}")
+        logger.debug(f"QUERY: {query}")
+        logger.debug(f"EXTRACTED ENTITIES: {query_entities}")
+        logger.debug(f"EXTRACTED CONCEPTS: {query_concepts}")
+        logger.debug("=" * 100)
 
         for i, doc in enumerate(results):
-            retrieval_debug_logger.debug(f"\n--- RESULT {i+1} ---")
-            retrieval_debug_logger.debug(f"TYPE: {doc.get('type', 'unknown')}")
-            retrieval_debug_logger.debug(f"SCORE: {doc.get('final_score', 0):.2f}")
-            retrieval_debug_logger.debug(f"BOOSTS: {doc.get('boosts', {})}")
-            retrieval_debug_logger.debug(
-                f"SYMBOLIC IMMUNE: {doc.get('symbolic_immune', False)}"
-            )
+            logger.debug(f"\n--- RESULT {i+1} ---")
+            logger.debug(f"TYPE: {doc.get('type', 'unknown')}")
+            logger.debug(f"SCORE: {doc.get('final_score', 0):.2f}")
+            logger.debug(f"BOOSTS: {doc.get('boosts', {})}")
+            logger.debug(f"SYMBOLIC IMMUNE: {doc.get('symbolic_immune', False)}")
 
             # Get node details from original object
             original = doc.get("original_obj", {})
             if original:
-                retrieval_debug_logger.debug(
-                    f"NODE NAME: {original.get('name', 'N/A')}"
-                )
-                retrieval_debug_logger.debug(
-                    f"NODE LABELS: {original.get('labels', [])}"
-                )
-                retrieval_debug_logger.debug(
-                    f"NODE TYPE: {original.get('type', 'N/A')}"
-                )
+                logger.debug(f"NODE NAME: {original.get('name', 'N/A')}")
+                logger.debug(f"NODE LABELS: {original.get('labels', [])}")
+                logger.debug(f"NODE TYPE: {original.get('type', 'N/A')}")
 
                 # Full summary - not truncated!
                 summary = original.get("summary") or original.get("description", "")
-                retrieval_debug_logger.debug(f"FULL SUMMARY ({len(summary)} chars):")
-                retrieval_debug_logger.debug(summary if summary else "(empty)")
+                logger.debug(f"FULL SUMMARY ({len(summary)} chars):")
+                logger.debug(summary if summary else "(empty)")
 
                 # Isolated context if available
                 isolated = original.get("isolated_context", "")
                 if isolated:
-                    retrieval_debug_logger.debug(
-                        f"ISOLATED CONTEXT ({len(isolated)} chars):"
-                    )
-                    retrieval_debug_logger.debug(isolated)
+                    logger.debug(f"ISOLATED CONTEXT ({len(isolated)} chars):")
+                    logger.debug(isolated)
 
             # Linked notes
             linked_notes = doc.get("linked_notes", [])
             if linked_notes:
-                retrieval_debug_logger.debug(f"LINKED NOTES ({len(linked_notes)}):")
+                logger.debug(f"LINKED NOTES ({len(linked_notes)}):")
                 for note in linked_notes[:3]:
-                    retrieval_debug_logger.debug(
+                    logger.debug(
                         f"  - {note.get('title', 'Untitled')} ({note.get('id', 'N/A')})"
                     )
 
             # Full text sent to LLM
-            retrieval_debug_logger.debug(
-                f"TEXT SENT TO LLM ({len(doc.get('text', ''))} chars):"
-            )
-            retrieval_debug_logger.debug(
+            logger.debug(f"TEXT SENT TO LLM ({len(doc.get('text', ''))} chars):")
+            logger.debug(
                 doc.get("text", "")[:1000] + "..."
                 if len(doc.get("text", "")) > 1000
                 else doc.get("text", "")
             )
 
-        retrieval_debug_logger.debug("\n" + "=" * 100 + "\n")
+        logger.debug("\n" + "=" * 100 + "\n")
 
-    def _chunk_text(
-        self, text: str, chunk_size: int = 400, overlap: int = 100
-    ) -> List[str]:
+    def _get_node_relationships(self, node: dict, max_relationships: int = 5) -> str:
         """
-        Split text into overlapping chunks for granular retrieval.
-        Using character-based windowing for simplicity.
-        """
-        if not text:
-            return []
-        if len(text) <= chunk_size:
-            return [text]
+        Fetch and format 1-hop relationships for a node to provide connection context.
 
-        chunks = []
-        for i in range(0, len(text), chunk_size - overlap):
-            chunk = text[i : i + chunk_size]
-            if len(chunk) > 50:  # Ignore tiny scraps
-                chunks.append(chunk)
-            if i + chunk_size >= len(text):
-                break
-        return chunks
+        Args:
+            node: Node dict from Neo4j
+            max_relationships: Maximum number of relationships to include
+
+        Returns:
+            Formatted relationship string, or empty if no relationships found
+        """
+        from app.services.graph import graph_service
+
+        try:
+            node_name = node.get("name", "")
+            if not node_name:
+                return ""
+
+            label = (
+                node.get("labels", ["Entity"])[0]
+                if isinstance(node.get("labels"), list)
+                else "Entity"
+            )
+
+            # Fetch 1-hop relationships
+            related_nodes = graph_service.get_related_nodes(
+                node_name=node_name, node_label=label, max_depth=1, min_confidence=0.5
+            )
+
+            if not related_nodes:
+                return ""
+
+            # Format relationships for LLM
+            relationships = []
+            for related in related_nodes[:max_relationships]:
+                rel_name = related.get("name", "Unknown")
+                rel_path = related.get("relationship_path", [])
+                context_path = related.get("context_path", [])
+
+                if rel_path:
+                    # Prioritize natural language context over technical relationship type
+                    # Context contains the actual sentence like "Edward Wood directed Ed Wood"
+                    if context_path and context_path[0]:
+                        # Use the natural language context directly
+                        rel_str = context_path[0]
+                        # Truncate if too long, but keep meaningful amount
+                        if len(rel_str) > 150:
+                            rel_str = rel_str[:150] + "..."
+                    else:
+                        # Fallback to technical format if no context available
+                        rel_type = rel_path[0]
+                        rel_str = f"{rel_type} → {rel_name}"
+
+                    relationships.append(rel_str)
+
+            if relationships:
+                return " | Connections: " + "; ".join(relationships)
+
+            return ""
+
+        except Exception as e:
+            logger.debug(
+                f"  [Relationships] Failed to fetch for {node.get('name', 'unknown')}: {e}"
+            )
+            return ""
+
+    def _get_node_text(self, node: dict) -> str:
+        """
+        Extract text content from a node.
+
+        Args:
+            node: Node dict from Neo4j
+
+        Returns:
+            Summary text
+        """
+        return node.get("summary") or node.get("description", "")
 
     async def hybrid_search(self, query: str, top_k: int = 20) -> List[dict]:
         """
@@ -264,7 +293,6 @@ class RetrievalService:
 
         Returns node summaries as primary evidence, not chunked note snippets.
         """
-        import time
         from app.services.embedding import embedding_service
 
         logger.info(f"  [Retrieval] Hybrid Search for: '{query}'")
@@ -286,17 +314,41 @@ class RetrievalService:
         # ============ ENTITY EXTRACTION ============
         # Extract named entities from query using the same logic as ingestion
         # This ensures we can find explicitly named entities like "Albert Einstein"
-        llm_entities = query_analysis.get("entities", [])
+        llm_entities_raw = query_analysis.get("entities", [])
 
         # Also extract proper names using Title Case pattern detection
         proper_names = self._extract_proper_names(query)
 
+        # Track what gets filtered for analysis
+        filtered_by_length = []
+        filtered_by_stopwords = []
+
         # Filter out stopwords and short entities
         def is_valid_entity(e: str) -> bool:
             e_lower = e.lower().strip()
-            return len(e_lower) >= 2 and e_lower not in ENTITY_STOPWORDS
+            # Track filtering reasons
+            if len(e_lower) < 2:
+                filtered_by_length.append(e)
+                return False
+            if e_lower in ENTITY_STOPWORDS:
+                filtered_by_stopwords.append(e)
+                return False
+            return True
 
-        llm_entities = [e for e in llm_entities if is_valid_entity(e)]
+        llm_entities = [e for e in llm_entities_raw if is_valid_entity(e)]
+
+        # Log filtering statistics
+        if filtered_by_stopwords or filtered_by_length:
+            logger.info(f"  [Entity Filter] Raw LLM entities: {llm_entities_raw}")
+            if filtered_by_stopwords:
+                logger.info(
+                    f"  [Entity Filter] Removed by stopwords: {filtered_by_stopwords}"
+                )
+            if filtered_by_length:
+                logger.info(
+                    f"  [Entity Filter] Removed by length (<2): {filtered_by_length}"
+                )
+            logger.info(f"  [Entity Filter] Final entities: {llm_entities}")
 
         # Merge proper names with LLM entities (proper names may catch multi-word names LLM splits)
         query_entities = list(set(llm_entities))
@@ -312,10 +364,23 @@ class RetrievalService:
             f"Attribute: {question_attribute}"
         )
 
-        # Generate query embedding for vector search
-        full_vector = embedding_service.embed_query(query)
-        t_embedding = time.perf_counter() - t_phase_start
-        logger.info(f"  [⏱️ Timing] Query embedding: {t_embedding:.2f}s")
+        # Generate dynamic embedding instruction for Qwen3 (optional, controlled by config)
+        # This creates query-specific instructions like "Retrieve filmography for person mentioned"
+        # instead of using the generic PKM instruction
+        t_instruction_start = time.perf_counter()
+        use_dynamic_instruction = getattr(settings, 'USE_DYNAMIC_EMBEDDING_INSTRUCTION', False)
+        custom_instruction = None
+        
+        if use_dynamic_instruction:
+            custom_instruction = await llm_service.generate_embedding_instruction(query)
+            t_instruction = time.perf_counter() - t_instruction_start
+            logger.info(f"  [⏱️ Timing] Dynamic instruction generation: {t_instruction:.2f}s")
+        
+        # Generate query embedding for vector search (with optional dynamic instruction)
+        full_vector = embedding_service.embed_query(query, custom_instruction=custom_instruction)
+        # Note: No longer storing query embedding - isolated context filtering disabled
+        t_embedding = time.perf_counter() - t_instruction_start
+        logger.info(f"  [⏱️ Timing] Total query embedding: {t_embedding:.2f}s")
 
         # ============ HYBRID RETRIEVAL ============
         # Combines entity name matching (for explicit mentions) with vector search
@@ -390,9 +455,14 @@ class RetrievalService:
         # This catches entities the user didn't name explicitly
         t_vector_start = time.perf_counter()
         try:
+            # IMPROVEMENT: Reduced top_k (20→12) and increased min_score (0.60→0.70)
+            # to reduce noise from qwen3-embedding:0.6b weak matches
+
+            # Search using summary embeddings for semantic coverage
             vector_results = graph_service.search_knowledge_graph(
-                full_vector, top_k=20, min_score=0.60  # Wider net for vector search
+                full_vector, top_k=12, min_score=0.7
             )
+
             for vnode in vector_results:
                 if vnode["name"] not in node_names_found:
                     vnode["_source"] = "vector"
@@ -446,7 +516,72 @@ class RetrievalService:
         # STEP 3: NEIGHBOR EXPANSION - Get 1-hop neighbors of top results
         # Expand from both entity matches and vector matches
         # This finds related context (e.g., "Albert Einstein" → "Princeton")
+        
+        # PRIORITY: Follow IS_SAME_AS links first (alias resolution)
+        # These links created by alias detector indicate entity identity
         all_primary_nodes = entity_nodes + vector_nodes
+        alias_resolved_nodes = []
+        
+        if all_primary_nodes:
+            logger.info(f"  [Alias] Checking {len(all_primary_nodes)} nodes for IS_SAME_AS links")
+            
+            for node in all_primary_nodes:
+                node_name = node["name"]
+                
+                # Check if this node is an alias (points to canonical entity)
+                alias_query = """
+                MATCH (alias:Entity {name: $name})-[r:IS_SAME_AS]->(canonical:Entity)
+                RETURN canonical.name as canonical_name, 
+                       canonical.summary as summary,
+                       canonical.type as entity_type,
+                       canonical.embedding as embedding,
+                       r.confidence as alias_confidence,
+                       labels(canonical) as labels
+                """
+                
+                alias_results = graph_service.execute_query(alias_query, {"name": node_name})
+                
+                if alias_results:
+                    # Follow the IS_SAME_AS link to canonical entity
+                    canonical = alias_results[0]
+                    canonical_name = canonical["canonical_name"]
+                    alias_confidence = canonical.get("alias_confidence", 1.0)
+                    
+                    logger.info(
+                        f"  [Alias] Resolved '{node_name}' -> '{canonical_name}' "
+                        f"(confidence: {alias_confidence:.2f})"
+                    )
+                    
+                    # KEEP BOTH: alias node (for its unique contexts) AND canonical node (for main info)
+                    # This ensures we don't lose contexts that were specifically attached to the alias
+                    alias_resolved_nodes.append(node)  # Keep the alias node
+                    
+                    # Also add canonical node (if not already present)
+                    canonical_node_names = {n["name"] for n in alias_resolved_nodes}
+                    if canonical_name not in canonical_node_names:
+                        # Create full node dict from canonical entity
+                        canonical_node = {
+                            "name": canonical_name,
+                            "summary": canonical.get("summary"),
+                            "entity_type": canonical.get("entity_type"),
+                            "embedding": canonical.get("embedding"),
+                            "labels": canonical.get("labels", ["Entity"]),
+                            "_source": f"canonical_of_{node_name}",
+                            "_alias_confidence": alias_confidence,
+                        }
+                        alias_resolved_nodes.append(canonical_node)
+                else:
+                    # No alias - keep original node
+                    alias_resolved_nodes.append(node)
+        
+            logger.info(
+                f"  [Alias] After alias resolution: {len(alias_resolved_nodes)} nodes "
+                f"({len(alias_resolved_nodes) - len(all_primary_nodes)} added via IS_SAME_AS)"
+            )
+            
+            # Use alias-resolved nodes for neighbor expansion
+            all_primary_nodes = alias_resolved_nodes
+        
         if all_primary_nodes:
             t_expand_start = time.perf_counter()
             for node in all_primary_nodes[:15]:  # Top 15 primary results
@@ -462,8 +597,67 @@ class RetrievalService:
                         max_depth=1,  # Only 1-hop neighbors
                         min_confidence=0.5,
                     )
-                    # Filter duplicates and add
-                    for neighbor in neighbors[:3]:  # Top 3 neighbors per node
+                    
+                    # Score neighbors by QUERY RELEVANCE, not just confidence
+                    # This ensures we expand to contextually relevant neighbors
+                    # E.g., "Where was Ed Wood born?" → Baltimore (not Johnny Depp)
+                    for neighbor in neighbors:
+                        # 1. Confidence score (relationship strength)
+                        confidence_path = neighbor.get("confidence_path", [])
+                        avg_confidence = (
+                            sum(confidence_path) / len(confidence_path)
+                            if confidence_path
+                            else 0.5
+                        )
+                        
+                        # 2. Keyword relevance (fast heuristic)
+                        # Check if query keywords appear in neighbor summary/name
+                        neighbor_text = f"{neighbor.get('name', '')} {neighbor.get('summary', '')}".lower()
+                        query_keywords = set(query.lower().split()) - {"what", "where", "when", "who", "how", "the", "is", "was", "are", "were"}
+                        keyword_matches = sum(1 for kw in query_keywords if kw in neighbor_text)
+                        keyword_relevance = min(keyword_matches / max(len(query_keywords), 1), 1.0)
+                        
+                        # 3. Type match score (if expected types specified)
+                        neighbor_type = neighbor.get("entity_type", "").lower() if neighbor.get("entity_type") else ""
+                        if expected_entity_types and neighbor_type:
+                            expected_lower = [t.lower() for t in expected_entity_types]
+                            if neighbor_type in expected_lower:
+                                type_relevance = 1.0
+                            else:
+                                # Check synonyms
+                                type_synonyms = {
+                                    "film": ["movie", "cinema"],
+                                    "person": ["actor", "director", "writer"],
+                                    "place": ["location", "city", "country", "venue"],
+                                }
+                                matches_synonym = False
+                                for exp_type in expected_lower:
+                                    synonyms = type_synonyms.get(exp_type, [])
+                                    if neighbor_type in synonyms:
+                                        matches_synonym = True
+                                        break
+                                type_relevance = 0.7 if matches_synonym else 0.2
+                        else:
+                            type_relevance = 0.5  # Neutral if no type filtering
+                        
+                        # Combined selection score: type > keyword > confidence
+                        # Prioritize type match (most important for disambiguation)
+                        neighbor["_selection_score"] = (
+                            type_relevance * 0.5 +
+                            keyword_relevance * 0.3 +
+                            avg_confidence * 0.2
+                        )
+                        neighbor["_avg_confidence"] = avg_confidence
+                        neighbor["_keyword_relevance"] = keyword_relevance
+                        neighbor["_type_relevance"] = type_relevance
+                    
+                    # Sort by selection score (query-aware), not just confidence
+                    neighbors.sort(
+                        key=lambda n: n.get("_selection_score", 0.0), reverse=True
+                    )
+
+                    # Filter duplicates and add top 3 by RELEVANCE
+                    for neighbor in neighbors[:3]:  # Top 3 most relevant neighbors
                         if neighbor["name"] not in node_names_found:
                             neighbor["_source"] = "neighbor"
                             neighbor["_expanded_from"] = node["name"]
@@ -474,9 +668,19 @@ class RetrievalService:
 
             if neighbor_nodes:
                 logger.info(
-                    f"  [Neighbor] Expanded to {len(neighbor_nodes)} 1-hop neighbors: "
+                    f"  [Neighbor] Expanded to {len(neighbor_nodes)} 1-hop neighbors (query-aware): "
                     f"{[n['name'] for n in neighbor_nodes[:10]]}"
                 )
+                # Log selection scores for debugging
+                if neighbor_nodes:
+                    sample = neighbor_nodes[0]
+                    logger.debug(
+                        f"  [Neighbor] Example score - "
+                        f"type: {sample.get('_type_relevance', 0):.2f}, "
+                        f"keyword: {sample.get('_keyword_relevance', 0):.2f}, "
+                        f"confidence: {sample.get('_avg_confidence', 0):.2f}, "
+                        f"combined: {sample.get('_selection_score', 0):.2f}"
+                    )
             t_expand = time.perf_counter() - t_expand_start
             logger.info(f"  [⏱️ Timing] Neighbor expansion: {t_expand:.2f}s")
 
@@ -552,17 +756,21 @@ class RetrievalService:
 
         # A. Entity Nodes (highest priority - direct name matches from query)
         for node in entity_nodes:
-            summary = node.get("summary") or node.get("description", "")
+            summary = self._get_node_text(node)
             if not summary:
-                continue  # Skip nodes without summaries
+                continue  # Skip nodes without content
 
             label = (
                 node.get("labels", ["Entity"])[0]
                 if isinstance(node.get("labels"), list)
                 else "Entity"
             )
+
+            # Add relationship context for multi-hop reasoning
+            rel_context = self._get_node_relationships(node)
+
             # Use [Consensus: Name] to signal this is distilled knowledge
-            text = f"[Consensus - {label}: {node['name']}]: {summary}"
+            text = f"[Consensus - {label}: {node['name']}]{rel_context}: {summary}"
 
             # Attach linked notes for reference traceability (case-insensitive lookup)
             linked_notes = node_to_notes.get(node["name"].lower(), [])
@@ -581,18 +789,28 @@ class RetrievalService:
 
         # B. Vector Nodes (semantically similar to query)
         for node in vector_nodes:
-            summary = node.get("summary") or node.get("description", "")
+            vector_score = node.get("score", 0.0)
+
+            # IMPROVEMENT: Filter weak semantic matches to reduce noise
+            # Threshold tuned for qwen3-embedding:0.6b (lower than nomic)
+            if vector_score < 0.7:
+                continue
+
+            summary = self._get_node_text(node)
             if not summary:
-                continue  # Skip nodes without summaries
+                continue  # Skip nodes without content
 
             label = (
                 node.get("labels", ["Entity"])[0]
                 if isinstance(node.get("labels"), list)
                 else "Entity"
             )
-            vector_score = node.get("score", 0.0)
+
+            # Add relationship context for multi-hop reasoning
+            rel_context = self._get_node_relationships(node)
+
             # Use [Consensus: Name] to signal this is distilled knowledge, not a raw note
-            text = f"[Consensus - {label}: {node['name']}] (similarity: {vector_score:.2f}): {summary}"
+            text = f"[Consensus - {label}: {node['name']}] (similarity: {vector_score:.2f}){rel_context}: {summary}"
 
             # Attach linked notes for reference traceability (case-insensitive lookup)
             linked_notes = node_to_notes.get(node["name"].lower(), [])
@@ -611,7 +829,7 @@ class RetrievalService:
 
         # C. Neighbor Nodes (1-hop expansion from entity/vector results)
         for node in neighbor_nodes:
-            summary = node.get("summary") or node.get("description", "")
+            summary = self._get_node_text(node)
             if not summary:
                 continue
 
@@ -702,6 +920,7 @@ class RetrievalService:
         # ============ RANKING ============
         if not candidates:
             logger.warning("  [Retrieval] No candidates found")
+            self._current_query_embedding = None  # Clean up
             return []
 
         t_ranking_start = time.perf_counter()
@@ -709,8 +928,29 @@ class RetrievalService:
         # ============ ENTITY TYPE SCORING ============
         # If we know the expected entity types (e.g., "Person" for nationality questions),
         # boost candidates that match and penalize those that don't
+        # Uses LLM-based synonym expansion + embedding similarity for fuzzy matching
+        
+        # Cache for type synonyms (avoid repeated LLM calls)
+        type_synonym_cache = {}
+        
+        def get_type_synonyms(entity_type: str) -> list[str]:
+            """Get synonyms for a type using LLM or embedding similarity"""
+            if entity_type.lower() in type_synonym_cache:
+                return type_synonym_cache[entity_type.lower()]
+            
+            # Use LLM to expand synonyms
+            synonyms = llm_service.expand_type_synonyms(entity_type)
+            type_synonym_cache[entity_type.lower()] = synonyms
+            return synonyms
+        
         def get_type_score(candidate) -> float:
-            """Score based on entity type match. 1.0 = match, 0.5 = unknown, 0.0 = mismatch"""
+            """Score based on entity type match. 1.0 = match, 0.5 = unknown, 0.1 = mismatch
+            
+            Uses:
+            1. Direct string match
+            2. LLM-generated synonyms
+            3. Embedding similarity between type names
+            """
             if not expected_entity_types:
                 return 0.5  # No type filtering
 
@@ -724,37 +964,51 @@ class RetrievalService:
             entity_type_lower = entity_type.lower()
             expected_lower = [t.lower() for t in expected_entity_types]
 
-            # Direct match
+            # 1. Direct match
             if entity_type_lower in expected_lower:
                 return 1.0
 
-            # Handle synonyms (e.g., "Film" == "Movie")
-            type_synonyms = {
-                "film": ["movie", "cinema"],
-                "movie": ["film", "cinema"],
-                "person": ["actor", "director", "writer", "musician", "artist"],
-                "venue": ["arena", "stadium", "theater", "place"],
-                "place": ["venue", "location", "city", "country"],
-                "organization": ["company", "corporation", "institution"],
-            }
-
+            # 2. LLM-based synonym matching
             for exp_type in expected_lower:
-                synonyms = type_synonyms.get(exp_type, [])
-                if entity_type_lower in synonyms or exp_type in type_synonyms.get(
-                    entity_type_lower, []
-                ):
+                synonyms = get_type_synonyms(exp_type)
+                if entity_type_lower in synonyms:
                     return 0.9  # Synonym match
+            
+            # 3. Embedding similarity fallback (for fuzzy matches)
+            # Check if entity_type is semantically close to any expected type
+            try:
+                entity_type_embedding = embedding_service.embed_query(entity_type_lower)
+                max_similarity = 0.0
+                
+                for exp_type in expected_lower:
+                    exp_embedding = embedding_service.embed_query(exp_type)
+                    # Cosine similarity
+                    from app.services.embedding import compute_cosine_similarity
+                    similarity = compute_cosine_similarity(entity_type_embedding, exp_embedding)
+                    max_similarity = max(max_similarity, similarity)
+                
+                # If embedding similarity is high, consider it a match
+                if max_similarity > 0.7:
+                    return 0.85  # Semantic match
+                elif max_similarity > 0.5:
+                    return 0.6  # Weak match
+            except Exception as e:
+                logger.debug(f"Embedding similarity failed for type scoring: {e}")
 
-            return 0.1  # Type mismatch
+            return 0.1  # Type mismatch (heavy penalty)
 
         def get_attribute_relevance(candidate, query_vector: list[float]) -> float:
             """
             Score based on semantic similarity between the candidate's summary
             and the query. Uses embedding-based cosine similarity for general-purpose
             attribute relevance without hardcoded keywords.
+            
+            Also performs CONTEXT-BASED DISAMBIGUATION:
+            - If multiple entities share the same name, use query context to pick the right one
+            - Example: "Michael Jordan" (basketball) vs "Michael Jordan" (professor)
             """
             node = candidate.get("original_obj", {})
-            summary = node.get("summary") or node.get("description") or ""
+            summary = self._get_node_text(node)
 
             if not summary or len(summary.strip()) < 10:
                 return 0.3  # No meaningful content
@@ -763,7 +1017,13 @@ class RetrievalService:
             # This is the cosine similarity between query and node's stored embedding
             existing_score = candidate.get("vector_score", 0.0)
             if existing_score > 0:
-                return existing_score
+                # Context disambiguation: Boost if query keywords appear in summary
+                query_keywords = set(query.lower().split()) - {"what", "where", "when", "who", "how", "the", "is", "was", "are", "were"}
+                summary_lower = summary.lower()
+                keyword_matches = sum(1 for kw in query_keywords if kw in summary_lower)
+                keyword_boost = min(keyword_matches / max(len(query_keywords), 1) * 0.2, 0.2)
+                
+                return min(existing_score + keyword_boost, 1.0)
 
             # Fallback: compute similarity if not available
             # This handles entity_match candidates that don't have vector scores
@@ -776,7 +1036,15 @@ class RetrievalService:
                 norm_q = sum(a * a for a in query_vector) ** 0.5
                 norm_s = sum(a * a for a in summary_vector) ** 0.5
                 if norm_q > 0 and norm_s > 0:
-                    return dot_product / (norm_q * norm_s)
+                    base_similarity = dot_product / (norm_q * norm_s)
+                    
+                    # Context disambiguation boost
+                    query_keywords = set(query.lower().split()) - {"what", "where", "when", "who", "how", "the", "is", "was", "are", "were"}
+                    summary_lower = summary.lower()
+                    keyword_matches = sum(1 for kw in query_keywords if kw in summary_lower)
+                    keyword_boost = min(keyword_matches / max(len(query_keywords), 1) * 0.2, 0.2)
+                    
+                    return min(base_similarity + keyword_boost, 1.0)
             except Exception as e:
                 logger.warning(f"Failed to compute semantic similarity: {e}")
 
@@ -800,6 +1068,10 @@ class RetrievalService:
                 + cand["vector_score"] * 0.2  # Direct vector score contribution
             )
 
+        # NOTE: Domain boosting removed for nodes (only Notes have domain property)
+        # Entity/Concept/Task nodes don't have domain, so boosting was broken
+        # If domain filtering needed, implement at Note level or propagate domain to nodes during ingestion
+        
         # Sort by combined score, then by priority
         def sort_key(c):
             priority_order = {"primary": 0, "secondary": 1, "tertiary": 2}
@@ -810,32 +1082,33 @@ class RetrievalService:
 
         candidates.sort(key=sort_key)
 
-        # Log type filtering if active
+        # Log expected types for debugging (type scoring still affects ranking)
         if expected_entity_types:
-            logger.info(
-                f"  [Type Filter] Expected types: {expected_entity_types}, "
+            logger.debug(
+                f"  [Type Scoring] Expected types: {expected_entity_types}, "
                 f"Attribute: {question_attribute}"
             )
-            # Log top matches with their type scores
-            for cand in candidates[:5]:
-                node = cand.get("original_obj", {})
-                logger.debug(
-                    f"    - {node.get('name', 'N/A')} | "
-                    f"Type: {node.get('entity_type', 'N/A')} | "
-                    f"Score: {cand.get('type_score', 0):.2f}"
-                )
 
-        # Take top_k candidates
+        # R3.1: DISABLED - Neural reranking (too slow, hurts quality)
+        # Reranker added 237% latency (31s→104s) and reduced accuracy by 4%
+        # Use pure symbolic scoring instead (combined_score already includes domain boost)
+        for cand in candidates:
+            # Use combined_score (with domain boost) as final score
+            cand["final_score"] = cand.get("combined_score", 0.5)
+            cand["rerank_score"] = 0.0  # Keep field for compatibility
+
+        # Take top_k candidates (already sorted by combined_score with domain boost)
         combined_results = candidates[:top_k]
 
-        # Add simple scores for logging
+        # Add boost details for logging
         for cand in combined_results:
-            cand["final_score"] = cand.get("combined_score", 0.5)
-            cand["rerank_score"] = 0.0
-            cand["boosts"] = {"source": cand.get("type", "unknown")}
+            cand["boosts"] = {
+                "source": cand.get("type", "unknown"),
+                "domain": cand.get("domain_boost", 1.0),
+            }
 
         t_ranking = time.perf_counter() - t_ranking_start
-        logger.info(f"  [⏱️ Timing] Ranking: {t_ranking:.4f}s")
+        logger.info(f"  [⏱️ Timing] Total ranking: {t_ranking:.4f}s")
 
         # Log what we're sending to LLM
         logger.info(
@@ -867,75 +1140,11 @@ class RetrievalService:
         logger.info(
             f"  [⏱️ Timing] Total: {t_total:.2f}s (Embed: {t_embedding:.2f}s | Retrieval: {t_candidates:.2f}s | Ranking: {t_ranking:.4f}s)"
         )
+
+        # Clean up query embedding reference
+        self._current_query_embedding = None
+
         return combined_results
-
-    def _calculate_keyword_boost(self, query: str, text: str) -> float:
-        """
-        Calculate keyword match boost for exact/close matches.
-        Returns 3.0x boost if exact query terms appear in text.
-        Handles case-insensitive matching and word variations.
-        """
-        import re
-
-        # Normalize both query and text
-        query_lower = query.lower()
-        text_lower = text.lower()
-
-        # Remove common stopwords from query to focus on meaningful terms
-        stopwords = {
-            "what",
-            "how",
-            "where",
-            "when",
-            "why",
-            "who",
-            "which",
-            "is",
-            "are",
-            "the",
-            "and",
-            "or",
-            "my",
-            "your",
-            "their",
-            "a",
-            "an",
-            "in",
-            "on",
-            "at",
-        }
-
-        # Extract meaningful words from query (3+ chars, not stopwords)
-        query_words = [w.strip(".,!?;:\"'") for w in query_lower.split()]
-        meaningful_words = [
-            w for w in query_words if len(w) >= 3 and w not in stopwords
-        ]
-
-        if not meaningful_words:
-            return 1.0
-
-        # Count how many meaningful query words appear in text
-        matches = 0
-        for word in meaningful_words:
-            # Use word boundary regex for better matching
-            pattern = rf"\b{re.escape(word)}"
-            if re.search(pattern, text_lower):
-                matches += 1
-
-        # Calculate boost based on match ratio
-        match_ratio = matches / len(meaningful_words)
-
-        # 3.0x boost if 80%+ of query terms match
-        if match_ratio >= 0.8:
-            return 3.0
-        # 2.0x boost if 50%+ match
-        elif match_ratio >= 0.5:
-            return 2.0
-        # 1.5x boost if 30%+ match
-        elif match_ratio >= 0.3:
-            return 1.5
-        else:
-            return 1.0
 
     def _is_temporal_query(self, query: str) -> bool:
         """
@@ -1057,119 +1266,6 @@ class RetrievalService:
                 i += 1
 
         return proper_names
-
-    def _extract_query_entities(self, query: str) -> List[str]:
-        """
-        Extract potential entity names from query for entity-match boosting.
-        Improved heuristic with case-insensitive matching and variation handling.
-        """
-        import re
-
-        entities = []
-
-        # Extract quoted terms
-        quoted = re.findall(r'["\']([^"\'\n]+)["\']', query)
-        entities.extend(quoted)
-
-        # Extract capitalized words (likely proper nouns)
-        # But exclude common words at sentence start
-        words = query.split()
-        common_starts = {
-            "what",
-            "how",
-            "where",
-            "when",
-            "why",
-            "who",
-            "which",
-            "is",
-            "are",
-            "can",
-            "do",
-            "does",
-        }
-
-        for i, word in enumerate(words):
-            # Remove punctuation for checking
-            clean_word = re.sub(r"[^a-zA-Z0-9]", "", word)
-            if clean_word and clean_word[0].isupper():
-                # Skip if it's the first word and a common question starter
-                if i == 0 and clean_word.lower() in common_starts:
-                    continue
-                entities.append(clean_word)
-
-        # Also look for words after "at", "with", "about" as they're likely entities
-        entity_markers = [
-            "at",
-            "with",
-            "about",
-            "for",
-            "regarding",
-            "concerning",
-            "working",
-        ]
-        for marker in entity_markers:
-            pattern = rf"\b{marker}\s+(\w+)"
-            matches = re.findall(pattern, query, re.IGNORECASE)
-            entities.extend([m for m in matches if len(m) > 2])
-
-        # Remove duplicates and common words
-        stopwords = {
-            "the",
-            "and",
-            "or",
-            "but",
-            "my",
-            "your",
-            "their",
-            "this",
-            "that",
-            "these",
-            "those",
-            "work",
-            "job",
-        }
-        entities = list(set([e for e in entities if e.lower() not in stopwords]))
-
-        # Normalize to lowercase for case-insensitive matching later
-        # Store both original and lowercase versions to handle variations
-        normalized_entities = []
-        for e in entities:
-            normalized_entities.append(e.lower())
-
-        return normalized_entities
-
-    def _apply_diversity_constraint(
-        self, results: List[dict], max_per_note: int = 3
-    ) -> List[dict]:
-        """
-        DEPRECATED: No longer used in Graph-First retrieval.
-
-        Graph-First retrieval returns node summaries, not note snippets,
-        so per-note diversity is no longer relevant.
-        """
-        return results
-
-    def _expand_candidates_with_relationships(
-        self, candidates: List[dict], max_related: int = 3, min_confidence: float = 0.7
-    ) -> List[dict]:
-        """
-        DEPRECATED: Relationship expansion now happens inline in hybrid_search().
-
-        Related nodes are fetched via graph traversal in the main search flow,
-        not as a post-processing step. This method is kept for backward compatibility.
-        """
-        return candidates  # No-op
-
-    def enrich_with_relationships(
-        self, results: List[dict], max_related: int = 3, min_confidence: float = 0.7
-    ) -> List[dict]:
-        """
-        DEPRECATED: Relationship enrichment now happens inline in hybrid_search().
-
-        This method is kept for backward compatibility but just returns results unchanged.
-        """
-        return results
 
     def _detect_query_domain(self, query: str) -> str:
         """
@@ -1304,88 +1400,6 @@ class RetrievalService:
             return "Dreams"
         else:
             return "Personal"
-
-    async def _temporal_search(self, query: str, top_k: int = 50) -> List[str]:
-        """
-        Retrieve notes based on timestamp (most recent first).
-        Used for queries like "what's my latest note?" or "most recent entry".
-
-        Singular queries ("most recent note", "last note") return exactly 1 note.
-        Plural queries ("recent notes", "latest entries") return top_k notes.
-        """
-        import time
-        from app.core.database import AsyncSessionLocal
-        from app.models.note import Note
-        from sqlalchemy import select
-
-        logger.info(f"  [Retrieval] Temporal Search for: '{query}'")
-        t_start = time.perf_counter()
-
-        # Stricter limit for singular "most recent note" queries
-        query_lower = query.lower()
-        singular_keywords = [
-            "most recent note",
-            "last note",
-            "latest note",
-            "newest note",
-            "my most recent",
-            "my last note",
-        ]
-        if any(kw in query_lower for kw in singular_keywords):
-            logger.info(
-                "  [Retrieval] Detected SINGULAR temporal query - limiting to 1 note"
-            )
-            top_k = 1
-
-        # Get recent notes from Neo4j (has timestamps)
-        recent_notes = graph_service.get_recent_notes(limit=top_k)
-        t_graph = time.perf_counter()
-        logger.info(
-            f"  [Retrieval] Neo4j Temporal Query took: {t_graph - t_start:.4f}s (Hits: {len(recent_notes)})"
-        )
-
-        if not recent_notes:
-            return []
-
-        # Fetch full content from Postgres
-        note_ids = [note["id"] for note in recent_notes]
-        async with AsyncSessionLocal() as session:
-            stmt = select(Note.id, Note.content, Note.title).where(
-                Note.id.in_(note_ids)
-            )
-            result = await session.execute(stmt)
-            rows = result.all()
-            content_map = {row.id: row.content for row in rows}
-            title_map = {row.id: (row.title or "Untitled Note") for row in rows}
-
-        t_pg = time.perf_counter()
-        logger.info(f"  [Retrieval] Postgres Fetch took: {t_pg - t_graph:.4f}s")
-
-        # Build context snippets in chronological order (newest first)
-        snippets = []
-        for note in recent_notes:
-            nid = note["id"]
-            content = content_map.get(nid, "")
-            title = title_map.get(nid, "Untitled Note")
-            domain = note.get("domain", "Personal")
-            created_at = note.get("created_at", "Unknown")
-
-            if content:
-                snippets.append(
-                    {
-                        "text": f"[Note: {title}] (Created: {created_at}, Domain: {domain})\n{content}",
-                        "content": content,
-                        "type": "note",
-                        "note_id": nid,
-                        "title": title,
-                        "domain": domain,
-                    }
-                )
-
-        logger.info(
-            f"  [Retrieval] Total Temporal Search took: {time.perf_counter() - t_start:.4f}s"
-        )
-        return snippets
 
 
 retrieval_service = RetrievalService()

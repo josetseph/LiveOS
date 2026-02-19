@@ -1,0 +1,106 @@
+================================================================================
+INFORMATION-DISCOVERY RETRIEVAL TEST
+================================================================================
+
+
+================================================================================
+TEST 1: What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?
+================================================================================
+
+INFORMATION NEEDS IDENTIFIED:
+  1. Who portrayed Corliss Archer in the film Kiss and Tell?
+  2. What government position did [actress] hold?
+
+DISCOVERED ENTITIES:
+  actor = Shirley Temple
+  position = Chief of Protocol
+
+FINAL ANSWER:
+Shirley Temple
+
+### References
+- [Kiss and Tell _1945 film_](/notes/bd0767e5-067c-44d0-a5f6-4b41ec16e984)
+- [Meet Corliss Archer](/notes/0dbdbb4e-257f-41e7-9fc8-386437d897cf)
+- [A Kiss for Corliss](/notes/977f7b83-a88a-4695-9dfb-49b35d4025bb)
+- [Meet Corliss Archer _TV series_](/notes/1c1e0cff-f9c3-4008-83d4-a1d76a62ef97)
+- [Shirley Temple](/notes/2611bbce-e9ac-43e4-8698-b6c262898c6e)
+- [Pamela Gilbert](/notes/77755578-9907-4be6-a256-3a54f2441819)
+- [Secretary of State for Constitutional Affairs](/notes/064c3b40-ebf8-43bf-a370-eb5354e78d37)
+- [Lord High Treasurer](/notes/d0702f9e-132d-4ac4-b320-35760f254c53)
+- [Season of the Witch _2011 film_](/notes/8a50b02f-6ec9-4169-b1a3-967790e8486c)
+- [Cynthia Hogan](/notes/47c256ad-923c-498a-851d-ad1b9d3af805)
+- [Robert R_ Hood](/notes/5d9fa837-8a40-455f-9d49-02b45912098b)
+- [Tara Strong filmography](/notes/a3224d09-13b4-4441-9689-d8fb605b67d3)
+- [Douglas J_ Bennet](/notes/b709bc50-0b58-4fe8-a51d-a9c3d6d0a2c6)
+
+
+================================================================================
+TEST 2: Were Scott Derrickson and Ed Wood of the same nationality?
+================================================================================
+
+INFORMATION NEEDS IDENTIFIED:
+  1. What is Scott Derrickson’s nationality?
+  2. What is Ed Wood’s nationality?
+
+DISCOVERED ENTITIES:
+  nationality = American
+  ed wood nationality = American
+
+FINAL ANSWER:
+no. Scott Derrickson is an American director, screenwriter, and producer. Ed Wood was the subject of a 1994 American biographical period comedy-drama film directed and produced by Tim Burton, and starring Johnny Depp as Ed Wood.
+
+### References
+- [Tyler Bates](/notes/08e972b8-b3bb-411b-90c2-cb9695e3d4e2)
+- [Adam Collis](/notes/00bb3e25-88ec-442c-9ce5-2856708ecd3b)
+- [Deadfall _1993 film_](/notes/0f93aa71-6a0b-464d-9f83-afc8c331f1af)
+- [Doctor Strange _2016 film_](/notes/2c670b19-c0df-413d-9ad8-db1b4a86599c)
+- [Scott Derrickson](/notes/d0c81a61-503c-4f90-bd56-8b3a66715b90)
+- [Scott Parkin](/notes/b397d45a-4b72-4d38-aa2f-9b1855bdef7b)
+- [Sinister _film_](/notes/10f4b01e-2188-4a72-9bfb-289c18aab230)
+- [Arnold Schwarzenegger filmography](/notes/27a3780d-628e-4552-9d1e-9d7af7557f87)
+- [Ed Wood](/notes/5ac93b57-c743-4f64-996f-ca509f737a7b)
+- [Ed Wood _film_](/notes/9981be6e-56a3-4a10-b746-22bfbdeb8cdf)
+- [Woodson_ Arkansas](/notes/498ef306-3cc6-4033-8f81-05af84a55d99)
+- [Conrad Brooks](/notes/fabe46aa-b453-4bc1-8620-01e9a5802518)
+- [Piano Girl](/notes/faa8ce67-8d87-4a41-b2f9-e72352ddd3d1)
+
+
+================================================================================
+TEST 3: The director of the romantic comedy "Big Stone Gap" is based in what New York city?
+================================================================================
+
+INFORMATION NEEDS IDENTIFIED:
+  1. Who directed the romantic comedy "Big Stone Gap"?
+  2. What New York city is [director] based in?
+
+DISCOVERED ENTITIES:
+  director = Adriana Trigiani
+  location = New York City
+
+FINAL ANSWER:
+Greenwich Village, New York City
+
+### References
+- [Romeo and Juliet on screen](/notes/54397f6e-bc4f-4ea4-bb18-f2659cacadae)
+- [What Are Little Girls Made Of_](/notes/5bf4a204-0229-4736-9334-a629692c5cba)
+- [Adriana Trigiani](/notes/97dd9f00-af46-4187-bf7f-7f9cab091127)
+- [Big Stone Gap _film_](/notes/7fd04fd1-28b4-48ff-a621-f8b81c258db6)
+- [The House That Jack Built _1967 film_](/notes/8165ba9b-b6fa-4af0-bb90-6050c68db494)
+- [I Love NY _2015 film_](/notes/acd5dc0d-6782-4aaf-a238-c160ad12d579)
+- [Kingston Morning](/notes/c3fc4062-aaf2-4ef7-9130-e4872710e5e9)
+- [Nola _film_](/notes/7464671c-3391-45e1-8c31-f855cb85f9a2)
+- [A Kiss for Corliss](/notes/977f7b83-a88a-4695-9dfb-49b35d4025bb)
+- [PepsiCo](/notes/93efb5cb-ee47-4a25-8c92-49cc28b1ba8b)
+- [New York Society of Model Engineers](/notes/604ceb34-3365-45b0-a144-d97d9de1ab93)
+- [Criss Angel](/notes/da53818a-842b-46f8-b982-9eb5f74df56d)
+- [Pershing Square Capital Management](/notes/9d4d57cd-696f-40c6-a9aa-4d39b7184661)
+- [Kingstone Companies](/notes/5a6634cd-84ff-4470-8c9a-dc3b7b57d8e8)
+- [BankUnited](/notes/96bde245-2a59-4630-8dee-fa0f42bf6fcf)
+- [Bill Cosby Is a Very Funny Fellow___Right_](/notes/f5a965aa-e58d-4451-a195-28cf885300e1)
+- [Shadowshaper](/notes/bc245cd3-1a04-48db-b91b-43fadc24caee)
+- [Raaz Pichhle Janam Ka](/notes/b2f76ec5-55f5-4361-9c51-ba3256899a2a)
+
+
+================================================================================
+TEST COMPLETE
+================================================================================

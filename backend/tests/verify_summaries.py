@@ -9,9 +9,9 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.services.graph import graph_service
-from app.core.logging_config import get_component_logger
+from app.core.log import get_logger
 
-logger = get_component_logger("SummaryVerification")
+logger = get_logger("SummaryVerification")
 
 
 def verify_summaries():

@@ -7,9 +7,9 @@ This is the consolidated version - replaces both reset_index.py and reset_index_
 
 from app.services.graph import graph_service
 from app.core.config import settings
-from app.core.logging_config import get_component_logger
+from app.core.log import get_logger
 
-logger = get_component_logger("ResetIndex")
+logger = get_logger("ResetIndex")
 
 
 def reset_index():

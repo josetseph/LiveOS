@@ -3,13 +3,14 @@ import uuid
 from collections import defaultdict
 from datetime import datetime
 
-from app.core.logging_config import get_component_logger
+from app.core.log import get_logger
 from app.schemas.extraction import Extraction, NoteInput
 from app.services.graph import graph_service
 from app.services.llm import llm_service
+from app.services.alias_detector import alias_detector
 from app.workflows.agents.ingestion_agent import ingestion_agent
 
-logger = get_component_logger("IngestionPipeline")
+logger = get_logger("IngestionPipeline")
 
 
 class EntityLockManager:
@@ -87,6 +88,11 @@ class IngestionWorkflow:
         logger.info(
             f"[{datetime.now()}] SUCCESS: Note {note_id} fully indexed in {duration:.2f}s."
         )
+        
+        # Notify ingestion tracker for auto-scheduled alias detection
+        from app.services.ingestion_tracker import ingestion_tracker
+        ingestion_tracker.mark_ingestion_complete()
+        
         return {
             "note_id": final_state["note_id"],
             "extraction": final_state["extraction"].model_dump(),
@@ -173,20 +179,26 @@ class IngestionWorkflow:
         extraction: Extraction,
         vector: list[float],
         created_at: str,
+        custom_title: str = None,  # If provided, use instead of generating
     ):
-        # 0. Generate Title & Summary
-        title = llm_service.generate_title(content)
+        # 0. Generate or use provided Title & Summary
+        if custom_title:
+            title = custom_title
+            logger.info(f"[Ingestion] Using provided title: '{title}'")
+        else:
+            title = llm_service.generate_title(content)
+            logger.info(f"[Ingestion] Generated title: '{title}'")
         summary = llm_service.summarize(content)
 
         # Base Note Node (Neo4j - The Mind)
+        # NOTE: Note embeddings commented out (unused in retrieval - only node embeddings searched)
         query_note = """
         MERGE (n:Note {id: $id})
         SET n.summary = $summary,
             n.title = $title,
             n.sentiment = $sentiment,
             n.domain = $domain,
-            n.created_at = $created_at,
-            n.embedding = $vector
+            n.created_at = $created_at
         """
         # Prune old relationships to ensure state matches current extraction
         query_prune = """
@@ -205,7 +217,7 @@ class IngestionWorkflow:
                 "sentiment": extraction.sentiment,
                 "domain": extraction.domain,
                 "created_at": created_at,
-                "vector": vector,
+                # "vector": vector,  # Commented out - note embeddings unused
             },
         )
 
@@ -336,7 +348,7 @@ class IngestionWorkflow:
                     graph_service.execute_query(
                         query_prereq,
                         {
-                            "concept_name": concept.name.title(),
+                            "concept_name": concept.name.lower().strip(),
                             "definition": concept.definition,
                             "created_at": created_at,
                         },
@@ -363,7 +375,7 @@ class IngestionWorkflow:
                     graph_service.execute_query(
                         query_contradict,
                         {
-                            "concept_name": concept.name.title(),
+                            "concept_name": concept.name.lower().strip(),
                             "definition": concept.definition,
                             "created_at": created_at,
                         },
@@ -444,14 +456,19 @@ class IngestionWorkflow:
 
             persona_embeddings = {}
             for t in extraction.persona_traits:
+                # Normalize trait to lowercase
+                trait_lower = t.trait.strip().lower()
+                if not trait_lower:
+                    continue
+
                 # Use isolated_context if available, fall back to legacy evidence_quote
                 context = (
                     getattr(t, "isolated_context", "")
                     or getattr(t, "evidence_quote", "")
                     or ""
                 )
-                text_to_embed = f"Personality trait: {t.trait}. Evidence: {context}"
-                persona_embeddings[t.trait] = embedding_service.embed_query(
+                text_to_embed = f"Personality trait: {trait_lower}. Evidence: {context}"
+                persona_embeddings[trait_lower] = embedding_service.embed_query(
                     text_to_embed
                 )
 
@@ -471,13 +488,14 @@ class IngestionWorkflow:
             """
             persona_data = [
                 {
-                    "trait": t.trait,
+                    "trait": t.trait.strip().lower(),
                     "isolated_context": getattr(t, "isolated_context", "")
                     or getattr(t, "evidence_quote", "")
                     or "",
-                    "embedding": persona_embeddings[t.trait],
+                    "embedding": persona_embeddings[t.trait.strip().lower()],
                 }
                 for t in extraction.persona_traits
+                if t.trait.strip().lower() in persona_embeddings
             ]
             graph_service.execute_query(
                 query_persona,
@@ -491,8 +509,16 @@ class IngestionWorkflow:
 
             reference_embeddings = {}
             for ref in extraction.references:
-                text_to_embed = f"{ref.title}: {ref.content or ''} (Source: {ref.source or 'Unknown'})"
-                ref_key = f"{ref.title}|{ref.source or 'Unknown'}"
+                # Normalize title and source to lowercase
+                title_lower = ref.title.strip().lower()
+                if not title_lower:
+                    continue
+                source_lower = (ref.source or "Unknown").strip().lower()
+
+                text_to_embed = (
+                    f"{title_lower}: {ref.content or ''} (Source: {source_lower})"
+                )
+                ref_key = f"{title_lower}|{source_lower}"
                 reference_embeddings[ref_key] = embedding_service.embed_query(
                     text_to_embed
                 )
@@ -509,19 +535,27 @@ class IngestionWorkflow:
                 rel.valid_from = $created_at,
                 rel.status = 'active'
             """
-            reference_data = [
-                {
-                    "title": ref.title,
-                    "type": ref.type,
-                    "content": ref.content,
-                    "source": ref.source or "Unknown",
-                    "isolated_context": getattr(ref, "isolated_context", "") or "",
-                    "embedding": reference_embeddings[
-                        f"{ref.title}|{ref.source or 'Unknown'}"
-                    ],
-                }
-                for ref in extraction.references
-            ]
+            reference_data = []
+            for ref in extraction.references:
+                title_lower = ref.title.strip().lower()
+                if not title_lower:
+                    continue
+                source_lower = (ref.source or "Unknown").strip().lower()
+                ref_key = f"{title_lower}|{source_lower}"
+
+                if ref_key in reference_embeddings:
+                    reference_data.append(
+                        {
+                            "title": title_lower,
+                            "type": ref.type,
+                            "content": ref.content,
+                            "source": source_lower,
+                            "isolated_context": getattr(ref, "isolated_context", "")
+                            or "",
+                            "embedding": reference_embeddings[ref_key],
+                        }
+                    )
+
             graph_service.execute_query(
                 query_references,
                 {"data": reference_data, "note_id": note_id, "created_at": created_at},
@@ -790,10 +824,23 @@ Summarize the common themes and key insights that connect these items."""
                     for m in community_data.get("top_members", [])[:5]
                     if m.get("name")
                 ]
-                graph_service.update_community_summary(
-                    community_name, summary.strip(), themes
+
+                # Generate embedding for the community summary
+                from app.services.embedding import embedding_service
+
+                community_embedding = embedding_service.embed_query(
+                    f"Community: {community_name}. {summary.strip()}"
                 )
-                logger.info(f"[Community] Updated summary for '{community_name}'")
+
+                graph_service.update_community_summary(
+                    community_name,
+                    summary.strip(),
+                    themes,
+                    embedding=community_embedding,
+                )
+                logger.info(
+                    f"[Community] Updated summary and embedding for '{community_name}'"
+                )
 
         except Exception as e:
             logger.warning(
@@ -882,6 +929,7 @@ Summarize the common themes and key insights that connect these items."""
             )
 
         if tasks_list:
+            # Use asyncio.gather for batch processing with Gemini's async API
             await asyncio.gather(*tasks_list)
 
     async def _update_node_summary(
@@ -892,14 +940,14 @@ Summarize the common themes and key insights that connect these items."""
         identifier_key: str = "name",
     ):
         """
-        Updates a node's summary using LLM-provided isolated context.
+        Updates a node's summary by accumulating ALL isolated contexts.
 
-        NEW APPROACH:
-        1. First generate a fresh summary from the new context
-        2. If existing summary exists (and is meaningful), merge old + new
-        3. Otherwise, use the fresh summary directly
+        APPROACH:
+        1. Append new isolated_context to node's isolated_contexts list
+        2. Generate fresh summary from ALL accumulated contexts
+        3. Store both the list (for raw context retrieval) and summary (for distilled retrieval)
 
-        This ensures we ALWAYS get a real summary, never just "None yet."
+        This allows A/B testing: raw contexts vs LLM summaries.
 
         Args:
             label: Node label (Entity, Concept, Task, etc.)
@@ -910,115 +958,124 @@ Summarize the common themes and key insights that connect these items."""
         async with entity_lock_manager.get_lock(label, name):
             loop = asyncio.get_running_loop()
 
-            # 1. Fetch existing summary
+            # 1. Fetch existing isolated_contexts list
             def _get_existing():
                 return graph_service.execute_query(
-                    f"MATCH (n:{label} {{{identifier_key}: $name}}) RETURN n.summary as summary",
+                    f"MATCH (n:{label} {{{identifier_key}: $name}}) RETURN n.isolated_contexts as isolated_contexts",
                     {"name": name},
                 )
 
             res = await loop.run_in_executor(None, _get_existing)
-            existing_summary = res[0].get("summary") if res else ""
+            existing_contexts = res[0].get("isolated_contexts") if res else None
 
-            # Check if existing summary is meaningful (not None, empty, or placeholder)
-            has_meaningful_summary = (
-                existing_summary
-                and existing_summary.strip()
-                and existing_summary.strip().lower()
-                not in ["none yet.", "none yet", ""]
+            # Initialize as list if doesn't exist
+            if not existing_contexts:
+                existing_contexts = []
+
+            # 2. Append new context to list
+            existing_contexts.append(isolated_context)
+
+            # 3. Generate summary from ALL contexts joined together
+            all_contexts_text = "\n\n".join(existing_contexts)
+
+            summary_data = await llm_service.generate_entity_summary_async(
+                all_contexts_text,
+                name,
+                label,
             )
 
-            # 2. Generate fresh summary from new context FIRST
-            def _generate_fresh_summary():
-                return llm_service.generate_entity_summary(
-                    isolated_context,
-                    name,
-                    label,
-                )
+            logger.info(
+                f"  [Ingestion] Generated summary from {len(existing_contexts)} context(s) for {label}: {name}"
+            )
 
-            new_summary_data = await loop.run_in_executor(None, _generate_fresh_summary)
-
-            # 3. If existing meaningful summary exists, merge old + new
-            if has_meaningful_summary:
-                # Fetch related context for richer merging
-                def _get_related_context():
-                    related_context_parts = []
-                    try:
-                        related_nodes = graph_service.get_related_nodes(
-                            node_name=name,
-                            node_label=label,
-                            max_depth=1,
-                            min_confidence=0.5,
-                        )
-                        for node in related_nodes[:3]:
-                            node_summary = node.get("summary")
-                            if node_summary and node_summary.strip().lower() not in [
-                                "none yet.",
-                                "none yet",
-                            ]:
-                                node_name_rel = node.get("name", "Unknown")
-                                node_label_rel = node.get("label", "Entity")
-                                rel_path = " → ".join(node.get("relationship_path", []))
-                                related_context_parts.append(
-                                    f"[{node_label_rel}: {node_name_rel}] (via {rel_path}): {node_summary[:300]}"
-                                )
-                    except Exception as e:
-                        logger.debug(
-                            f"  [Ingestion] Could not fetch related context for {name}: {e}"
-                        )
-                    return (
-                        "\n".join(related_context_parts)
-                        if related_context_parts
-                        else ""
-                    )
-
-                related_context = await loop.run_in_executor(None, _get_related_context)
-
-                # Merge existing + new using update_summary
-                def _merge_summaries():
-                    return llm_service.update_summary(
-                        existing_summary,
-                        new_summary_data[
-                            "summary"
-                        ],  # Use the new summary as "evidence"
-                        name,
-                        label,
-                        related_context=related_context,
-                    )
-
-                update_data = await loop.run_in_executor(None, _merge_summaries)
-                logger.info(
-                    f"  [Ingestion] Merged existing + new summary for {label}: {name}"
-                )
-            else:
-                # No existing summary, use the fresh one directly
-                update_data = new_summary_data
-
-            # 4. Generate embedding for updated summary
+            # 4. Generate embedding for summary
             from app.services.embedding import embedding_service
 
             def _generate_embedding():
-                text_to_embed = f"{update_data['title']}: {update_data['summary']}"
-                return embedding_service.embed_query(text_to_embed)
+                text_to_embed = f"{summary_data['title']}: {summary_data['summary']}"
+                # Use embed_documents (no instruction) for document indexing
+                # Only queries should have instruction prefix (for Qwen3)
+                return embedding_service.embed_documents([text_to_embed])[0]
 
             new_embedding = await loop.run_in_executor(None, _generate_embedding)
 
-            # 5. Save back with updated embedding
+            # NOTE: isolated_context_embeddings removed after A/B testing
+            # Testing showed sub-par/on-par performance vs summaries, adds overhead
+            # Keeping only summary embeddings for vector search
+            # context_embeddings = []  # Removed
+
+            # 5. Save isolated_contexts list and summary (no context embeddings)
             def _save_update():
                 graph_service.execute_query(
-                    f"MATCH (n:{label} {{{identifier_key}: $name}}) SET n.summary = $summary, n.title = $title, n.embedding = $embedding, n:Indexable",
+                    f"MATCH (n:{label} {{{identifier_key}: $name}}) "
+                    f"SET n.isolated_contexts = $isolated_contexts, "
+                    f"n.isolated_context_count = $context_count, "
+                    f"n.summary = $summary, n.title = $title, n.embedding = $embedding, n:Indexable",
                     {
                         "name": name,
-                        "summary": update_data["summary"],
-                        "title": update_data["title"],
+                        "isolated_contexts": existing_contexts,
+                        "context_count": len(existing_contexts),
+                        "summary": summary_data["summary"],
+                        "title": summary_data["title"],
                         "embedding": new_embedding,
                     },
                 )
 
             await loop.run_in_executor(None, _save_update)
             logger.info(
-                f"  Summary updated for {label}: {name} (Title: {update_data['title']})"
+                f"  Summary updated for {label}: {name} (Title: {summary_data['title']})"
             )
+
+            # Trigger alias detection for all node types (non-blocking)
+            # This runs in the background without slowing down ingestion
+            asyncio.create_task(
+                self._check_node_aliases(name, label, identifier_key)
+            )
+
+    async def _check_node_aliases(self, node_value: str, node_label: str, identifier_property: str):
+        """
+        Check if newly updated node might be an alias of existing nodes.
+        Runs asynchronously in background without blocking ingestion.
+        
+        Args:
+            node_value: Value of the node identifier (name/trait/title)
+            node_label: Node label (Entity, Concept, Task, Persona, Reference)
+            identifier_property: Property name (name, trait, title)
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            
+            # For Entity nodes, we need to get the type (Person, Place, etc.)
+            # For other labels, type is None
+            node_type = None
+            if node_label == "Entity":
+                def _get_entity_type():
+                    result = graph_service.execute_query(
+                        "MATCH (e:Entity {name: $name}) RETURN e.type as type",
+                        {"name": node_value}
+                    )
+                    return result[0]["type"] if result else None
+                
+                node_type = await loop.run_in_executor(None, _get_entity_type)
+                
+                if not node_type:
+                    logger.debug(f"  [Alias] No type found for {node_value}, skipping alias check")
+                    return
+                
+                logger.info(f"  [Alias] Checking for aliases of: {node_value} ({node_label}:{node_type})")
+            else:
+                logger.info(f"  [Alias] Checking for aliases of: {node_value} ({node_label})")
+            
+            # Call generic alias detection
+            await alias_detector.detect_and_link_aliases_for_node(
+                node_value=node_value,
+                node_label=node_label,
+                identifier_property=identifier_property,
+                node_type=node_type
+            )
+        except Exception as e:
+            # Don't let alias detection errors break ingestion
+            logger.warning(f"  [Alias] Failed to check aliases for {node_label} '{node_value}': {e}")
 
 
 ingestion_workflow = IngestionWorkflow()

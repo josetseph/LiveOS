@@ -84,9 +84,20 @@ def clean_obsidian_content(content: str) -> str:
 
 
 def send_note(
-    content: str, filename: str, created_at: str = None, dry_run: bool = False
+    content: str,
+    created_at: str = None,
+    title: str = None,
+    dry_run: bool = False,
 ):
-    """Send a single note to the ingestion endpoint."""
+    """
+    Send a single note to the ingestion endpoint.
+
+    Args:
+        content: Note content
+        created_at: Optional creation timestamp
+        title: Optional custom title (if not provided, backend generates one)
+        dry_run: If True, don't actually send
+    """
 
     if not content.strip():
         return None, "Empty content"
@@ -95,6 +106,9 @@ def send_note(
 
     if created_at:
         payload["created_at"] = created_at
+
+    if title:
+        payload["title"] = title
 
     if dry_run:
         return {
@@ -115,7 +129,7 @@ def send_note(
         return None, str(e)
 
 
-def wait_for_ingestion_success(note_id: str, timeout: int = 1200):
+def wait_for_ingestion_success(note_id: str, timeout: int = 2000):
     """
     Tail the ingestion log file and wait for SUCCESS message for the given note_id.
     Returns True if found within timeout, False otherwise.
@@ -218,7 +232,12 @@ def clear_progress():
         PROGRESS_FILE.unlink()
 
 
-def batch_ingest(notes_dir: Path = None, dry_run: bool = False, resume: bool = False):
+def batch_ingest(
+    notes_dir: Path = None,
+    dry_run: bool = False,
+    resume: bool = False,
+    limit: int = None,
+):
     """Batch ingest all notes from the specified directory in chronological order."""
 
     # Use provided directory or default
@@ -278,14 +297,19 @@ def batch_ingest(notes_dir: Path = None, dry_run: bool = False, resume: bool = F
         clear_progress()
         return
 
+    # Apply limit if specified
+    end_index = len(note_files)
+    if limit is not None:
+        end_index = min(start_index + limit, len(note_files))
+
     print(
-        f"{'🔍' if dry_run else '📦'} Processing {len(note_files) - start_index} note(s) (sorted by date)"
+        f"{'🔍' if dry_run else '📦'} Processing {end_index - start_index} note(s) (sorted by date)"
     )
     print(f"{'   (DRY RUN - not actually sending)' if dry_run else ''}\n")
 
     results = {"success": 0, "failed": 0, "skipped": 0}
 
-    for i in range(start_index, len(note_files)):
+    for i in range(start_index, end_index):
         note_file = note_files[i]
         filename = note_file.name
         print(f"[{i + 1}/{len(note_files)}] Processing: {filename}")
@@ -313,7 +337,12 @@ def batch_ingest(notes_dir: Path = None, dry_run: bool = False, resume: bool = F
         if created_at:
             print(f"   📅 Date: {created_at}")
 
-        result, error = send_note(content, filename, created_at, dry_run)
+        # Extract title from filename (remove extension)
+        title = filename.rsplit(".", 1)[0] if "." in filename else filename
+
+        result, error = send_note(
+            content, created_at=created_at, title=title, dry_run=dry_run
+        )
 
         if error:
             print(f"   ❌ Error: {error}")
@@ -328,7 +357,7 @@ def batch_ingest(notes_dir: Path = None, dry_run: bool = False, resume: bool = F
 
             if not dry_run:
                 # Wait for ingestion to complete before proceeding
-                success = wait_for_ingestion_success(note_id, timeout=1200)
+                success = wait_for_ingestion_success(note_id, timeout=2000)
                 if not success:
                     print("   ⚠️  Failed to confirm completion - stopping batch process")
                     print("   ‼️ Check logs for last processed note")
@@ -370,6 +399,7 @@ Examples:
   python batch_ingest.py /path/to/notes           # Process custom directory
   python batch_ingest.py --dry-run                # Preview without sending
   python batch_ingest.py --resume                 # Resume from last successful note
+  python batch_ingest.py --resume --limit 5       # Process next 5 notes only
   
 Features:
   - Automatic date extraction from filenames (YYYY-MM-DD)
@@ -396,10 +426,21 @@ Features:
         action="store_true",
         help="Resume from last successfully processed note",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of notes to process",
+    )
 
     args = parser.parse_args()
 
-    batch_ingest(notes_dir=args.directory, dry_run=args.dry_run, resume=args.resume)
+    batch_ingest(
+        notes_dir=args.directory,
+        dry_run=args.dry_run,
+        resume=args.resume,
+        limit=args.limit,
+    )
 
 
 if __name__ == "__main__":

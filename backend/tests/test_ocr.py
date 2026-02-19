@@ -7,7 +7,9 @@ import sys
 from pathlib import Path
 
 # Add backend to path
-sys.path.insert(0, str(Path(__file__).parent))
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.core.config import settings
 from app.services.multimedia import MultimediaService
@@ -56,15 +58,19 @@ async def test_ocr_on_pdf():
 
 
 async def compare_models():
-    """Compare PaddleOCR-VL vs DeepSeek-OCR"""
-    print("🔬 Comparing PaddleOCR-VL vs DeepSeek-OCR\n")
+    """Compare PaddleOCR-VL vs GLM-OCR"""
+    print("🔬 Comparing PaddleOCR-VL vs GLM-OCR\n")
 
     pdf_path = Path("cv.pdf")
     if not pdf_path.exists():
-        print(f"❌ cv.pdf not found")
+        print("❌ cv.pdf not found")
         return
 
-    models_to_test = ["MedAIBase/PaddleOCR-VL:0.9b", "deepseek-ocr:latest"]
+    models_to_test = [
+        "MedAIBase/PaddleOCR-VL:0.9b",
+        # "deepseek-ocr:latest",
+        "glm-ocr:latest",
+    ]
 
     results = {}
 
@@ -123,9 +129,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Test OCR models")
-    parser.add_argument(
-        "--compare", action="store_true", help="Compare PaddleOCR vs DeepSeek"
-    )
+    parser.add_argument("--compare", action="store_true", help="Compare OCR models")
     args = parser.parse_args()
 
     if args.compare:

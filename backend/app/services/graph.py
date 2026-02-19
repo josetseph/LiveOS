@@ -1,8 +1,8 @@
 from neo4j import GraphDatabase
 from app.core.config import settings
-from app.core.logging_config import get_component_logger
+from app.core.log import get_logger
 
-logger = get_component_logger("GraphService")
+logger = get_logger("GraphService")
 
 
 class GraphService:
@@ -151,34 +151,22 @@ class GraphService:
 
     def find_name_variants(self, base_name: str, limit: int = 5) -> list[dict]:
         """
-        Find name variants for an entity, including:
-        1. ALIAS_OF relationships (highest priority - verified aliases)
-        2. Names that start with the base name (e.g., "Robert Smith" → "Robert Smith Jr.")
-        3. Names that contain the base name
+        Find name variants for an entity using pattern matching:
+        1. Names that start with the base name (e.g., "Robert Smith" → "Robert Smith Jr.")
+        2. Names that contain the base name
 
         Args:
             base_name: The base name to search variants for
             limit: Maximum variants to return
 
         Returns:
-            List of nodes with variant names and their source (alias or pattern match)
+            List of nodes with variant names
         """
         base_lower = base_name.lower().strip()
 
-        # Combined query: ALIAS_OF relationships take priority, then pattern matching
+        # Pattern-based name variant search
         query = """
-        // First, check for ALIAS_OF relationships (verified aliases)
-        OPTIONAL MATCH (source:Entity {name: $base_name})-[:ALIAS_OF]-(alias:Entity)
-        WITH collect(DISTINCT {
-            name: alias.name,
-            labels: labels(alias),
-            summary: alias.summary,
-            description: alias.description,
-            entity_type: alias.type,
-            source: 'alias'
-        }) as aliases
-        
-        // Then, find pattern-based name variants
+        // Find pattern-based name variants
         // EXCLUDE Sr./Jr./Roman numeral mismatches - these are different people!
         MATCH (n:Indexable)
         WHERE (toLower(n.name) STARTS WITH $base_name + ' '
@@ -194,25 +182,11 @@ class GraphService:
             OR (toLower($base_name) =~ '.* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$'
                 AND NOT toLower(n.name) =~ '.* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$')
           )
-        WITH aliases, collect(DISTINCT {
-            name: n.name,
-            labels: labels(n),
-            summary: n.summary,
-            description: n.description,
-            entity_type: n.type,
-            source: 'pattern'
-        }) as patterns
-        
-        // Combine and deduplicate (aliases first)
-        WITH [x IN aliases WHERE x.name IS NOT NULL] + 
-             [p IN patterns WHERE p.name IS NOT NULL AND NOT any(a IN aliases WHERE a.name = p.name)] as combined
-        UNWIND combined as item
-        RETURN item.name as name,
-               item.labels as labels,
-               item.summary as summary,
-               item.description as description,
-               item.entity_type as entity_type,
-               item.source as variant_source
+        RETURN DISTINCT n.name as name,
+               labels(n) as labels,
+               n.summary as summary,
+               n.description as description,
+               n.type as entity_type
         LIMIT $limit
         """
 
@@ -529,6 +503,89 @@ class GraphService:
         return self.execute_query(
             query, {"vector": vector, "top_k": top_k, "min_score": min_score}
         )
+
+    def search_knowledge_graph_isolated_contexts(
+        self, vector: list[float], top_k: int = 25, min_score: float = 0.6
+    ) -> list[dict]:
+        """
+        Search using individual isolated context embeddings instead of summary embeddings.
+
+        This method searches through each isolated context's embedding individually,
+        finding the best matching contexts across all entities/concepts. Returns the
+        matched contexts along with their parent node information.
+
+        Use this when USE_ISOLATED_CONTEXTS=True to search based on raw context
+        embeddings rather than LLM-generated summary embeddings.
+
+        Returns list of dicts with:
+        - name: entity/concept name
+        - matched_context: the specific isolated context text that matched
+        - matched_context_index: index of the context in the isolated_contexts array
+        - score: cosine similarity score
+        - Other node properties (summary, type, labels, etc.)
+        """
+        import json
+
+        query = """
+        MATCH (n:Indexable)
+        WHERE n.isolated_context_embeddings_json IS NOT NULL 
+          AND n.isolated_contexts IS NOT NULL
+          AND n.isolated_context_count > 0
+        RETURN 
+            n.name as name,
+            n.summary as summary,
+            n.description as description,
+            n.trait as trait,
+            n.status as status,
+            n.type as entity_type,
+            labels(n) as labels,
+            n.isolated_contexts as contexts,
+            n.isolated_context_embeddings_json as embeddings_json,
+            n.isolated_context_count as context_count
+        """
+
+        # Get all nodes with context embeddings
+        nodes = self.execute_query(query)
+
+        # Compute similarity for each context and collect results
+        results = []
+        for node in nodes:
+            try:
+                # Parse embeddings from JSON
+                embeddings = json.loads(node["embeddings_json"])
+                contexts = node["contexts"]
+
+                # Compute similarity for each context
+                for idx, emb in enumerate(embeddings):
+                    # Compute cosine similarity
+                    from app.services.embedding import compute_cosine_similarity
+
+                    score = compute_cosine_similarity(vector, emb)
+
+                    if score >= min_score:
+                        results.append(
+                            {
+                                "name": node["name"],
+                                "summary": node["summary"],
+                                "description": node["description"],
+                                "trait": node["trait"],
+                                "status": node["status"],
+                                "entity_type": node["entity_type"],
+                                "labels": node["labels"],
+                                "matched_context": (
+                                    contexts[idx] if idx < len(contexts) else ""
+                                ),
+                                "matched_context_index": idx,
+                                "score": score,
+                            }
+                        )
+            except Exception as e:
+                # Skip nodes with parsing errors
+                continue
+
+        # Sort by score and return top_k
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:top_k]
 
     def get_node_source_notes(
         self, node_names: list[str], node_labels: list[str]
@@ -1542,7 +1599,11 @@ class GraphService:
         return len(results) > 0
 
     def update_community_summary(
-        self, community_name: str, summary: str, themes: list[str] = None
+        self,
+        community_name: str,
+        summary: str,
+        themes: list[str] = None,
+        embedding: list[float] = None,
     ):
         """
         Update a community's summary (typically called after new nodes are added).
@@ -1551,6 +1612,7 @@ class GraphService:
             community_name: Name of the community
             summary: New high-level summary
             themes: Updated list of key themes
+            embedding: Vector embedding of the summary for semantic search
         """
         from datetime import datetime
 
@@ -1558,7 +1620,17 @@ class GraphService:
         MATCH (c:Community {name: $community_name})
         SET c.summary = $summary,
             c.themes = $themes,
-            c.updated_at = $current_time
+            c.updated_at = $current_time,
+            c:Indexable,
+            c.name = $community_name
+        WITH c
+        // Set embedding if provided
+        CALL apoc.do.when(
+            $embedding IS NOT NULL,
+            'SET c.embedding = embedding RETURN c',
+            'RETURN c',
+            {c: c, embedding: $embedding}
+        ) YIELD value
         RETURN c.name as name
         """
         self.execute_query(
@@ -1568,6 +1640,7 @@ class GraphService:
                 "summary": summary,
                 "themes": themes or [],
                 "current_time": datetime.utcnow().isoformat(),
+                "embedding": embedding,
             },
         )
 

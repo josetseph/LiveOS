@@ -203,7 +203,7 @@ class Extraction(BaseModel):
         # Key mapping: LLM output -> Pydantic field name
         key_map = {
             # Domain variations
-            "domain categorization": "domain",
+            "domain_categorization": "domain",  # Handles "DOMAIN CATEGORIZATION" -> domain_categorization
             "domain": "domain",
             # Entity variations
             "entities": "entities",
@@ -233,13 +233,14 @@ class Extraction(BaseModel):
             # Normalize key: lowercase, strip whitespace
             norm_key = key.lower().strip().replace(" ", "_")
 
-            # Look up the mapping
-            mapped_key = key_map.get(norm_key)
+            # Check if key is in map (explicit mapping or explicit ignore)
+            if norm_key in key_map:
+                mapped_key = key_map[norm_key]
 
-            if mapped_key is None:
-                # Key should be ignored (like "quote")
-                continue
-            elif mapped_key:
+                if mapped_key is None:
+                    # Key explicitly ignored (like "quote")
+                    continue
+
                 # Handle special case: PERSONA returns {"traits": [...]} instead of list
                 if mapped_key == "persona_traits" and isinstance(value, dict):
                     # Extract traits list from dict
@@ -252,7 +253,7 @@ class Extraction(BaseModel):
                 else:
                     normalized[mapped_key] = value
             else:
-                # No mapping found, use normalized key as-is
+                # No mapping found, use normalized key as-is (allow pass-through)
                 normalized[norm_key] = value
 
         return normalized
@@ -302,4 +303,5 @@ class Extraction(BaseModel):
 class NoteInput(BaseModel):
     content: str
     created_at: Optional[str] = None
+    title: Optional[str] = None  # If provided, use instead of auto-generating
     skip_ingestion: bool = False  # If True, save to DB but don't process in brain
