@@ -833,17 +833,19 @@ FINAL ANSWER:"""
             )
             return response.choices[0].message.content.strip()
 
-    async def generate(self, prompt: str, temperature: float = 0.1, max_tokens: int = 1000) -> str:
+    async def generate(
+        self, prompt: str, temperature: float = 0.1, max_tokens: int = 1000
+    ) -> str:
         """
         Generic text generation - provider-agnostic.
-        
+
         Use this for simple text generation tasks (alias comparison, classification, etc).
-        
+
         Args:
             prompt: The prompt to send to the LLM
             temperature: Sampling temperature (0=deterministic, 1=creative)
             max_tokens: Max tokens in response
-            
+
         Returns:
             Generated text response
         """
@@ -858,7 +860,7 @@ FINAL ANSWER:"""
                     ),
                 )
                 return response.text.strip()
-                
+
             elif self.provider == "anthropic":
                 response = self.chat_client.messages.create(
                     model=settings.ANTHROPIC_MODEL,
@@ -867,7 +869,7 @@ FINAL ANSWER:"""
                     messages=[{"role": "user", "content": prompt}],
                 )
                 return response.content[0].text.strip()
-                
+
             else:  # OpenAI or Ollama
                 model = (
                     settings.MODEL_BRAIN
@@ -875,7 +877,7 @@ FINAL ANSWER:"""
                     else settings.OPENAI_MODEL
                 )
                 extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
-                
+
                 response = self.chat_client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
@@ -884,7 +886,7 @@ FINAL ANSWER:"""
                     extra_body=extra_body,
                 )
                 return response.choices[0].message.content.strip()
-                
+
         except Exception as e:
             logger.error(f"[LLM] generate() failed: {e}")
             raise
@@ -1162,17 +1164,17 @@ Now extract entities from the context above:
     async def generate_embedding_instruction(self, query: str) -> str:
         """
         Generate a query-specific instruction for Qwen3-Embedding.
-        
+
         Creates a tailored instruction that tells the embedding model what kind of
         information to retrieve for this specific query.
-        
+
         Example:
         Query: "What movies did Tom Hanks star in?"
         Returns: "Instruct: Retrieve filmography and acting credits for the person mentioned\nQuery: "
-        
+
         Args:
             query: The user's search query
-            
+
         Returns:
             Custom instruction prefix for this query
         """
@@ -1210,7 +1212,7 @@ Instruction: Retrieve personal travel events and location visits
 
 Now generate the instruction:
 """
-        
+
         try:
             if self.is_gemini:
                 response = self.gemini_client.models.generate_content(
@@ -1225,7 +1227,7 @@ Now generate the instruction:
             else:
                 model = settings.MODEL_BRAIN
                 extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
-                
+
                 response = self.chat_client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
@@ -1233,24 +1235,24 @@ Now generate the instruction:
                     extra_body=extra_body,
                 )
                 instruction_text = response.choices[0].message.content.strip()
-            
+
             # Format as Qwen3 instruction
             formatted = f"Instruct: {instruction_text}\nQuery: "
             logger.info(f"[LLM] Generated embedding instruction: {instruction_text}")
             return formatted
-            
+
         except Exception as e:
             logger.warning(f"[LLM] Failed to generate instruction, using default: {e}")
             # Fallback to generic PKM instruction
             return "Instruct: Retrieve relevant information from the personal knowledge base\nQuery: "
-    
+
     def expand_type_synonyms(self, entity_type: str) -> list[str]:
         """
         Dynamically generate type synonyms using LLM reasoning.
-        
+
         Args:
             entity_type: The entity type to expand (e.g., "film", "person")
-        
+
         Returns:
             List of synonym types (including original)
         """
@@ -1275,7 +1277,9 @@ Synonyms:"""
                 response = self.gemini_client.models.generate_content(
                     model=settings.GEMINI_MODEL,
                     contents=prompt,
-                    config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=100),
+                    config=types.GenerateContentConfig(
+                        temperature=0.1, max_output_tokens=100
+                    ),
                 )
                 answer = response.text.strip()
             else:
@@ -1289,16 +1293,22 @@ Synonyms:"""
                 answer = response.choices[0].message.content.strip()
 
             # Parse synonyms
-            synonyms = [s.strip().lower() for s in answer.replace("\n", ",").split(",") if s.strip()]
+            synonyms = [
+                s.strip().lower()
+                for s in answer.replace("\n", ",").split(",")
+                if s.strip()
+            ]
             # Always include original
             if entity_type.lower() not in synonyms:
                 synonyms.insert(0, entity_type.lower())
-            
+
             logger.debug(f"[LLM] Type synonyms for '{entity_type}': {synonyms}")
             return synonyms[:6]  # Limit to 6
 
         except Exception as e:
-            logger.warning(f"[LLM] Failed to expand type synonyms for '{entity_type}': {e}")
+            logger.warning(
+                f"[LLM] Failed to expand type synonyms for '{entity_type}': {e}"
+            )
             return [entity_type.lower()]  # Fallback to original
 
     async def synthesize(self, top_docs: list[dict], query: str) -> str:

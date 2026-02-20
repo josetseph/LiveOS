@@ -21,10 +21,10 @@ recall_worse = 0
 recall_same = 0
 recall_to_zero = 0
 
-for r1, r2 in zip(run1['results'], run2['results']):
-    if r1['test_id'] == r2['test_id']:
-        diff = r2['retrieval_recall'] - r1['retrieval_recall']
-        if r2['retrieval_recall'] == 0 and r1['retrieval_recall'] > 0:
+for r1, r2 in zip(run1["results"], run2["results"]):
+    if r1["test_id"] == r2["test_id"]:
+        diff = r2["retrieval_recall"] - r1["retrieval_recall"]
+        if r2["retrieval_recall"] == 0 and r1["retrieval_recall"] > 0:
             recall_to_zero += 1
         elif diff > 0.01:
             recall_improved += 1
@@ -47,15 +47,17 @@ print("=" * 70)
 print()
 
 zero_recall = []
-for r1, r2 in zip(run1['results'], run2['results']):
-    if r1['test_id'] == r2['test_id']:
-        if r1['retrieval_recall'] > 0 and r2['retrieval_recall'] == 0:
-            zero_recall.append({
-                'question': r1['question'],
-                'expected': r1['expected_answer'],
-                'recall1': r1['retrieval_recall'],
-                'precision1': r1['retrieval_precision'],
-            })
+for r1, r2 in zip(run1["results"], run2["results"]):
+    if r1["test_id"] == r2["test_id"]:
+        if r1["retrieval_recall"] > 0 and r2["retrieval_recall"] == 0:
+            zero_recall.append(
+                {
+                    "question": r1["question"],
+                    "expected": r1["expected_answer"],
+                    "recall1": r1["retrieval_recall"],
+                    "precision1": r1["retrieval_precision"],
+                }
+            )
 
 for zr in zero_recall:
     print(f"Q: {zr['question']}")
@@ -71,19 +73,21 @@ print("=" * 70)
 print()
 
 worse_recalls = []
-for r1, r2 in zip(run1['results'], run2['results']):
-    if r1['test_id'] == r2['test_id']:
-        diff = r2['retrieval_recall'] - r1['retrieval_recall']
+for r1, r2 in zip(run1["results"], run2["results"]):
+    if r1["test_id"] == r2["test_id"]:
+        diff = r2["retrieval_recall"] - r1["retrieval_recall"]
         if diff < -0.3:  # Lost more than 30% recall
-            worse_recalls.append({
-                'question': r1['question'],
-                'expected': r1['expected_answer'],
-                'recall1': r1['retrieval_recall'],
-                'recall2': r2['retrieval_recall'],
-                'diff': diff
-            })
+            worse_recalls.append(
+                {
+                    "question": r1["question"],
+                    "expected": r1["expected_answer"],
+                    "recall1": r1["retrieval_recall"],
+                    "recall2": r2["retrieval_recall"],
+                    "diff": diff,
+                }
+            )
 
-worse_recalls.sort(key=lambda x: x['diff'])
+worse_recalls.sort(key=lambda x: x["diff"])
 for wr in worse_recalls[:10]:
     print(f"Q: {wr['question'][:75]}...")
     print(f"   Expected: {wr['expected']}")

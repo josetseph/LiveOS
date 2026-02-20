@@ -30,6 +30,8 @@ COMPONENT_LOG_FILES = {
     "RetrievalService": "retrieval.log",
     "GraphService": "graph.log",
     "LLMService": "llm.log",
+    "AliasScript": "alias_detection.log",
+    "AliasDetector": "alias_detection.log",
     "uvicorn.access": "api.log",
     "uvicorn.error": "api.log",
     "MultimediaService": "multimedia.log",

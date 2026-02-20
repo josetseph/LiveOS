@@ -17,7 +17,9 @@ class IngestionTrackerService:
 
     def __init__(self):
         self.last_ingestion_time: datetime | None = None
-        self.alias_detection_delay = timedelta(minutes=5)  # Wait 5 min after last ingestion
+        self.alias_detection_delay = timedelta(
+            minutes=5
+        )  # Wait 5 min after last ingestion
         self.scheduled_task: asyncio.Task | None = None
         self.is_alias_detection_running = False
 
@@ -27,11 +29,15 @@ class IngestionTrackerService:
         Resets the timer for alias detection (debouncing).
         """
         self.last_ingestion_time = datetime.now()
-        logger.info(f"[IngestionTracker] Ingestion completed at {self.last_ingestion_time}")
+        logger.info(
+            f"[IngestionTracker] Ingestion completed at {self.last_ingestion_time}"
+        )
 
         # Cancel existing scheduled task (debounce)
         if self.scheduled_task and not self.scheduled_task.done():
-            logger.info("[IngestionTracker] Cancelling previous scheduled alias detection (debounce)")
+            logger.info(
+                "[IngestionTracker] Cancelling previous scheduled alias detection (debounce)"
+            )
             self.scheduled_task.cancel()
 
         # Schedule new alias detection
@@ -52,7 +58,9 @@ class IngestionTrackerService:
 
             # Check if we're still the most recent scheduled task
             if self.is_alias_detection_running:
-                logger.info("[IngestionTracker] Alias detection already running, skipping")
+                logger.info(
+                    "[IngestionTracker] Alias detection already running, skipping"
+                )
                 return
 
             # Run alias detection
@@ -60,7 +68,9 @@ class IngestionTrackerService:
             await self._run_alias_detection()
 
         except asyncio.CancelledError:
-            logger.info("[IngestionTracker] Alias detection cancelled (new ingestion occurred)")
+            logger.info(
+                "[IngestionTracker] Alias detection cancelled (new ingestion occurred)"
+            )
         except Exception as e:
             logger.error(f"[IngestionTracker] Error in scheduled alias detection: {e}")
 

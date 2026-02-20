@@ -30,19 +30,19 @@ metrics = [
 ]
 
 for label, key in metrics:
-    val1 = run1['metrics'][key]
-    val2 = run2['metrics'][key]
+    val1 = run1["metrics"][key]
+    val2 = run2["metrics"][key]
     diff = val2 - val1
     pct_change = (diff / val1 * 100) if val1 > 0 else 0
-    
-    arrow = "→" 
+
+    arrow = "→"
     if diff > 0.001:
         status = "↑"
     elif diff < -0.001:
         status = "↓"
     else:
         status = "="
-    
+
     print(f"{label:25s}: {val1:.2%} → {val2:.2%}  ({diff*100:+.1f}pp)  {status}")
 
 print()
@@ -52,8 +52,10 @@ print("=" * 70)
 print()
 
 # Check if answer quality got worse
-em_diff = (run2['metrics']['answer_exact_match'] - run1['metrics']['answer_exact_match']) * 100
-f1_diff = (run2['metrics']['answer_f1'] - run1['metrics']['answer_f1']) * 100
+em_diff = (
+    run2["metrics"]["answer_exact_match"] - run1["metrics"]["answer_exact_match"]
+) * 100
+f1_diff = (run2["metrics"]["answer_f1"] - run1["metrics"]["answer_f1"]) * 100
 
 if em_diff < -1:
     print(f"⚠️  REGRESSION: Answer Exact Match DECREASED by {abs(em_diff):.1f}pp")
@@ -68,8 +70,12 @@ else:
     print(f"✓  Answer F1 stable or improved")
 
 # Check retrieval quality
-prec_diff = (run2['metrics']['retrieval_precision'] - run1['metrics']['retrieval_precision']) * 100
-recall_diff = (run2['metrics']['retrieval_recall'] - run1['metrics']['retrieval_recall']) * 100
+prec_diff = (
+    run2["metrics"]["retrieval_precision"] - run1["metrics"]["retrieval_precision"]
+) * 100
+recall_diff = (
+    run2["metrics"]["retrieval_recall"] - run1["metrics"]["retrieval_recall"]
+) * 100
 
 print()
 if prec_diff > 0.1:
@@ -91,40 +97,46 @@ print()
 
 # Compare same questions
 changes = []
-for i, (r1, r2) in enumerate(zip(run1['results'], run2['results'])):
-    if r1['test_id'] == r2['test_id']:
-        if r1['exact_match'] != r2['exact_match']:
-            changes.append({
-                'question': r1['question'],
-                'expected': r1['expected_answer'],
-                'run1_match': r1['exact_match'],
-                'run2_match': r2['exact_match'],
-                'run1_precision': r1['retrieval_precision'],
-                'run2_precision': r2['retrieval_precision'],
-            })
+for i, (r1, r2) in enumerate(zip(run1["results"], run2["results"])):
+    if r1["test_id"] == r2["test_id"]:
+        if r1["exact_match"] != r2["exact_match"]:
+            changes.append(
+                {
+                    "question": r1["question"],
+                    "expected": r1["expected_answer"],
+                    "run1_match": r1["exact_match"],
+                    "run2_match": r2["exact_match"],
+                    "run1_precision": r1["retrieval_precision"],
+                    "run2_precision": r2["retrieval_precision"],
+                }
+            )
 
 if changes:
     print(f"Found {len(changes)} questions where exact match changed:")
     print()
-    
+
     # Questions that got worse
-    worse = [c for c in changes if c['run1_match'] and not c['run2_match']]
+    worse = [c for c in changes if c["run1_match"] and not c["run2_match"]]
     if worse:
         print(f"REGRESSIONS (was correct, now wrong): {len(worse)}")
         for c in worse[:3]:
             print(f"  - Q: {c['question'][:80]}...")
             print(f"    Expected: {c['expected']}")
-            print(f"    Precision: {c['run1_precision']:.2%} → {c['run2_precision']:.2%}")
+            print(
+                f"    Precision: {c['run1_precision']:.2%} → {c['run2_precision']:.2%}"
+            )
             print()
-    
+
     # Questions that got better
-    better = [c for c in changes if not c['run1_match'] and c['run2_match']]
+    better = [c for c in changes if not c["run1_match"] and c["run2_match"]]
     if better:
         print(f"IMPROVEMENTS (was wrong, now correct): {len(better)}")
         for c in better[:3]:
             print(f"  - Q: {c['question'][:80]}...")
             print(f"    Expected: {c['expected']}")
-            print(f"    Precision: {c['run1_precision']:.2%} → {c['run2_precision']:.2%}")
+            print(
+                f"    Precision: {c['run1_precision']:.2%} → {c['run2_precision']:.2%}"
+            )
             print()
 
 print()

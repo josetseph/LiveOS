@@ -56,28 +56,22 @@ def get_identifier_property(label: str) -> str:
     return mapping.get(label, "name")
 
 
-async def show_alias_candidates(
-    node_label: str,
-    node_type: str | None,
-    limit: int,
-    confidence_threshold: float
-):
+async def show_alias_candidates(node_label: str, node_type: str | None, limit: int):
     """
     Show potential alias candidates with LLM analysis without creating links.
-    
+
     This is the detailed dry-run mode that shows what WOULD be linked and why.
     """
     from app.services.alias_detector import alias_detector
-    
-    # Set confidence threshold
-    alias_detector.confidence_threshold = confidence_threshold
-    
+
     # Get identifier property for this label
     identifier_prop = get_identifier_property(node_label)
-    
+
     # Build type filter (only for Entity nodes)
-    type_filter = f"{{type: '{node_type}'}}" if node_type and node_label == "Entity" else ""
-    
+    type_filter = (
+        f"{{type: '{node_type}'}}" if node_type and node_label == "Entity" else ""
+    )
+
     # Get nodes to analyze
     query = f"""
     MATCH (n:{node_label} {type_filter})
@@ -89,99 +83,97 @@ async def show_alias_candidates(
            n.summary as summary
     LIMIT $limit
     """
-    
+
     nodes = graph_service.execute_query(query, {"limit": limit})
-    
+
     total_analyzed = 0
     total_would_link = 0
     potential_links = []
-    
+
     for node in nodes:
         node_value = node["identifier_value"]
         node_type_val = node.get("node_type")  # Only Entity has type
         node_summary = node["summary"]
-        
+
         # For non-Entity labels, node_type is None
         if node_label == "Entity" and not node_type_val:
             continue
-        
+
         type_info = f" ({node_type_val})" if node_type_val else ""
         print(f"[*] Analyzing: {node_value}{type_info} [{node_label}]")
-        
+
         # Find potential aliases
         candidates = await alias_detector.find_potential_aliases(
             node_value=node_value,
             node_label=node_label,
             identifier_property=identifier_prop,
             node_type=node_type_val,
-            limit=3
+            limit=3,
         )
-        
+
         if not candidates:
             print("   [+] No potential aliases found\n")
             total_analyzed += 1
             continue
-        
+
         print(f"   Found {len(candidates)} potential candidates:")
-        
+
         for candidate in candidates:
             candidate_value = candidate["identifier_value"]
             candidate_summary = candidate.get("summary", "")
-            
+
             if not candidate_summary or len(candidate_summary) < 20:
                 print(f"   [-] {candidate_value} (insufficient context)")
                 continue
-            
-            # LLM comparison
-            is_same, reason, confidence = await alias_detector.compare_entities_with_llm(
+
+            # LLM analysis
+            relationship_type, reason = await alias_detector.compare_entities_with_llm(
                 node_value, node_summary, candidate_value, candidate_summary
             )
-            
+
             # Show result
-            if is_same and confidence >= confidence_threshold:
-                print(f"   [YES] WOULD LINK -> {candidate_value}")
-                print(f"      Confidence: {confidence:.2%}")
+            if relationship_type:
+                rel_label = relationship_type.replace("_", " ")
+                print(f"   [→] {rel_label}: {candidate_value}")
                 print(f"      Reason: {reason}")
                 total_would_link += 1
-                potential_links.append({
-                    "alias": node_value,
-                    "canonical": candidate_value,
-                    "confidence": confidence,
-                    "reason": reason,
-                })
-            elif is_same:
-                print(f"   [WARN] MATCH (confidence too low) -> {candidate_value}")
-                print(f"      Confidence: {confidence:.2%} (threshold: {confidence_threshold:.2%})")
-                print(f"      Reason: {reason}")
+                potential_links.append(
+                    {
+                        "entity1": node_value,
+                        "entity2": candidate_value,
+                        "relationship": relationship_type,
+                        "reason": reason,
+                    }
+                )
             else:
-                print(f"   [NO] NOT same entity -> {candidate_value}")
-                print(f"      Confidence: {confidence:.2%}")
+                print(f"   [-] NO RELATIONSHIP: {candidate_value}")
                 print(f"      Reason: {reason}")
-        
+
         print()
         total_analyzed += 1
-        
+
         # Small delay to avoid rate limiting
         await asyncio.sleep(0.2)
-    
+
     # Summary
     print("\n" + "=" * 80)
     print("CANDIDATE ANALYSIS SUMMARY")
     print("=" * 80)
     print(f"Entities Analyzed:     {total_analyzed}")
-    print(f"Links Would Create:    {total_would_link}")
-    print(f"Confidence Threshold:  {confidence_threshold:.2%}")
+    print(f"Relationships Found:   {total_would_link}")
+    print(f"Decision:              LLM determines type")
     print("=" * 80 + "\n")
-    
+
     if potential_links:
-        print("Links that would be created:\n")
+        print("Relationships that would be created:\n")
         for i, link in enumerate(potential_links, 1):
-            print(f"{i:2d}. '{link['alias']}' -> '{link['canonical']}'")
-            print(f"    Confidence: {link['confidence']:.2%}")
+            rel_label = link["relationship"].replace("_", " ")
+            print(f"{i:2d}. '{link['entity1']}' ↔ '{link['entity2']}'")
+            print(f"    Type: {rel_label}")
             print(f"    Reason: {link['reason']}\n")
-        
+
         print("[TIP] To create these links, run without --show-candidates:")
-        print(f"   python scripts/detect_aliases.py --limit {limit} --confidence {confidence_threshold}\n")
+        print(f"   python scripts/detect_aliases.py --limit {limit}\n")
     else:
         print("[OK] No alias links would be created with current threshold.\n")
 
@@ -220,18 +212,11 @@ async def main():
         action="store_true",
         help="Show what would be done without making changes",
     )
-    
+
     parser.add_argument(
         "--show-candidates",
         action="store_true",
         help="Show potential alias candidates with LLM reasoning (no changes made)",
-    )
-
-    parser.add_argument(
-        "--confidence",
-        type=float,
-        default=0.98,
-        help="Minimum LLM confidence score to create alias link (default: 0.98)",
     )
 
     args = parser.parse_args()
@@ -243,7 +228,7 @@ async def main():
         labels_to_process = [args.label]
 
     print("\n" + "=" * 80)
-    print("ALIAS DETECTION SCRIPT")
+    print("RELATIONSHIP DETECTION SCRIPT")
     print("=" * 80)
     if args.label == "All":
         print(f"Node Labels:  All (Entity, Concept, Task, Persona, Reference)")
@@ -252,7 +237,9 @@ async def main():
     if args.label == "Entity" and args.type:
         print(f"Entity Type:  {args.type}")
     print(f"Limit:        {args.limit} per label")
-    print(f"Confidence:   {args.confidence} (only link if >= this threshold)")
+    print(
+        f"Decision:     LLM determines relationship type (IS_SAME_AS, IS_VARIANT_OF, IS_SIMILAR_TO, RELATED_TO)"
+    )
     if args.show_candidates:
         print("Mode:         SHOW CANDIDATES (analysis only, no changes)")
     elif args.dry_run:
@@ -264,17 +251,10 @@ async def main():
     if args.dry_run and not args.show_candidates:
         print("[DRY RUN] No changes will be made to the graph\n")
     elif args.show_candidates:
-        print("[ANALYSIS] Will show potential links with LLM reasoning\n")
-
-    # Set confidence threshold
-    alias_detector.confidence_threshold = args.confidence
+        print("[ANALYSIS] Will show potential relationships with LLM reasoning\n")
 
     # Process each label
-    total_stats = {
-        "processed": 0,
-        "links_created": 0,
-        "no_candidates": 0
-    }
+    total_stats = {"processed": 0, "links_created": 0, "no_candidates": 0}
     overall_start = datetime.now()
 
     for label in labels_to_process:
@@ -283,7 +263,9 @@ async def main():
 
         print(f"\n[{label}] Counting eligible nodes...")
         # Count total nodes
-        type_filter = f"{{type: '{args.type}'}}" if args.type and label == "Entity" else ""
+        type_filter = (
+            f"{{type: '{args.type}'}}" if args.type and label == "Entity" else ""
+        )
         count_query = f"""
         MATCH (n:{label} {type_filter})
         WHERE NOT (n)-[:IS_SAME_AS]->()
@@ -306,8 +288,14 @@ async def main():
             continue
 
         # Confirm if not dry run or show-candidates (only ask once for first label)
-        if not args.dry_run and not args.show_candidates and label == labels_to_process[0]:
-            response = input("Continue with LIVE run? This will create IS_SAME_AS links. [y/N]: ")
+        if (
+            not args.dry_run
+            and not args.show_candidates
+            and label == labels_to_process[0]
+        ):
+            response = input(
+                "Continue with LIVE run? This will create IS_SAME_AS links. [y/N]: "
+            )
             if response.lower() != "y":
                 print("[CANCELLED]")
                 return
@@ -318,11 +306,15 @@ async def main():
 
         if args.show_candidates:
             print(f"\n[*] Analyzing potential {label} alias candidates...\n")
-            await show_alias_candidates(label, args.type, args.limit, args.confidence)
+            await show_alias_candidates(label, args.type, args.limit)
         elif args.dry_run:
             print(f"\n[*] Analyzing {label} nodes (DRY RUN)...\n")
-            print("[INFO] Basic dry-run mode. Use --show-candidates for detailed analysis.")
-            print(f"    Would process {min(args.limit, total_candidates)} {label} nodes looking for aliases.\n")
+            print(
+                "[INFO] Basic dry-run mode. Use --show-candidates for detailed analysis."
+            )
+            print(
+                f"    Would process {min(args.limit, total_candidates)} {label} nodes looking for aliases.\n"
+            )
         else:
             print(f"\n[*] Running alias detection on {label} nodes...\n")
             # For now, batch detection only supports Entity (keep for backward compatibility)
@@ -345,8 +337,12 @@ async def main():
                 print(f"Entities Processed:    {stats['processed']}")
                 print(f"Links Created:         {stats['links_created']}")
                 print(f"No Candidates:         {stats['no_candidates']}")
-                print(f"Duration:              {duration:.1f}s ({duration/60:.1f} minutes)")
-                print(f"Average per entity:    {duration/max(stats['processed'], 1):.2f}s")
+                print(
+                    f"Duration:              {duration:.1f}s ({duration/60:.1f} minutes)"
+                )
+                print(
+                    f"Average per entity:    {duration/max(stats['processed'], 1):.2f}s"
+                )
                 print("-" * 80 + "\n")
             else:
                 # For other labels, process one by one
@@ -366,8 +362,12 @@ async def main():
         print(f"Total Nodes Processed: {total_stats['processed']}")
         print(f"Total Links Created:   {total_stats['links_created']}")
         print(f"No Candidates:         {total_stats['no_candidates']}")
-        print(f"Total Duration:        {overall_duration:.1f}s ({overall_duration/60:.1f} minutes)")
-        print(f"Average per node:      {overall_duration/max(total_stats['processed'], 1):.2f}s")
+        print(
+            f"Total Duration:        {overall_duration:.1f}s ({overall_duration/60:.1f} minutes)"
+        )
+        print(
+            f"Average per node:      {overall_duration/max(total_stats['processed'], 1):.2f}s"
+        )
         print("=" * 80 + "\n")
 
         if total_stats["links_created"] > 0:

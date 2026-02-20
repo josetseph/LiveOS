@@ -38,28 +38,30 @@ class EmbeddingService:
             model=settings.MODEL_EMBEDDING,
             keep_alive="-1",
         )
-        
+
         # Qwen3-Embedding instruction prefix for QUERIES (not documents)
         # This is CRITICAL for Qwen3 series - without it, performance drops significantly
         # Tailored for Personal Knowledge Management (PKM) retrieval
         self.query_instruction = "Instruct: Given a question about personal knowledge, notes, or experiences, retrieve relevant information from the knowledge base that helps answer the question\nQuery: "
-        
+
         # Check if current model is Qwen3 to apply instruction
         self.is_qwen3 = "qwen3" in settings.MODEL_EMBEDDING.lower()
 
     def embed_query(self, text: str, custom_instruction: str = None) -> list[float]:
         """
         Embed a search query with instruction prefix for Qwen3 models.
-        
+
         For Qwen3-Embedding models, prepends instruction to align query representation
         with passage representation space. This is the "Instruction Paradox" fix.
-        
+
         Args:
             text: The query text to embed
             custom_instruction: Optional LLM-generated instruction (overrides default)
         """
         if self.is_qwen3:
-            instruction = custom_instruction if custom_instruction else self.query_instruction
+            instruction = (
+                custom_instruction if custom_instruction else self.query_instruction
+            )
             prefixed_text = instruction + text
             return self.embeddings.embed_query(prefixed_text)
         return self.embeddings.embed_query(text)
@@ -67,7 +69,7 @@ class EmbeddingService:
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """
         Embed documents/passages WITHOUT instruction prefix.
-        
+
         Only queries get the instruction prefix, not the documents being indexed.
         """
         return self.embeddings.embed_documents(texts)

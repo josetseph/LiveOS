@@ -368,16 +368,22 @@ class RetrievalService:
         # This creates query-specific instructions like "Retrieve filmography for person mentioned"
         # instead of using the generic PKM instruction
         t_instruction_start = time.perf_counter()
-        use_dynamic_instruction = getattr(settings, 'USE_DYNAMIC_EMBEDDING_INSTRUCTION', False)
+        use_dynamic_instruction = getattr(
+            settings, "USE_DYNAMIC_EMBEDDING_INSTRUCTION", False
+        )
         custom_instruction = None
-        
+
         if use_dynamic_instruction:
             custom_instruction = await llm_service.generate_embedding_instruction(query)
             t_instruction = time.perf_counter() - t_instruction_start
-            logger.info(f"  [⏱️ Timing] Dynamic instruction generation: {t_instruction:.2f}s")
-        
+            logger.info(
+                f"  [⏱️ Timing] Dynamic instruction generation: {t_instruction:.2f}s"
+            )
+
         # Generate query embedding for vector search (with optional dynamic instruction)
-        full_vector = embedding_service.embed_query(query, custom_instruction=custom_instruction)
+        full_vector = embedding_service.embed_query(
+            query, custom_instruction=custom_instruction
+        )
         # Note: No longer storing query embedding - isolated context filtering disabled
         t_embedding = time.perf_counter() - t_instruction_start
         logger.info(f"  [⏱️ Timing] Total query embedding: {t_embedding:.2f}s")
@@ -516,18 +522,20 @@ class RetrievalService:
         # STEP 3: NEIGHBOR EXPANSION - Get 1-hop neighbors of top results
         # Expand from both entity matches and vector matches
         # This finds related context (e.g., "Albert Einstein" → "Princeton")
-        
+
         # PRIORITY: Follow IS_SAME_AS links first (alias resolution)
         # These links created by alias detector indicate entity identity
         all_primary_nodes = entity_nodes + vector_nodes
         alias_resolved_nodes = []
-        
+
         if all_primary_nodes:
-            logger.info(f"  [Alias] Checking {len(all_primary_nodes)} nodes for IS_SAME_AS links")
-            
+            logger.info(
+                f"  [Alias] Checking {len(all_primary_nodes)} nodes for IS_SAME_AS links"
+            )
+
             for node in all_primary_nodes:
                 node_name = node["name"]
-                
+
                 # Check if this node is an alias (points to canonical entity)
                 alias_query = """
                 MATCH (alias:Entity {name: $name})-[r:IS_SAME_AS]->(canonical:Entity)
@@ -538,24 +546,26 @@ class RetrievalService:
                        r.confidence as alias_confidence,
                        labels(canonical) as labels
                 """
-                
-                alias_results = graph_service.execute_query(alias_query, {"name": node_name})
-                
+
+                alias_results = graph_service.execute_query(
+                    alias_query, {"name": node_name}
+                )
+
                 if alias_results:
                     # Follow the IS_SAME_AS link to canonical entity
                     canonical = alias_results[0]
                     canonical_name = canonical["canonical_name"]
                     alias_confidence = canonical.get("alias_confidence", 1.0)
-                    
+
                     logger.info(
                         f"  [Alias] Resolved '{node_name}' -> '{canonical_name}' "
                         f"(confidence: {alias_confidence:.2f})"
                     )
-                    
+
                     # KEEP BOTH: alias node (for its unique contexts) AND canonical node (for main info)
                     # This ensures we don't lose contexts that were specifically attached to the alias
                     alias_resolved_nodes.append(node)  # Keep the alias node
-                    
+
                     # Also add canonical node (if not already present)
                     canonical_node_names = {n["name"] for n in alias_resolved_nodes}
                     if canonical_name not in canonical_node_names:
@@ -573,15 +583,15 @@ class RetrievalService:
                 else:
                     # No alias - keep original node
                     alias_resolved_nodes.append(node)
-        
+
             logger.info(
                 f"  [Alias] After alias resolution: {len(alias_resolved_nodes)} nodes "
                 f"({len(alias_resolved_nodes) - len(all_primary_nodes)} added via IS_SAME_AS)"
             )
-            
+
             # Use alias-resolved nodes for neighbor expansion
             all_primary_nodes = alias_resolved_nodes
-        
+
         if all_primary_nodes:
             t_expand_start = time.perf_counter()
             for node in all_primary_nodes[:15]:  # Top 15 primary results
@@ -597,7 +607,7 @@ class RetrievalService:
                         max_depth=1,  # Only 1-hop neighbors
                         min_confidence=0.5,
                     )
-                    
+
                     # Score neighbors by QUERY RELEVANCE, not just confidence
                     # This ensures we expand to contextually relevant neighbors
                     # E.g., "Where was Ed Wood born?" → Baltimore (not Johnny Depp)
@@ -609,16 +619,35 @@ class RetrievalService:
                             if confidence_path
                             else 0.5
                         )
-                        
+
                         # 2. Keyword relevance (fast heuristic)
                         # Check if query keywords appear in neighbor summary/name
                         neighbor_text = f"{neighbor.get('name', '')} {neighbor.get('summary', '')}".lower()
-                        query_keywords = set(query.lower().split()) - {"what", "where", "when", "who", "how", "the", "is", "was", "are", "were"}
-                        keyword_matches = sum(1 for kw in query_keywords if kw in neighbor_text)
-                        keyword_relevance = min(keyword_matches / max(len(query_keywords), 1), 1.0)
-                        
+                        query_keywords = set(query.lower().split()) - {
+                            "what",
+                            "where",
+                            "when",
+                            "who",
+                            "how",
+                            "the",
+                            "is",
+                            "was",
+                            "are",
+                            "were",
+                        }
+                        keyword_matches = sum(
+                            1 for kw in query_keywords if kw in neighbor_text
+                        )
+                        keyword_relevance = min(
+                            keyword_matches / max(len(query_keywords), 1), 1.0
+                        )
+
                         # 3. Type match score (if expected types specified)
-                        neighbor_type = neighbor.get("entity_type", "").lower() if neighbor.get("entity_type") else ""
+                        neighbor_type = (
+                            neighbor.get("entity_type", "").lower()
+                            if neighbor.get("entity_type")
+                            else ""
+                        )
                         if expected_entity_types and neighbor_type:
                             expected_lower = [t.lower() for t in expected_entity_types]
                             if neighbor_type in expected_lower:
@@ -639,18 +668,18 @@ class RetrievalService:
                                 type_relevance = 0.7 if matches_synonym else 0.2
                         else:
                             type_relevance = 0.5  # Neutral if no type filtering
-                        
+
                         # Combined selection score: type > keyword > confidence
                         # Prioritize type match (most important for disambiguation)
                         neighbor["_selection_score"] = (
-                            type_relevance * 0.5 +
-                            keyword_relevance * 0.3 +
-                            avg_confidence * 0.2
+                            type_relevance * 0.5
+                            + keyword_relevance * 0.3
+                            + avg_confidence * 0.2
                         )
                         neighbor["_avg_confidence"] = avg_confidence
                         neighbor["_keyword_relevance"] = keyword_relevance
                         neighbor["_type_relevance"] = type_relevance
-                    
+
                     # Sort by selection score (query-aware), not just confidence
                     neighbors.sort(
                         key=lambda n: n.get("_selection_score", 0.0), reverse=True
@@ -929,23 +958,23 @@ class RetrievalService:
         # If we know the expected entity types (e.g., "Person" for nationality questions),
         # boost candidates that match and penalize those that don't
         # Uses LLM-based synonym expansion + embedding similarity for fuzzy matching
-        
+
         # Cache for type synonyms (avoid repeated LLM calls)
         type_synonym_cache = {}
-        
+
         def get_type_synonyms(entity_type: str) -> list[str]:
             """Get synonyms for a type using LLM or embedding similarity"""
             if entity_type.lower() in type_synonym_cache:
                 return type_synonym_cache[entity_type.lower()]
-            
+
             # Use LLM to expand synonyms
             synonyms = llm_service.expand_type_synonyms(entity_type)
             type_synonym_cache[entity_type.lower()] = synonyms
             return synonyms
-        
+
         def get_type_score(candidate) -> float:
             """Score based on entity type match. 1.0 = match, 0.5 = unknown, 0.1 = mismatch
-            
+
             Uses:
             1. Direct string match
             2. LLM-generated synonyms
@@ -973,20 +1002,23 @@ class RetrievalService:
                 synonyms = get_type_synonyms(exp_type)
                 if entity_type_lower in synonyms:
                     return 0.9  # Synonym match
-            
+
             # 3. Embedding similarity fallback (for fuzzy matches)
             # Check if entity_type is semantically close to any expected type
             try:
                 entity_type_embedding = embedding_service.embed_query(entity_type_lower)
                 max_similarity = 0.0
-                
+
                 for exp_type in expected_lower:
                     exp_embedding = embedding_service.embed_query(exp_type)
                     # Cosine similarity
                     from app.services.embedding import compute_cosine_similarity
-                    similarity = compute_cosine_similarity(entity_type_embedding, exp_embedding)
+
+                    similarity = compute_cosine_similarity(
+                        entity_type_embedding, exp_embedding
+                    )
                     max_similarity = max(max_similarity, similarity)
-                
+
                 # If embedding similarity is high, consider it a match
                 if max_similarity > 0.7:
                     return 0.85  # Semantic match
@@ -1002,7 +1034,7 @@ class RetrievalService:
             Score based on semantic similarity between the candidate's summary
             and the query. Uses embedding-based cosine similarity for general-purpose
             attribute relevance without hardcoded keywords.
-            
+
             Also performs CONTEXT-BASED DISAMBIGUATION:
             - If multiple entities share the same name, use query context to pick the right one
             - Example: "Michael Jordan" (basketball) vs "Michael Jordan" (professor)
@@ -1018,11 +1050,24 @@ class RetrievalService:
             existing_score = candidate.get("vector_score", 0.0)
             if existing_score > 0:
                 # Context disambiguation: Boost if query keywords appear in summary
-                query_keywords = set(query.lower().split()) - {"what", "where", "when", "who", "how", "the", "is", "was", "are", "were"}
+                query_keywords = set(query.lower().split()) - {
+                    "what",
+                    "where",
+                    "when",
+                    "who",
+                    "how",
+                    "the",
+                    "is",
+                    "was",
+                    "are",
+                    "were",
+                }
                 summary_lower = summary.lower()
                 keyword_matches = sum(1 for kw in query_keywords if kw in summary_lower)
-                keyword_boost = min(keyword_matches / max(len(query_keywords), 1) * 0.2, 0.2)
-                
+                keyword_boost = min(
+                    keyword_matches / max(len(query_keywords), 1) * 0.2, 0.2
+                )
+
                 return min(existing_score + keyword_boost, 1.0)
 
             # Fallback: compute similarity if not available
@@ -1037,13 +1082,28 @@ class RetrievalService:
                 norm_s = sum(a * a for a in summary_vector) ** 0.5
                 if norm_q > 0 and norm_s > 0:
                     base_similarity = dot_product / (norm_q * norm_s)
-                    
+
                     # Context disambiguation boost
-                    query_keywords = set(query.lower().split()) - {"what", "where", "when", "who", "how", "the", "is", "was", "are", "were"}
+                    query_keywords = set(query.lower().split()) - {
+                        "what",
+                        "where",
+                        "when",
+                        "who",
+                        "how",
+                        "the",
+                        "is",
+                        "was",
+                        "are",
+                        "were",
+                    }
                     summary_lower = summary.lower()
-                    keyword_matches = sum(1 for kw in query_keywords if kw in summary_lower)
-                    keyword_boost = min(keyword_matches / max(len(query_keywords), 1) * 0.2, 0.2)
-                    
+                    keyword_matches = sum(
+                        1 for kw in query_keywords if kw in summary_lower
+                    )
+                    keyword_boost = min(
+                        keyword_matches / max(len(query_keywords), 1) * 0.2, 0.2
+                    )
+
                     return min(base_similarity + keyword_boost, 1.0)
             except Exception as e:
                 logger.warning(f"Failed to compute semantic similarity: {e}")
@@ -1071,7 +1131,7 @@ class RetrievalService:
         # NOTE: Domain boosting removed for nodes (only Notes have domain property)
         # Entity/Concept/Task nodes don't have domain, so boosting was broken
         # If domain filtering needed, implement at Note level or propagate domain to nodes during ingestion
-        
+
         # Sort by combined score, then by priority
         def sort_key(c):
             priority_order = {"primary": 0, "secondary": 1, "tertiary": 2}

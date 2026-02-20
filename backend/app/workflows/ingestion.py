@@ -88,11 +88,12 @@ class IngestionWorkflow:
         logger.info(
             f"[{datetime.now()}] SUCCESS: Note {note_id} fully indexed in {duration:.2f}s."
         )
-        
+
         # Notify ingestion tracker for auto-scheduled alias detection
         from app.services.ingestion_tracker import ingestion_tracker
+
         ingestion_tracker.mark_ingestion_complete()
-        
+
         return {
             "note_id": final_state["note_id"],
             "extraction": final_state["extraction"].model_dump(),
@@ -1028,15 +1029,15 @@ Summarize the common themes and key insights that connect these items."""
 
             # Trigger alias detection for all node types (non-blocking)
             # This runs in the background without slowing down ingestion
-            asyncio.create_task(
-                self._check_node_aliases(name, label, identifier_key)
-            )
+            asyncio.create_task(self._check_node_aliases(name, label, identifier_key))
 
-    async def _check_node_aliases(self, node_value: str, node_label: str, identifier_property: str):
+    async def _check_node_aliases(
+        self, node_value: str, node_label: str, identifier_property: str
+    ):
         """
         Check if newly updated node might be an alias of existing nodes.
         Runs asynchronously in background without blocking ingestion.
-        
+
         Args:
             node_value: Value of the node identifier (name/trait/title)
             node_label: Node label (Entity, Concept, Task, Persona, Reference)
@@ -1044,38 +1045,47 @@ Summarize the common themes and key insights that connect these items."""
         """
         try:
             loop = asyncio.get_running_loop()
-            
+
             # For Entity nodes, we need to get the type (Person, Place, etc.)
             # For other labels, type is None
             node_type = None
             if node_label == "Entity":
+
                 def _get_entity_type():
                     result = graph_service.execute_query(
                         "MATCH (e:Entity {name: $name}) RETURN e.type as type",
-                        {"name": node_value}
+                        {"name": node_value},
                     )
                     return result[0]["type"] if result else None
-                
+
                 node_type = await loop.run_in_executor(None, _get_entity_type)
-                
+
                 if not node_type:
-                    logger.debug(f"  [Alias] No type found for {node_value}, skipping alias check")
+                    logger.debug(
+                        f"  [Alias] No type found for {node_value}, skipping alias check"
+                    )
                     return
-                
-                logger.info(f"  [Alias] Checking for aliases of: {node_value} ({node_label}:{node_type})")
+
+                logger.info(
+                    f"  [Alias] Checking for aliases of: {node_value} ({node_label}:{node_type})"
+                )
             else:
-                logger.info(f"  [Alias] Checking for aliases of: {node_value} ({node_label})")
-            
+                logger.info(
+                    f"  [Alias] Checking for aliases of: {node_value} ({node_label})"
+                )
+
             # Call generic alias detection
             await alias_detector.detect_and_link_aliases_for_node(
                 node_value=node_value,
                 node_label=node_label,
                 identifier_property=identifier_property,
-                node_type=node_type
+                node_type=node_type,
             )
         except Exception as e:
             # Don't let alias detection errors break ingestion
-            logger.warning(f"  [Alias] Failed to check aliases for {node_label} '{node_value}': {e}")
+            logger.warning(
+                f"  [Alias] Failed to check aliases for {node_label} '{node_value}': {e}"
+            )
 
 
 ingestion_workflow = IngestionWorkflow()

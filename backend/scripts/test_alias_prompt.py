@@ -14,7 +14,7 @@ from app.services.alias_detector import alias_detector
 
 async def test_cases():
     """Test the alias detector with known challenging cases."""
-    
+
     test_cases = [
         # Should be YES (true aliases)
         {
@@ -60,55 +60,56 @@ async def test_cases():
             "expected": "NO",
         },
     ]
-    
+
     print("\n" + "=" * 80)
     print("TESTING IMPROVED ALIAS DETECTION PROMPT")
     print("=" * 80 + "\n")
-    
+
     results = {"correct": 0, "incorrect": 0, "total": 0}
-    
+
     for i, test in enumerate(test_cases, 1):
         print(f"{i}. {test['name']}")
         print(f"   Entity 1: {test['entity1']}")
         print(f"   Entity 2: {test['entity2']}")
         print(f"   Expected: {test['expected']}")
-        
+
         is_same, reason, confidence = await alias_detector.compare_entities_with_llm(
-            test["entity1"], test["context1"],
-            test["entity2"], test["context2"]
+            test["entity1"], test["context1"], test["entity2"], test["context2"]
         )
-        
+
         actual = "YES" if is_same else "NO"
         is_correct = actual == test["expected"]
         results["total"] += 1
-        
+
         if is_correct:
             results["correct"] += 1
             status = "✅ CORRECT"
         else:
             results["incorrect"] += 1
             status = "❌ WRONG"
-        
+
         print(f"   Actual: {actual} (confidence: {confidence:.2%}) {status}")
         print(f"   Reason: {reason}")
         print()
-        
+
         # Small delay to avoid rate limits
         await asyncio.sleep(0.5)
-    
+
     # Summary
     print("=" * 80)
     print("RESULTS")
     print("=" * 80)
-    print(f"Correct: {results['correct']}/{results['total']} ({results['correct']/results['total']*100:.1f}%)")
+    print(
+        f"Correct: {results['correct']}/{results['total']} ({results['correct']/results['total']*100:.1f}%)"
+    )
     print(f"Incorrect: {results['incorrect']}/{results['total']}")
     print()
-    
+
     if results["correct"] == results["total"]:
         print("✅ All test cases passed! Prompt improvements are working.")
     else:
         print("⚠️ Some test cases failed. Prompt may need further refinement.")
-    
+
     print("=" * 80 + "\n")
 
 
