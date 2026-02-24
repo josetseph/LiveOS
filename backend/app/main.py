@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.log import setup_logging, get_logger
 
 setup_logging()
-logger = get_logger("uvicorn.access")  # Start with API logger to capture startup
+logger = get_logger("API")  # App logger; avoid uvicorn.access formatter expectations
 
 app = FastAPI(title="LiveOS Brain API", version="0.1.0")
 

@@ -238,17 +238,31 @@ class RetrievalService:
                 context_path = related.get("context_path", [])
 
                 if rel_path:
-                    # Prioritize natural language context over technical relationship type
-                    # Context contains the actual sentence like "Edward Wood directed Ed Wood"
+                    rel_type = rel_path[0]
+
+                    # Include relationship context/reasoning if available
+                    # Context contains LLM reasoning for alias detection relationships
+                    # or natural language for regular relationships
                     if context_path and context_path[0]:
-                        # Use the natural language context directly
-                        rel_str = context_path[0]
-                        # Truncate if too long, but keep meaningful amount
-                        if len(rel_str) > 150:
-                            rel_str = rel_str[:150] + "..."
+                        context = context_path[0]
+                        # Truncate if too long to avoid token bloat
+                        if len(context) > 120:
+                            context = context[:120] + "..."
+
+                        # Format based on relationship type
+                        if rel_type in [
+                            "IS_SAME_AS",
+                            "IS_VARIANT_OF",
+                            "IS_SIMILAR_TO",
+                            "RELATED_TO",
+                        ]:
+                            # Alias detection relationships: show type and reasoning
+                            rel_str = f"{rel_type} → {rel_name} ({context})"
+                        else:
+                            # Regular relationships: context might be a complete sentence
+                            rel_str = f"{rel_type} → {rel_name}: {context}"
                     else:
-                        # Fallback to technical format if no context available
-                        rel_type = rel_path[0]
+                        # No context available - basic format
                         rel_str = f"{rel_type} → {rel_name}"
 
                     relationships.append(rel_str)
@@ -592,6 +606,11 @@ class RetrievalService:
             # Use alias-resolved nodes for neighbor expansion
             all_primary_nodes = alias_resolved_nodes
 
+        # Track primary node names to avoid duplicate expansion
+        primary_node_names = (
+            {node["name"] for node in all_primary_nodes} if all_primary_nodes else set()
+        )
+
         if all_primary_nodes:
             t_expand_start = time.perf_counter()
             for node in all_primary_nodes[:15]:  # Top 15 primary results
@@ -612,6 +631,9 @@ class RetrievalService:
                     # This ensures we expand to contextually relevant neighbors
                     # E.g., "Where was Ed Wood born?" → Baltimore (not Johnny Depp)
                     for neighbor in neighbors:
+                        # Skip neighbor if it's already a primary node (avoid canonical as neighbor of alias)
+                        if neighbor.get("name") in primary_node_names:
+                            continue
                         # 1. Confidence score (relationship strength)
                         confidence_path = neighbor.get("confidence_path", [])
                         avg_confidence = (
@@ -866,17 +888,23 @@ class RetrievalService:
             expanded_from = node.get("_expanded_from", "")
             rel_path = " → ".join(node.get("relationship_path", []))
 
-            # Include relationship context if available (the "Why" behind the link)
+            # Include relationship context/reasoning (the "Why" behind the link)
             context_path = node.get("context_path", [])
             rel_context = ""
             if context_path:
-                # Filter out None values and join
+                # Filter out None values and truncate for readability
                 contexts = [c for c in context_path if c]
                 if contexts:
-                    rel_context = f" Context: {'; '.join(contexts[:2])}"
+                    # Truncate long contexts to avoid token bloat
+                    truncated_contexts = []
+                    for ctx in contexts[:2]:  # Max 2 contexts
+                        if len(ctx) > 100:
+                            ctx = ctx[:100] + "..."
+                        truncated_contexts.append(ctx)
+                    rel_context = f" | Why: {'; '.join(truncated_contexts)}"
 
             if expanded_from:
-                text = f"[Neighbor - {label}: {node['name']}] (expanded from {expanded_from}): {summary}"
+                text = f"[Neighbor - {label}: {node['name']}] (expanded from {expanded_from} via {rel_path}){rel_context}: {summary}"
             else:
                 text = f"[Neighbor - {label}: {node['name']}] (via {rel_path}){rel_context}: {summary}"
 

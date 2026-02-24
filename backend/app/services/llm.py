@@ -854,10 +854,7 @@ FINAL ANSWER:"""
                 response = self.gemini_client.models.generate_content(
                     model=settings.GEMINI_MODEL,
                     contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=temperature,
-                        max_output_tokens=max_tokens,
-                    ),
+                    config=types.GenerateContentConfig(temperature=temperature),
                 )
                 return response.text.strip()
 
@@ -940,7 +937,14 @@ CRITICAL RULES:
    - Example: Must find "who wrote X" before asking "when was [author] born"
 6. Use placeholders like [actress], [director], [person], [author] for entities discovered in previous steps
    - These will be filled in with actual names as we retrieve
+   - NEVER use vague back-references like "that series", "that person", "the author", "the director"
+   - Bad:  "2. Within that series, what are the companion books called?"
+   - Good: "2. What companion books are part of [series]?"
 7. Keep it simple - usually 1-3 information needs (rarely 4+)
+   - If the question already contains ALL the filter criteria needed to describe the entity ("What [type] that [has X] and [does Y]?"), it is a SINGLE-HOP question — the ENTIRE question is itself the lookup. Do NOT break it into sub-questions.
+   - Example of SINGLE-HOP: "What science fantasy series told in first person has companion books about enslaved alien worlds?"
+     → 1 need: "What science fantasy series told in first person has companion books about enslaved alien worlds?"
+   - Example of TWO-HOP: "What award did the author of X win?" (need to find the author first, then the award)
    - Single-hop: 1 need (direct fact lookup)
    - Two-hop: 2 needs (find entity, then find fact about entity)
    - Three-hop: 3 needs (rare, only for very complex chains)
@@ -973,6 +977,10 @@ Information Needs:
 1. What film did Christopher Nolan direct?
 2. When was [film] released?
 
+Question: "What young adult series is told in first person and has companion books about enslaved alien worlds?"
+Information Needs:
+1. What young adult series is told in first person and has companion books about enslaved alien worlds?
+
 Now analyze the question above and list the information needs:
 """
 
@@ -982,10 +990,7 @@ Now analyze the question above and list the information needs:
                 response = self.gemini_client.models.generate_content(
                     model=model,
                     contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.1,
-                        max_output_tokens=500,
-                    ),
+                    config=types.GenerateContentConfig(temperature=0.1),
                 )
                 answer = response.text.strip()
             else:
@@ -1220,7 +1225,6 @@ Now generate the instruction:
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         temperature=0.3,
-                        max_output_tokens=100,
                     ),
                 )
                 instruction_text = response.text.strip()
@@ -1277,9 +1281,7 @@ Synonyms:"""
                 response = self.gemini_client.models.generate_content(
                     model=settings.GEMINI_MODEL,
                     contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.1, max_output_tokens=100
-                    ),
+                    config=types.GenerateContentConfig(temperature=0.1),
                 )
                 answer = response.text.strip()
             else:
@@ -1384,49 +1386,18 @@ Synonyms:"""
         Some context may be background information (e.g., about movies, relationships, careers).
         Your job is to find the FINAL ANSWER to the original question above.
         
-        # REASONING APPROACH
-        Think through the question carefully:
-        - Identify EXACTLY what is being asked in the original question
-        - Find the chain of relevant facts needed to answer it
-        - For multi-hop questions:
-          * First identify intermediate entities (e.g., "Who played X?" → person name)
-          * Then find the final answer about that entity (e.g., "What position did [person] hold?" → the position)
-        - For comparisons, extract the specific attribute being compared
-        - Determine the answer based on the evidence
-        
-        # ANSWER FORMAT RULES
-        **ABSOLUTELY CRITICAL: Your answer must EXACTLY match what the question asks for.**
-        
-        Question Analysis:
-        - "what government position?" → answer is a POSITION NAME (e.g., "Secretary of State")
-        - "what award?" → answer is an AWARD NAME (e.g., "Academy Award")
-        - "what city/location?" → answer is a CITY/LOCATION NAME (e.g., "Los Angeles")
-        - "what company?" → answer is a COMPANY NAME
-        - "what year?" → answer is a YEAR
-        - "who [verb]?" → answer is a PERSON NAME
-        - "were X and Y...?" → answer is "yes" or "no"
-        
-        For yes/no questions:
-        - Answer "yes" or "no" FIRST, then explain
-        - CRITICAL: If both entities share the same attribute, answer "yes"
-        - Example: Q: "Were X and Y of the same nationality?" + Both are American → "yes, both are American"
-        
-        For "what" questions (positions, awards, locations, etc.):
-        - Start with the DIRECT ANSWER to what was asked
-        - Do NOT answer with a person's name unless the question asks "who"
-        - Example: Q: "What position did [person] hold?" → Answer: "Secretary of State" (NOT the person's name)
-        - Example: Q: "What city is [person] based in?" → Answer: "Los Angeles" (NOT the person's name)
-        - Example: Q: "What award did [person] win?" → Answer: "Nobel Prize" (NOT the person's name)
-        
-        For multi-hop questions:
-        - The context contains intermediate facts (who/what) AND final answer
-        - Return the FINAL ANSWER that matches the question type
-        - Example: "What award did the actress playing X win?"
-          * Context has: (1) Julia Roberts played X, (2) Julia Roberts won Academy Award
-          * Answer: "Academy Award" NOT "Julia Roberts"
-        - Example: "The founder of X attended what university?"
-          * Context has: (1) Steve Jobs founded Apple, (2) Jobs attended Reed College  
-          * Answer: "Reed College" NOT "Steve Jobs"
+        # REASONING STRATEGY (KEEP IT SIMPLE)
+        1. **Locate Facts**: Find the specific answers in the context.
+        2. **Compare (for Yes/No)**: 
+           - If Entity A is X and Entity B is X -> Answer YES.
+           - "American" and "US Citizen" -> YES.
+        3. **Answer Directly**: Provide the requested value (name, date, place) without preamble.
+
+        # ANSWER FORMAT
+        - **Yes/No Questions**: Start with "Yes" or "No", then explain briefly.
+        - **Specific Questions (Who/What/Where)**: Just the answer.
+        - **Conciseness**: Be direct. No filler.
+
         
         # NAME DISAMBIGUATION (CRITICAL)
         - Match short names to their full biographical entries using profession/context

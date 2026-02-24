@@ -1572,7 +1572,7 @@ class GraphService:
             c.themes as themes,
             c.updated_at as last_updated,
             count(member) as member_count
-        ORDER BY c.domain, count(member) DESC
+        ORDER BY c.domain, member_count DESC
         """
         return self.execute_query(query, {})
 
@@ -1670,7 +1670,7 @@ class GraphService:
         WITH comm_name, note, member
         ORDER BY note.created_at DESC
         WITH comm_name, collect(DISTINCT {
-            id: toString(id(note)),
+            id: elementId(note),
             title: note.title
         })[0..$limit] as notes
         RETURN comm_name as community_name, notes

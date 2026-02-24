@@ -9,9 +9,11 @@ Example: "Elon Musk" vs "Elon" vs "Elon R. Musk" (Entity)
 """
 
 import asyncio
+import numpy as np
 from typing import Optional
 from app.services.graph import graph_service
 from app.services.llm import llm_service
+from app.services.embedding import embedding_service
 from app.core.log import get_logger
 
 logger = get_logger("AliasDetector")
@@ -28,8 +30,13 @@ class AliasDetectorService:
     - NONE: No meaningful relationship
     """
 
-    def __init__(self):
-        pass  # No configuration needed - LLM makes all decisions
+    def __init__(self, max_concurrent_llm_calls: int = 2):
+        """Initialize with concurrency limit for LLM calls.
+
+        Args:
+            max_concurrent_llm_calls: Max parallel LLM requests (default: 2 for Ollama)
+        """
+        self.llm_semaphore = asyncio.Semaphore(max_concurrent_llm_calls)
 
     async def find_potential_aliases(
         self,
@@ -38,15 +45,21 @@ class AliasDetectorService:
         identifier_property: str = "name",
         node_type: Optional[str] = None,
         limit: int = 10000,
+        min_semantic_similarity: float = 0.65,
     ) -> list[dict]:
         """
-        Find nodes that might be aliases based on string similarity.
+        Find nodes that might be aliases using a two-stage filter:
 
-        Uses multiple fuzzy matching strategies:
-        1. Levenshtein distance (typos, slight variations)
-        2. Containment (one name contains the other)
-        3. Initial matching (J.K. Rowling vs Joanne Rowling)
-        4. Token overlap (Marie Curie vs Curie, Marie)
+        Stage 1: Lexical/String Similarity (fast)
+        - Levenshtein distance (typos, slight variations)
+        - Containment (one name contains the other)
+        - Initial matching (J.K. Rowling vs Joanne Rowling)
+        - Token overlap (Marie Curie vs Curie, Marie)
+
+        Stage 2: Semantic Similarity Shield (quality gate)
+        - Calculate cosine similarity between entity embeddings
+        - Filter out candidates with similarity < min_semantic_similarity
+        - Prevents garbage like "Brooklyn Theatre" matching "New Orleans Pelicans"
 
         Args:
             node_value: Value to find aliases for (name/trait/title)
@@ -54,9 +67,10 @@ class AliasDetectorService:
             identifier_property: Property name to match on (name, trait, title)
             node_type: Optional type filter (only for Entity: Person, Place, etc)
             limit: Max candidates to return
+            min_semantic_similarity: Minimum cosine similarity threshold (0.0-1.0, default 0.65)
 
         Returns:
-            List of potential alias candidates with their summaries
+            List of semantically similar alias candidates with their summaries
         """
         # Build type filter for Entity nodes only
         type_filter = " AND n.type = $type" if node_type else ""
@@ -101,13 +115,107 @@ class AliasDetectorService:
         LIMIT $limit
         """
 
-        params = {"value": node_value, "limit": limit}
+        params = {
+            "value": node_value,
+            "limit": limit * 3,
+        }  # Get 3x candidates for semantic filtering
         if node_type:
             params["type"] = node_type
 
-        results = graph_service.execute_query(query, params)
+        lexical_candidates = graph_service.execute_query(query, params)
 
-        return results
+        if not lexical_candidates:
+            return []
+
+        logger.info(
+            f"[Alias] Stage 1 (Lexical): Found {len(lexical_candidates)} candidates for '{node_value}'"
+        )
+
+        # SEMANTIC SHIELD: Filter by embedding similarity
+        # Get source node embedding
+        source_query = f"""
+        MATCH (n:{node_label} {{{identifier_property}: $value}})
+        RETURN n.embedding as embedding, n.summary as summary
+        """
+
+        source_result = graph_service.execute_query(source_query, {"value": node_value})
+
+        if not source_result or not source_result[0].get("embedding"):
+            logger.warning(
+                f"[Alias] Source node '{node_value}' has no embedding - generating one"
+            )
+            # Generate embedding from summary
+            source_summary = (
+                source_result[0].get("summary") if source_result else node_value
+            )
+            source_embedding = embedding_service.embed_query(
+                source_summary or node_value
+            )
+        else:
+            source_embedding = source_result[0]["embedding"]
+
+        # Calculate semantic similarity for each candidate
+        semantic_candidates = []
+        for candidate in lexical_candidates:
+            candidate_name = candidate.get("identifier_value")
+
+            # Get candidate embedding from graph or generate
+            candidate_query = f"""
+            MATCH (n:{node_label} {{{identifier_property}: $value}})
+            RETURN n.embedding as embedding
+            """
+
+            candidate_result = graph_service.execute_query(
+                candidate_query, {"value": candidate_name}
+            )
+
+            if not candidate_result or not candidate_result[0].get("embedding"):
+                # Generate embedding if missing
+                candidate_summary = candidate.get("summary", candidate_name)
+                candidate_embedding = embedding_service.embed_query(candidate_summary)
+            else:
+                candidate_embedding = candidate_result[0]["embedding"]
+
+            # Calculate cosine similarity
+            source_vec = np.array(source_embedding)
+            candidate_vec = np.array(candidate_embedding)
+
+            # Normalize vectors
+            source_norm = source_vec / (np.linalg.norm(source_vec) + 1e-9)
+            candidate_norm = candidate_vec / (np.linalg.norm(candidate_vec) + 1e-9)
+
+            # Cosine similarity
+            similarity = float(np.dot(source_norm, candidate_norm))
+
+            # Apply semantic shield
+            if similarity >= min_semantic_similarity:
+                candidate["semantic_similarity"] = similarity
+                semantic_candidates.append(candidate)
+            else:
+                logger.debug(
+                    f"[Alias] Filtered out '{candidate_name}' (similarity: {similarity:.3f} < {min_semantic_similarity})"
+                )
+
+        # Sort by semantic similarity (highest first)
+        semantic_candidates.sort(
+            key=lambda x: x.get("semantic_similarity", 0), reverse=True
+        )
+
+        # Limit to requested number
+        semantic_candidates = semantic_candidates[:limit]
+
+        logger.info(
+            f"[Alias] Stage 2 (Semantic Shield): {len(semantic_candidates)}/{len(lexical_candidates)} candidates passed (threshold: {min_semantic_similarity})"
+        )
+
+        if semantic_candidates:
+            top_candidates = [
+                (c["identifier_value"], c["semantic_similarity"])
+                for c in semantic_candidates[:3]
+            ]
+            logger.debug(f"[Alias] Top candidates: {top_candidates}")
+
+        return semantic_candidates
 
     async def compare_entities_with_llm(
         self,
@@ -115,6 +223,8 @@ class AliasDetectorService:
         entity1_context: str,
         entity2_name: str,
         entity2_context: str,
+        use_semaphore: bool = True,
+        semantic_similarity: float = None,
     ) -> tuple[str | None, str]:
         """
         Use LLM to determine relationship type between two entities.
@@ -124,155 +234,61 @@ class AliasDetectorService:
             entity1_context: Summary/context of first entity
             entity2_name: Name of second entity
             entity2_context: Summary/context of second entity
+            use_semaphore: Whether to limit concurrency
+            semantic_similarity: Cosine similarity of contexts (0.0-1.0)
 
         Returns:
             (relationship_type, reason)
             - relationship_type: "IS_SAME_AS", "IS_VARIANT_OF", "IS_SIMILAR_TO", "RELATED_TO", or None
             - reason: LLM's explanation
         """
-        prompt = f"""Analyze the relationship between these two entities based on their names and contexts.
+        sim_hint = (
+            f"\n\nSEMANTIC SIMILARITY SCORE: {semantic_similarity:.2f}\n(1.0 = identical content, <0.6 = likely different)"
+            if semantic_similarity is not None
+            else ""
+        )
+
+        prompt = f"""Compare these two entities and determine their relationship.
 
 ENTITY 1: "{entity1_name}"
-Context: {entity1_context[:800]}
+Context: {entity1_context[:500]}
 
 ENTITY 2: "{entity2_name}"
-Context: {entity2_context[:800]}
+Context: {entity2_context[:500]}{sim_hint}
 
-# RELATIONSHIP TYPES
+STEP 1 - List shared facts (ignore name words):
+What facts do they share? Consider:
+- Are they about the same person/place/thing?
+- Do they share biographical details (birth place, dates, roles)?
+- Do they share specific events, locations, or relationships?
 
-Determine which relationship best describes how these entities are connected:
+STEP 2 - Evaluate relationship:
+- If they share NO FACTS (only similar name words) → Relationship: NONE
+- If they ARE THE SAME entity with identical facts → Relationship: IS_SAME_AS
+- If they're PROBABLY same but unclear → Relationship: IS_VARIANT_OF
+- If they're DIFFERENT but analogous (same type/category) → Relationship: IS_SIMILAR_TO
+- If they're DIFFERENT but historically/contextually connected → Relationship: RELATED_TO
 
-**IS_SAME_AS** - They are THE EXACT SAME entity (just different names/spellings)
-- "Elon Musk" ↔ "Elon R. Musk" (same person, full name vs short name)
-- "JFK" ↔ "John F. Kennedy" (same person, abbreviation vs full name)
-- "New York City" ↔ "NYC" (same place, abbreviation)
-- "Dr. Smith" ↔ "John Smith" (same person, title variation)
+ADDITIONAL HINT:
+- High Similarity (>0.85) suggests strong likelihood of connection.
+- Low Similarity (<0.65) suggests you should be skeptical unless facts are identical.
+- Trust EXPLICIT FACTS over the similarity score.
 
-**IS_VARIANT_OF** - Likely the same but ambiguous/uncertain
-- "Apple" ↔ "Apple Inc" (context needed - company vs fruit?)
-- "Michael Jordan" ↔ "M. Jordan" (which Michael Jordan?)
-- "Paris" ↔ "Paris, France" (vs Paris, Texas?)
-- Not enough context to be certain they're the same
+CRITICAL RULES:
+✗ "New York" and "New Orleans" → Both have "New" but are DIFFERENT CITIES → NONE
+✗ "Brooklyn Theatre" and "Orleans Pelicans" → Share location words but DIFFERENT TYPES → NONE
 
-**IS_SIMILAR_TO** - Different entities but closely related/analogous
-- "violin" ↔ "viola" (different instruments, same family)
-- "iPhone 14" ↔ "iPhone 15" (different models, same product line)
-- "Harvard" ↔ "MIT" (different universities, both in Boston)
-- "Python" ↔ "JavaScript" (different programming languages)
+✗ "US Navy" and "US Senate" → Both part of US but DIFFERENT BRANCHES → RELATED_TO (not SAME)
+✗ "Teen Titans" and "Brooklyn Theatre" → NO CONNECTION despite "new" → NONE
 
-**RELATED_TO** - Different entities with contextual connection
-- "Ethiopia" ↔ "Eritrea" (neighboring countries, historical connection)
-- "Steve Jobs" ↔ "Apple Inc" (person founded company)
-- "World War II" ↔ "D-Day" (event within larger event)
-- "piano" ↔ "Mozart" (composer known for instrument)
+✓ "Elon Musk" and "Elon R. Musk" → Same person, same facts → IS_SAME_AS
+✓ "JFK" and "John F. Kennedy" → Same person, abbreviation → IS_SAME_AS
+✓ "Ethiopia" and "Eritrea" → Different countries, historical link → RELATED_TO
 
-**NONE** - No meaningful relationship
-- "basketball" ↔ "quantum physics" (completely unrelated)
-- "cat" ↔ "car" (similar names but totally different)
-- Insufficient context to determine any relationship
-
-# DECISION RULES
-
-1. **IS_SAME_AS**: Only if they're LITERALLY the exact same person/place/thing
-   - Same biographical facts, just different name forms
-   - One is abbreviation/nickname/title of the other
-   - Zero doubt they're identical
-
-2. **IS_VARIANT_OF**: Probably same but not certain
-   - Names suggest same entity but contexts don't confirm
-   - Ambiguous which specific instance is meant
-   - Need more info to be sure
-
-3. **IS_SIMILAR_TO**: Definitely different but analogous
-   - Same category/type but distinct instances
-   - Related by being similar, not by being the same
-   - "Same kind of thing" not "same thing"
-
-4. **RELATED_TO**: Different but contextually connected
-   - Connected through history, geography, relationships
-   - One caused/influenced/involved the other
-   - Meaningful connection but clearly different entities
-
-5. **NONE**: When unsure or no relationship
-   - Completely unrelated
-   - Not enough information
-   - When in doubt, choose NONE
-
-# COMMON MISTAKES TO AVOID
-
-❌ DON'T use IS_SAME_AS for:
-- Generic → Specific ("company" → "Microsoft")
-- Category → Member ("instrument" → "guitar")
-- Similar but distinct ("violin" → "viola")
-- Related geographically ("Ethiopia" → "Eritrea")
-- Same family/type ("iPhone 14" → "iPhone 15")
-
-✅ DO use IS_SAME_AS only when:
-- Literally the exact same entity
-- Just different name forms
-- Zero ambiguity
-
-# OUTPUT FORMAT
-
+OUTPUT FORMAT:
+Shared Facts: [list 2-3 concrete facts they share, or write "NONE - only share name words"]
 Relationship: [IS_SAME_AS|IS_VARIANT_OF|IS_SIMILAR_TO|RELATED_TO|NONE]
-Reason: [One sentence explanation]
-
-# EXAMPLES
-
-ENTITY 1: "Elon Musk"
-Context: CEO of Tesla and SpaceX, founded in 2002. Born in South Africa, moved to US.
-
-ENTITY 2: "Elon R. Musk"
-Context: Founder of SpaceX and Tesla, entrepreneur known for electric vehicles.
-
-Relationship: IS_SAME_AS
-Reason: Same person - all biographical facts match, just different name forms.
-
----
-
-ENTITY 1: "Ethiopia"
-Context: Country in East Africa, capital is Addis Ababa, historical kingdom.
-
-ENTITY 2: "Eritrea"
-Context: Country in East Africa, gained independence from Ethiopia in 1993.
-
-Relationship: RELATED_TO
-Reason: Different countries with historical connection - Eritrea was part of Ethiopia until 1993.
-
----
-
-ENTITY 1: "violin"
-Context: String instrument played with a bow, has four strings, used in orchestras.
-
-ENTITY 2: "viola"
-Context: String instrument larger than violin, slightly lower pitch, also played with bow.
-
-Relationship: IS_SIMILAR_TO
-Reason: Different instruments from the same family with similar construction but distinct sizes and ranges.
-
----
-
-ENTITY 1: "Apple"
-Context: A company that makes consumer electronics.
-
-ENTITY 2: "Apple Inc"
-Context: Technology company headquartered in Cupertino.
-
-Relationship: IS_SAME_AS
-Reason: Same company - contexts both describe the technology company, same entity.
-
----
-
-ENTITY 1: "Michael Jordan"
-Context: NBA basketball player, Chicago Bulls.
-
-ENTITY 2: "M. Jordan"
-Context: Researcher in computer science.
-
-Relationship: NONE
-Reason: Insufficient information - could be different people with same surname, contexts describe different professions.
-
----
+Reason: [One sentence why]
 
 Now analyze the entities above:
 """
@@ -284,7 +300,12 @@ Now analyze the entities above:
             logger.debug(f"[Alias] Entity 1 context: {entity1_context[:200]}...")
             logger.debug(f"[Alias] Entity 2 context: {entity2_context[:200]}...")
 
-            response = await llm_service.generate(prompt, temperature=0.1)
+            # Use semaphore to limit concurrent LLM calls if enabled
+            if use_semaphore:
+                async with self.llm_semaphore:
+                    response = await llm_service.generate(prompt, temperature=0.1)
+            else:
+                response = await llm_service.generate(prompt, temperature=0.1)
             logger.debug(f"[Alias] Raw LLM response: {response}")
 
             # Parse response
@@ -344,15 +365,27 @@ Now analyze the entities above:
             identifier_property: Property name (name, trait, title)
             reason: LLM's reasoning for the relationship
         """
+        # Map relationship type to confidence score
+        confidence_map = {
+            "IS_SAME_AS": 1.0,  # Certain - exact same entity
+            "IS_VARIANT_OF": 0.7,  # Likely same but ambiguous
+            "IS_SIMILAR_TO": 0.6,  # Different but closely related
+            "RELATED_TO": 0.5,  # Different but connected
+        }
+        confidence = confidence_map.get(relationship_type, 0.5)
+
         query = f"""
         MATCH (n1:{node_label} {{{identifier_property}: $entity1_value}})
         MATCH (n2:{node_label} {{{identifier_property}: $entity2_value}})
         
-        // Create relationship of appropriate type
+        // Create relationship of appropriate type with standard properties
         CALL apoc.create.relationship(n1, $relationship_type, {{
             reason: $reason,
             detected_at: datetime(),
-            method: 'llm_context_analysis'
+            method: 'llm_context_analysis',
+            is_active: true,
+            confidence: $confidence,
+            context: $reason
         }}, n2) YIELD rel
         
         RETURN n1.{identifier_property} as entity1, n2.{identifier_property} as entity2, type(rel) as rel_type
@@ -365,6 +398,7 @@ Now analyze the entities above:
                 "entity2_value": entity2_value,
                 "relationship_type": relationship_type,
                 "reason": reason,
+                "confidence": confidence,
             },
         )
 
@@ -449,6 +483,7 @@ Now analyze the entities above:
         for candidate in candidates:
             candidate_value = candidate["identifier_value"]
             candidate_summary = candidate.get("summary", "")
+            candidate_similarity = candidate.get("semantic_similarity")
 
             if not candidate_summary or len(candidate_summary) < 20:
                 logger.debug(
@@ -462,7 +497,11 @@ Now analyze the entities above:
             )
             print(f"  → Analyzing: {candidate_value}")
             relationship_type, reason = await self.compare_entities_with_llm(
-                node_value, node_summary, candidate_value, candidate_summary
+                node_value,
+                node_summary,
+                candidate_value,
+                candidate_summary,
+                semantic_similarity=candidate_similarity,
             )
             logger.info(
                 f"[Alias] LLM Response: {relationship_type or 'NONE'} | {reason}"
@@ -501,8 +540,32 @@ Now analyze the entities above:
             node_type=entity_type,
         )
 
+    def mark_node_as_processed(
+        self,
+        node_value: str,
+        node_label: str = "Entity",
+        identifier_property: str = "name",
+    ) -> bool:
+        """
+        Mark a node as processed for alias detection.
+
+        Sets alias_detection_processed_at timestamp so script can resume.
+        """
+        query = f"""
+        MATCH (n:{node_label} {{{identifier_property}: $value}})
+        SET n.alias_detection_processed_at = datetime()
+        RETURN n.{identifier_property} as identifier
+        """
+
+        result = graph_service.execute_query(query, {"value": node_value})
+        return bool(result)
+
     async def batch_detect_aliases(
-        self, entity_type: Optional[str] = None, limit: int = 100
+        self,
+        entity_type: Optional[str] = None,
+        limit: int = 100,
+        reprocess: bool = False,
+        parallel: int = 1,
     ) -> dict:
         """
         Run alias detection on all entities (or specific type).
@@ -512,21 +575,29 @@ Now analyze the entities above:
         Args:
             entity_type: Optional - only process this entity type (e.g., "Person")
             limit: Max entities to process in this batch
+            reprocess: If True, reprocess already-processed nodes
+            parallel: Number of entities to process concurrently (default: 1)
 
         Returns:
             Statistics dict with counts
         """
         logger.info(
-            f"[Alias] Starting batch alias detection (type={entity_type}, limit={limit})"
+            f"[Alias] Starting batch alias detection (type={entity_type}, limit={limit}, reprocess={reprocess}, parallel={parallel})"
         )
 
         # Get entities without existing IS_SAME_AS links (not already aliases)
+        # Exclude already-processed nodes unless reprocess=True
         type_filter = f"{{type: '{entity_type}'}}" if entity_type else ""
+        processed_filter = (
+            "" if reprocess else "AND e.alias_detection_processed_at IS NULL"
+        )
+
         query = f"""
         MATCH (e:Entity {type_filter})
         WHERE NOT (e)-[:IS_SAME_AS]->()
           AND e.summary IS NOT NULL
           AND size(e.summary) > 20
+          {processed_filter}
         RETURN e.name as name, e.type as type
         LIMIT $limit
         """
@@ -549,48 +620,132 @@ Now analyze the entities above:
             "insufficient_context": 0,
         }
 
-        for idx, entity in enumerate(entities, 1):
-            entity_name = entity["name"]
-            entity_type_value = entity["type"]
+        # Process entities in parallel batches
+        if parallel > 1:
+            print(f"\n[Parallel] Processing {parallel} entities concurrently...\n")
 
-            # Type guard: skip if entity_type is None
-            if not entity_type_value:
-                logger.warning(f"[Alias] Skipping '{entity_name}' - no entity_type")
-                continue
+            async def process_entity_wrapper(idx: int, entity: dict):
+                """Wrapper to process single entity and update stats."""
+                entity_name = entity["name"]
+                entity_type_value = entity["type"]
 
-            # Show progress for current entity
-            logger.info(
-                f"[Alias] ===== [{idx}/{total_entities}] Processing entity: '{entity_name}' (type: {entity_type_value}) ====="
-            )
-            print(
-                f"[{idx}/{total_entities}] Processing: {entity_name} ({entity_type_value})"
-            )
+                # Type guard: skip if entity_type is None
+                if not entity_type_value:
+                    logger.warning(f"[Alias] Skipping '{entity_name}' - no entity_type")
+                    return None
 
-            linked_to = await self.detect_and_link_aliases_for_entity(
-                entity_name, entity_type_value
-            )
-
-            stats["processed"] += 1
-
-            if linked_to:
-                stats["links_created"] += len(linked_to)
+                # Show progress for current entity
                 logger.info(
-                    f"[Alias] ✓ SUCCESS: Created {len(linked_to)} IS_SAME_AS link(s) for '{entity_name}': {', '.join(linked_to)}"
+                    f"[Alias] ===== [{idx}/{total_entities}] Processing entity: '{entity_name}' (type: {entity_type_value}) ====="
                 )
-                print(f"  ✓ Created {len(linked_to)} link(s): {', '.join(linked_to)}")
-            else:
-                stats["no_candidates"] += 1
-                logger.info(f"[Alias] - No aliases detected for '{entity_name}'")
-                print(f"  - No aliases found")
-
-            # Progress summary every 10 entities
-            if idx % 10 == 0:
                 print(
-                    f"\n[Summary] Processed {idx}/{total_entities} | Links created: {stats['links_created']} | No candidates: {stats['no_candidates']}\n"
+                    f"[{idx}/{total_entities}] Processing: {entity_name} ({entity_type_value})"
                 )
 
-            # Small delay to avoid rate limiting
-            await asyncio.sleep(0.1)
+                linked_to = await self.detect_and_link_aliases_for_entity(
+                    entity_name, entity_type_value
+                )
+
+                # Mark node as processed (so we can resume if interrupted)
+                self.mark_node_as_processed(entity_name, "Entity", "name")
+
+                if linked_to:
+                    logger.info(
+                        f"[Alias] ✓ SUCCESS: Created {len(linked_to)} link(s) for '{entity_name}': {', '.join(linked_to)}"
+                    )
+                    print(
+                        f"  ✓ Created {len(linked_to)} link(s): {', '.join(linked_to)}"
+                    )
+                    return {
+                        "processed": 1,
+                        "links_created": len(linked_to),
+                        "no_candidates": 0,
+                    }
+                else:
+                    logger.info(f"[Alias] - No aliases detected for '{entity_name}'")
+                    print(f"  - No aliases found")
+                    return {"processed": 1, "links_created": 0, "no_candidates": 1}
+
+            # Process in batches of 'parallel' entities
+            for batch_start in range(0, total_entities, parallel):
+                batch_end = min(batch_start + parallel, total_entities)
+                batch = entities[batch_start:batch_end]
+
+                # Create tasks for this batch
+                tasks = [
+                    process_entity_wrapper(batch_start + i + 1, entity)
+                    for i, entity in enumerate(batch)
+                ]
+
+                # Wait for all tasks in this batch to complete
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Update stats
+                for result in results:
+                    if isinstance(result, dict):
+                        stats["processed"] += result["processed"]
+                        stats["links_created"] += result["links_created"]
+                        stats["no_candidates"] += result["no_candidates"]
+                    elif isinstance(result, Exception):
+                        logger.error(f"[Alias] Error in batch processing: {result}")
+
+                # Progress summary after each batch
+                if batch_end % 10 == 0 or batch_end == total_entities:
+                    print(
+                        f"\n[Summary] Processed {batch_end}/{total_entities} | Links created: {stats['links_created']} | No candidates: {stats['no_candidates']}\n"
+                    )
+
+                # Small delay between batches
+                await asyncio.sleep(0.1)
+        else:
+            # Sequential processing (original behavior)
+            for idx, entity in enumerate(entities, 1):
+                entity_name = entity["name"]
+                entity_type_value = entity["type"]
+
+                # Type guard: skip if entity_type is None
+                if not entity_type_value:
+                    logger.warning(f"[Alias] Skipping '{entity_name}' - no entity_type")
+                    continue
+
+                # Show progress for current entity
+                logger.info(
+                    f"[Alias] ===== [{idx}/{total_entities}] Processing entity: '{entity_name}' (type: {entity_type_value}) ====="
+                )
+                print(
+                    f"[{idx}/{total_entities}] Processing: {entity_name} ({entity_type_value})"
+                )
+
+                linked_to = await self.detect_and_link_aliases_for_entity(
+                    entity_name, entity_type_value
+                )
+
+                # Mark node as processed (so we can resume if interrupted)
+                self.mark_node_as_processed(entity_name, "Entity", "name")
+
+                stats["processed"] += 1
+
+                if linked_to:
+                    stats["links_created"] += len(linked_to)
+                    logger.info(
+                        f"[Alias] ✓ SUCCESS: Created {len(linked_to)} IS_SAME_AS link(s) for '{entity_name}': {', '.join(linked_to)}"
+                    )
+                    print(
+                        f"  ✓ Created {len(linked_to)} link(s): {', '.join(linked_to)}"
+                    )
+                else:
+                    stats["no_candidates"] += 1
+                    logger.info(f"[Alias] - No aliases detected for '{entity_name}'")
+                    print(f"  - No aliases found")
+
+                # Progress summary every 10 entities
+                if idx % 10 == 0:
+                    print(
+                        f"\n[Summary] Processed {idx}/{total_entities} | Links created: {stats['links_created']} | No candidates: {stats['no_candidates']}\n"
+                    )
+
+                # Small delay to avoid rate limiting
+                await asyncio.sleep(0.1)
 
         # Final summary
         print(f"\n[Complete] Processed {stats['processed']}/{total_entities} entities")

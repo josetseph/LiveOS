@@ -26,6 +26,7 @@ console_formatter = logging.Formatter(fmt="%(levelname)s: %(message)s")
 
 # Mapping of logger names to filenames
 COMPONENT_LOG_FILES = {
+    "API": "api.log",
     "IngestionPipeline": "ingestion.log",
     "RetrievalService": "retrieval.log",
     "GraphService": "graph.log",

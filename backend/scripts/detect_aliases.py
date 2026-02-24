@@ -39,7 +39,10 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from app.services.alias_detector import alias_detector
 from app.services.graph import graph_service
-from app.core.log import get_logger
+from app.core.log import get_logger, setup_logging
+
+# Initialize logging system
+setup_logging()
 
 logger = get_logger("AliasScript")
 
@@ -108,7 +111,7 @@ async def show_alias_candidates(node_label: str, node_type: str | None, limit: i
             node_label=node_label,
             identifier_property=identifier_prop,
             node_type=node_type_val,
-            limit=3,
+            limit=10000,
         )
 
         if not candidates:
@@ -219,6 +222,19 @@ async def main():
         help="Show potential alias candidates with LLM reasoning (no changes made)",
     )
 
+    parser.add_argument(
+        "--reprocess",
+        action="store_true",
+        help="Reprocess nodes that were already processed (ignore processing state)",
+    )
+
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        help="Number of entities to process concurrently (default: 1, recommended: 2-4 for Ollama)",
+    )
+
     args = parser.parse_args()
 
     # Determine which labels to process
@@ -240,6 +256,14 @@ async def main():
     print(
         f"Decision:     LLM determines relationship type (IS_SAME_AS, IS_VARIANT_OF, IS_SIMILAR_TO, RELATED_TO)"
     )
+    if args.parallel > 1:
+        print(f"Concurrency:  {args.parallel} entities in parallel")
+    else:
+        print("Concurrency:  Sequential (1 entity at a time)")
+    if args.reprocess:
+        print("Reprocess:    YES (will reprocess already-processed nodes)")
+    else:
+        print("Resume:       YES (will skip already-processed nodes)")
     if args.show_candidates:
         print("Mode:         SHOW CANDIDATES (analysis only, no changes)")
     elif args.dry_run:
@@ -266,11 +290,26 @@ async def main():
         type_filter = (
             f"{{type: '{args.type}'}}" if args.type and label == "Entity" else ""
         )
+
+        # Count already processed
+        processed_query = f"""
+        MATCH (n:{label} {type_filter})
+        WHERE n.alias_detection_processed_at IS NOT NULL
+        RETURN count(n) as total
+        """
+        processed_result = graph_service.execute_query(processed_query, {})
+        already_processed = processed_result[0]["total"] if processed_result else 0
+
+        # Count remaining (not processed yet)
+        processed_filter = (
+            "" if args.reprocess else "AND n.alias_detection_processed_at IS NULL"
+        )
         count_query = f"""
         MATCH (n:{label} {type_filter})
         WHERE NOT (n)-[:IS_SAME_AS]->()
           AND n.summary IS NOT NULL
           AND size(n.summary) > 20
+          {processed_filter}
         RETURN count(n) as total
         """
 
@@ -280,7 +319,9 @@ async def main():
         print(f"\n{'=' * 80}")
         print(f"Processing {label} nodes")
         print(f"{'=' * 80}")
-        print(f"Found {total_candidates} candidate {label} nodes for alias detection")
+        if already_processed > 0 and not args.reprocess:
+            print(f"Already processed: {already_processed} {label} nodes (will skip)")
+        print(f"Remaining:         {total_candidates} candidate {label} nodes")
         print(f"   (Will process first {min(args.limit, total_candidates)})\n")
 
         if total_candidates == 0:
@@ -320,7 +361,10 @@ async def main():
             # For now, batch detection only supports Entity (keep for backward compatibility)
             if label == "Entity":
                 stats = await alias_detector.batch_detect_aliases(
-                    entity_type=args.type, limit=args.limit
+                    entity_type=args.type,
+                    limit=args.limit,
+                    reprocess=args.reprocess,
+                    parallel=args.parallel,
                 )
                 total_stats["processed"] += stats["processed"]
                 total_stats["links_created"] += stats["links_created"]

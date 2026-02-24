@@ -36,13 +36,14 @@ class ChatWorkflow:
         # Step 2: Iteratively retrieve for each information need
         all_retrieved_docs = []
         discovered_entities = {}
+        step_direct_answers = []  # Direct answers per step for placeholder fallback
 
         for step_num, info_need in enumerate(information_needs, 1):
             logger.info(
                 f"\n[Chat] Step {step_num}/{len(information_needs)}: {info_need}"
             )
 
-            # Substitute placeholders with discovered entities
+            # Substitute placeholders with discovered entities (key-based matching)
             filled_query = info_need
             for placeholder, entity in discovered_entities.items():
                 # Try to replace placeholders like [actress name], [person], etc.
@@ -51,6 +52,17 @@ class ChatWorkflow:
                     entity,
                     filled_query,
                     flags=re.IGNORECASE,
+                )
+
+            # Fallback: if any [placeholders] remain, substitute with the most recent
+            # direct answer from the previous step. This catches key-name mismatches
+            # e.g. info_need uses [actress] but extract_discovered_entities returned
+            # "actress name" or "person" as the key.
+            if re.search(r"\[[^\]]+\]", filled_query) and step_direct_answers:
+                last_answer = step_direct_answers[-1]
+                filled_query = re.sub(r"\[[^\]]+\]", last_answer, filled_query)
+                logger.info(
+                    f"[Chat]   Placeholder fallback substitution with: '{last_answer}'"
                 )
 
             if filled_query != info_need:
@@ -79,7 +91,7 @@ class ChatWorkflow:
                 print(f"   [{node_name}] {sample_text}...")
                 logger.info(f"[Chat]   Sample retrieval text: {sample_text}...")
 
-            # Extract entities from this step's results
+            # Extract entities from this step's results (key-based, primary path)
             if step_results:
                 step_entities = await llm_service.extract_discovered_entities(
                     filled_query, step_results
@@ -87,6 +99,18 @@ class ChatWorkflow:
                 discovered_entities.update(step_entities)
                 if step_entities:
                     logger.info(f"[Chat]   Discovered: {list(step_entities.values())}")
+
+            # Extract a short entity name for use as fallback in the next step.
+            # Only needed when more steps follow and returns just a name/value (not a sentence).
+            if step_results and step_num < len(information_needs):
+                entity_name = llm_service.extract_entity_name(
+                    question=filled_query,
+                    context_docs=step_results,
+                )
+                step_direct_answers.append(entity_name)
+                logger.info(
+                    f"[Chat]   Step {step_num} entity extracted: '{entity_name}'"
+                )
 
         # Remove duplicates from all_retrieved_docs (by node name or note id)
         seen_ids = set()

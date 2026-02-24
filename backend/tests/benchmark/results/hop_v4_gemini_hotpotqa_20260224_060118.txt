@@ -1,0 +1,46 @@
+Hop-Pipeline v4 (Gemini) — HOTPOTQA
+Model     : gemini-3-flash-preview
+Started   : 2026-02-24T06:01:18.924223
+Questions : 100
+======================================================================
+
+======================================================================
+QUESTION : Were Scott Derrickson and Ed Wood of the same nationality?
+EXPECTED : yes
+======================================================================
+
+[Step 1] Sub-questions identified (2):
+  1. What is Scott Derrickson's nationality?
+  2. What is Ed Wood's nationality?
+
+[Step 2.1] Sub-question: What is Scott Derrickson's nationality?
+  Potential answers:
+    scott derrickson: Scott Derrickson (born July 16, 1966) is an American director, screenwriter, and producer. He lives in Los Angeles, California. He is known for directing horror films such as "Sinister", "The Exorcism of Emily Rose", and "Deliver Us From Evil", as well as "Doctor Strange" (2016). "Sinister" (2012) stars Ethan Hawke. He collaborated with directors like Zack Snyder, Rob Zombie, and James Gunn.
+    horror films: Scott Derrickson is an American director, screenwriter, and producer. He is known for directing horror films such as "Sinister", "The Exorcism of Emily Rose", and "Deliver Us From Evil". He also directed the 2016 Marvel Cinematic Universe installment, "Doctor Strange".
+
+[Step 2.2] Sub-question: What is Ed Wood's nationality?
+  Potential answers:
+    edward davis wood jr.: Edward Davis Wood Jr. was born on October 10, 1924, and died on December 10, 1978. He was an American filmmaker, actor, writer, producer, and director.
+    filmmaker: Edward Davis Wood Jr. was an American filmmaker, actor, writer, producer, and director. He was born on October 10, 1924, and died on December 10, 1978.
+
+[Step 3] Final synthesis... (answer type: yes or no)
+
+  REASONING    : Scott Derrickson is identified as an American director, and Ed Wood is identified as an American filmmaker. Since both individuals share the same nationality, the answer is yes.
+  FINAL ANSWER : yes
+  EXPECTED     : yes
+  FUZZY PASS   : True
+  EXACT MATCH  : True
+  F1           : 1.00
+
+======================================================================
+QUESTION : What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?
+EXPECTED : Chief of Protocol
+======================================================================
+
+[Step 1] Sub-questions identified (2):
+  1. Who portrayed Corliss Archer in the film Kiss and Tell?
+  2. REWRITTEN (one line only): What government position was held by [actress]?
+
+[Step 2.1] Sub-question: Who portrayed Corliss Archer in the film Kiss and Tell?
+  Potential answers:
+    corliss archer: Corliss Archer was a radio program that ran from January 7, 1943 to September 30, 1956. It was initially CBS's answer to NBC's "A Date with Judy" and was broadcast by NBC in 1948. From October 3, 1952 to June 26, 1953, it aired on ABC before returning to CBS. Fewer than 24 episodes are known to exist. Corliss Archer starred Shirley Temple in the 1945 film Kiss and Tell, when she was 17 years old.
