@@ -15,19 +15,42 @@ class Settings(BaseSettings):
     NEO4J_PASSWORD: str = "password"
 
     # LLM Provider Selection
-    LLM_PROVIDER: str = "gemini"  # "ollama", "openai", "gemini", "anthropic"
+    LLM_PROVIDER: str = (
+        "ollama"  # "ollama", "lm_studio", "openai", "gemini", "anthropic"
+    )
     LLM_FALLBACK_PROVIDER: str | None = None  # Optional fallback if primary fails
 
     # LLM (Local - Ollama)
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    MODEL_EXTRACTION: str = "gemma3:4b"
-    MODEL_ARCHITECT: str = "gemma3:4b"
-    MODEL_SUMMARIZATION: str = "gemma3:4b"
-    MODEL_BRAIN: str = "gemma3:4b"
-    MODEL_REASONING: str = "gemma3:4b"
-    MODEL_EMBEDDING: str = "qwen3-embedding:0.6b"
-    EMBEDDING_DIMENSIONS: int = 1024
-    MODEL_VISION: str = "MedAIBase/PaddleOCR-VL:0.9b"
+    OLLAMA_MODEL: str = "gemma3:4b"
+    OLLAMA_KEEP_ALIVE: str = "-1"  # -1 = keep loaded indefinitely
+
+    # Legacy task-specific aliases (kept for backward compatibility)
+    MODEL_EXTRACTION: str = OLLAMA_MODEL
+    MODEL_ARCHITECT: str = OLLAMA_MODEL
+    MODEL_SUMMARIZATION: str = OLLAMA_MODEL
+    MODEL_BRAIN: str = OLLAMA_MODEL
+    MODEL_REASONING: str = OLLAMA_MODEL
+    # Embeddings can use a different backend than chat/reasoning:
+    # "ollama", "lm_studio", "mlx", or "auto" (follows LLM_PROVIDER)
+    # "mlx": runs the model locally via mlx-lm (Apple Silicon, no server required)
+    EMBEDDING_PROVIDER: str = "ollama"
+    MODEL_EMBEDDING: str = "qwen3-embedding:8b"
+    EMBEDDING_DIMENSIONS: int = 4096
+    # MLX local embedding model — subfolder name under MODELS_PATH
+    # Used only when EMBEDDING_PROVIDER="mlx"
+    MLX_EMBEDDING_MODEL: str = "Qwen3-Embedding-8B-4bit-DWQ"
+
+    # LLM (Local - LM Studio, OpenAI-compatible API)
+    LM_STUDIO_BASE_URL: str = "http://127.0.0.1:1234"
+    LM_STUDIO_API_KEY: str = "lm-studio"
+    LM_STUDIO_MODEL: str = "google/gemma-3-4b"
+    LM_STUDIO_KEEP_ALIVE: str = "-1"  # Use max/indefinite keep-alive when supported
+    LM_STUDIO_MODEL_EMBEDDING: str = "text-embedding-qwen3-embedding-8b"
+    # "auto" tries json_schema, then json_object, then text. You can also set:
+    # "json_schema", "json_object", or "text"
+    # Default is "text" — LM Studio no longer accepts "json_object" (returns 400).
+    LM_STUDIO_RESPONSE_FORMAT: str = "text"
 
     # Hugging Face Models (Transformers)
     MODEL_FLORENCE_HF: str = "microsoft/Florence-2-large"

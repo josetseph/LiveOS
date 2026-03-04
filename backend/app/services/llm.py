@@ -51,6 +51,21 @@ class LLMService:
                 base_url=base_url, api_key=api_key, timeout=300.0
             )
 
+        elif self.provider == "lm_studio":
+            logger.info(
+                f"Initializing LM Studio (URL: {settings.LM_STUDIO_BASE_URL}, Model: {settings.LM_STUDIO_MODEL})"
+            )
+            base_url = f"{settings.LM_STUDIO_BASE_URL.rstrip('/')}/v1"
+            api_key = settings.LM_STUDIO_API_KEY
+
+            self.extraction_client = instructor.patch(
+                OpenAI(base_url=base_url, api_key=api_key, timeout=300.0)
+            )
+            self.chat_client = OpenAI(base_url=base_url, api_key=api_key, timeout=300.0)
+            self.async_chat_client = AsyncOpenAI(
+                base_url=base_url, api_key=api_key, timeout=300.0
+            )
+
         elif self.provider == "openai":
             if not settings.OPENAI_API_KEY:
                 raise ValueError("OPENAI_API_KEY not set in configuration")
@@ -111,7 +126,12 @@ class LLMService:
                         response = self.native_client.models.generate_content(
                             model=model,
                             contents=prompt,
-                            config=types.GenerateContentConfig(temperature=temperature),
+                            config=types.GenerateContentConfig(
+                                temperature=temperature,
+                                thinking_config=types.ThinkingConfig(
+                                    thinking_budget=0,  # thinking_level="MINIMAL"
+                                ),
+                            ),
                         )
 
                         # Return OpenAI-compatible response structure
@@ -152,6 +172,92 @@ class LLMService:
         else:
             raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
+    def _with_keep_alive(self, extra_body: dict | None = None) -> dict:
+        """Attach provider keep-alive controls for local OpenAI-compatible backends."""
+        body = dict(extra_body or {})
+        if self.provider == "ollama":
+            body.setdefault("keep_alive", settings.OLLAMA_KEEP_ALIVE)
+        elif self.provider == "lm_studio":
+            body.setdefault("keep_alive", settings.LM_STUDIO_KEEP_ALIVE)
+        return body
+
+    def _lm_studio_json_response_format(
+        self, schema: dict | None = None, schema_name: str = "response"
+    ) -> dict:
+        """
+        Force json_object mode to avoid LM Studio grammar compilation stalls
+        on large nested schemas.
+        """
+        return {"type": "json_object"}
+
+    def _lm_studio_text_response_format(self) -> dict:
+        """Compatibility fallback for servers that don't accept json_object."""
+        return {"type": "text"}
+
+    def _lm_studio_response_format_candidates(
+        self, schema: dict | None = None, schema_name: str = "response"
+    ) -> list[dict]:
+        """
+        Prioritize json_object to avoid schema-compiler hangs in LM Studio.
+        """
+        mode = settings.LM_STUDIO_RESPONSE_FORMAT.lower().strip()
+        json_object = {"type": "json_object"}
+        text = {"type": "text"}
+        if mode == "text":
+            return [text]
+        return [json_object, text]
+
+    def _resolve_lm_studio_model(self, configured_model: str | None) -> str | None:
+        """
+        Resolve aliases (e.g. `gemma3:4b`) to LM Studio model IDs and, if possible,
+        auto-select an available downloaded variant (often with quant suffix like `@4bit`).
+        """
+        if not configured_model:
+            return configured_model
+
+        cached = getattr(self, "_lm_studio_model_cache", None)
+        if cached:
+            return cached
+
+        model = configured_model.strip()
+        alias_map = {
+            "gemma3:4b": "google/gemma-3-4b",
+            "gemma3:12b": "google/gemma-3-12b",
+        }
+        model = alias_map.get(model, model)
+
+        try:
+            available = [m.id for m in self.chat_client.models.list().data]
+            if model in available:
+                self._lm_studio_model_cache = model
+                return model
+
+            # Prefer exact prefix matches, e.g. google/gemma-3-4b@4bit
+            prefixed = [mid for mid in available if mid.startswith(f"{model}@")]
+            if prefixed:
+                logger.warning(
+                    f"[LM Studio] Model '{configured_model}' not found, using '{prefixed[0]}'"
+                )
+                self._lm_studio_model_cache = prefixed[0]
+                return prefixed[0]
+
+            # Final fallback: contains base model string
+            contains = [mid for mid in available if model in mid]
+            if contains:
+                logger.warning(
+                    f"[LM Studio] Model '{configured_model}' not found, using '{contains[0]}'"
+                )
+                self._lm_studio_model_cache = contains[0]
+                return contains[0]
+        except Exception as e:
+            logger.warning(f"[LM Studio] Could not list models for resolution: {e}")
+
+        logger.warning(
+            f"[LM Studio] Using configured model '{configured_model}' as-is (could not auto-resolve)"
+        )
+        self._lm_studio_model_cache = model
+        return model
+
     def _clean_json(self, json_str: str) -> str:
         """
         Uses json_repair to robustly fix malformed JSON from LLMs.
@@ -187,11 +293,13 @@ class LLMService:
     ) -> Optional[BaseModel]:
         """
         Provider-agnostic structured extraction with native schema enforcement.
-        Supports: Ollama, OpenAI, Gemini, Anthropic (with fallback).
+        Supports: Ollama, LM Studio, OpenAI, Gemini, Anthropic (with fallback).
         """
         try:
             if self.provider == "ollama":
                 return self._extract_ollama(prompt, response_model, temperature)
+            elif self.provider == "lm_studio":
+                return self._extract_lm_studio(prompt, response_model, temperature)
             elif self.provider == "openai":
                 return self._extract_openai(prompt, response_model, temperature)
             elif self.provider == "gemini":
@@ -234,11 +342,11 @@ class LLMService:
         self, prompt: str, response_model: Type[BaseModel], temperature: float
     ) -> BaseModel:
         """Ollama extraction with native structured outputs."""
-        model = settings.MODEL_ARCHITECT
+        model = settings.OLLAMA_MODEL
         logger.info(f"[Ollama] Extracting with {model} (schema enforced)")
 
         extra_body = {
-            "keep_alive": -1,
+            "keep_alive": settings.OLLAMA_KEEP_ALIVE,
             "format": response_model.model_json_schema(),  # Native schema enforcement!
         }
 
@@ -308,6 +416,83 @@ class LLMService:
 
         return response.choices[0].message.parsed  # Already validated!
 
+    def _extract_lm_studio(
+        self, prompt: str, response_model: Type[BaseModel], temperature: float
+    ) -> BaseModel:
+        """LM Studio extraction using prompt-guided JSON object mode."""
+        import json
+
+        model = self._get_model_for_task("extraction")
+        logger.info(f"[LM Studio] Extracting with {model} (JSON mode)")
+
+        # Keep schema compact to reduce prompt-processing overhead.
+        schema_json = json.dumps(response_model.model_json_schema(), separators=(",", ":"))
+        system_prompt = (
+            "You are a structured extraction engine. "
+            "Return ONLY valid JSON with no markdown fences and no extra text. "
+            "The output MUST match this JSON schema exactly:\n"
+            f"{schema_json}"
+        )
+
+        raw_content = self._extract_lm_studio_with_fallback(
+            model=model,
+            system_prompt=system_prompt,
+            prompt=prompt,
+            temperature=temperature,
+            schema=None,
+            schema_name=response_model.__name__,
+        )
+        cleaned_json = self._clean_json(raw_content)
+        try:
+            return response_model.model_validate_json(cleaned_json)
+        except Exception:
+            # Some LM Studio models wrap result in {"extraction": {...}}.
+            import json
+
+            data = json.loads(cleaned_json)
+            if isinstance(data, dict) and isinstance(data.get("extraction"), dict):
+                return response_model.model_validate(data["extraction"])
+            raise
+        
+    def _extract_lm_studio_with_fallback(
+        self,
+        model: str,
+        system_prompt: str,
+        prompt: str,
+        temperature: float,
+        schema: dict | None = None,
+        schema_name: str = "response",
+    ) -> str:
+        """
+        Try configured response_format strategy with compatibility fallbacks.
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        last_error = None
+        for response_format in self._lm_studio_response_format_candidates(
+            schema=schema, schema_name=schema_name
+        ):
+            try:
+                response = self.chat_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    response_format=response_format,
+                    extra_body=self._with_keep_alive(),
+                    temperature=temperature,
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"[LM Studio] response_format={response_format.get('type')} failed: {e}"
+                )
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("[LM Studio] Extraction failed with no response formats to try")
+
     def _extract_gemini(
         self, prompt: str, response_model: Type[BaseModel], temperature: float
     ) -> BaseModel:
@@ -324,6 +509,9 @@ class LLMService:
                     temperature=temperature,
                     response_mime_type="application/json",
                     response_schema=response_model.model_json_schema(),
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=0,  # thinking_level="MINIMAL"
+                    ),
                 ),
             )
 
@@ -379,13 +567,9 @@ class LLMService:
             )
             return response.content[0].text
         else:
-            # Ollama/OpenAI
-            model = (
-                settings.MODEL_REASONING
-                if self.provider == "ollama"
-                else settings.OPENAI_MODEL_REASONING
-            )
-            extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
+            # Ollama/LM Studio/OpenAI
+            model = self._get_model_for_task("reasoning")
+            extra_body = self._with_keep_alive()
 
             response = self.chat_client.chat.completions.create(
                 model=model,
@@ -427,13 +611,9 @@ class LLMService:
             )
             return response.content[0].text.strip().replace('"', "")
         else:
-            # Ollama/OpenAI
-            model = (
-                settings.MODEL_SUMMARIZATION
-                if self.provider == "ollama"
-                else settings.OPENAI_MODEL
-            )
-            extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
+            # Ollama/LM Studio/OpenAI
+            model = self._get_model_for_task("summarization")
+            extra_body = self._with_keep_alive()
 
             response = self.chat_client.chat.completions.create(
                 model=model,
@@ -762,13 +942,14 @@ FINAL ANSWER:"""
             )
             return response.content[0].text.strip()
         else:
-            # Ollama/OpenAI
-            model = (
-                settings.MODEL_SYNTHESIS
-                if self.provider == "ollama"
-                else settings.OPENAI_MODEL
-            )
-            extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
+            # Ollama/LM Studio/OpenAI
+            if self.provider == "ollama":
+                model = settings.MODEL_SYNTHESIS
+            elif self.provider == "lm_studio":
+                model = self._get_model_for_task("summarization")
+            else:
+                model = settings.OPENAI_MODEL
+            extra_body = self._with_keep_alive()
 
             response = self.chat_client.chat.completions.create(
                 model=model,
@@ -812,13 +993,9 @@ FINAL ANSWER:"""
             )
             return response.content[0].text.strip()
         else:
-            # Ollama/OpenAI
-            model = (
-                settings.MODEL_SUMMARIZATION
-                if self.provider == "ollama"
-                else settings.OPENAI_MODEL
-            )
-            extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
+            # Ollama/LM Studio/OpenAI
+            model = self._get_model_for_task("summarization")
+            extra_body = self._with_keep_alive()
 
             response = self.chat_client.chat.completions.create(
                 model=model,
@@ -854,7 +1031,12 @@ FINAL ANSWER:"""
                 response = self.gemini_client.models.generate_content(
                     model=settings.GEMINI_MODEL,
                     contents=prompt,
-                    config=types.GenerateContentConfig(temperature=temperature),
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
+                    ),
                 )
                 return response.text.strip()
 
@@ -867,13 +1049,9 @@ FINAL ANSWER:"""
                 )
                 return response.content[0].text.strip()
 
-            else:  # OpenAI or Ollama
-                model = (
-                    settings.MODEL_BRAIN
-                    if self.provider == "ollama"
-                    else settings.OPENAI_MODEL
-                )
-                extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
+            else:  # OpenAI-compatible local or cloud providers
+                model = self._get_model_for_task("brain")
+                extra_body = self._with_keep_alive()
 
                 response = self.chat_client.chat.completions.create(
                     model=model,
@@ -990,12 +1168,17 @@ Now analyze the question above and list the information needs:
                 response = self.gemini_client.models.generate_content(
                     model=model,
                     contents=prompt,
-                    config=types.GenerateContentConfig(temperature=0.1),
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
+                    ),
                 )
                 answer = response.text.strip()
             else:
-                model = settings.MODEL_BRAIN
-                extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
+                model = self._get_model_for_task("brain")
+                extra_body = self._with_keep_alive()
 
                 response = self.chat_client.chat.completions.create(
                     model=model,
@@ -1061,9 +1244,6 @@ Now analyze the question above and list the information needs:
         for doc in retrieval_results[:3]:
             text = doc.get("text", "")
             if text:
-                # Truncate long texts
-                if len(text) > 500:
-                    text = text[:500] + "..."
                 context_snippets.append(text)
 
         if not context_snippets:
@@ -1130,12 +1310,17 @@ Now extract entities from the context above:
                 response = self.gemini_client.models.generate_content(
                     model=model,
                     contents=prompt,
-                    config=types.GenerateContentConfig(temperature=0.1),
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
+                    ),
                 )
                 answer = response.text
             else:
-                model = settings.MODEL_BRAIN
-                extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
+                model = self._get_model_for_task("brain")
+                extra_body = self._with_keep_alive()
 
                 response = self.chat_client.chat.completions.create(
                     model=model,
@@ -1165,6 +1350,119 @@ Now extract entities from the context above:
         except Exception as e:
             logger.error(f"[LLM] Failed to extract entities: {e}")
             return {}
+
+    async def rewrite_back_references(self, sub_questions: list[str]) -> list[str]:
+        """
+        Post-process sub-questions to replace vague back-references with [placeholder].
+
+        Mirrors _rewrite_back_references / _gemini_rewrite_back_refs from the benchmark
+        pipeline (v4/v5). Calls the LLM for each sub-question after the first so that
+        open-ended references like 'that series', 'the film', 'that company', 'the author'
+        are replaced with [placeholder] tokens even when a regex wouldn't catch them.
+        The first sub-question is always returned unchanged.
+        """
+        if not sub_questions:
+            return []
+        rewritten = [sub_questions[0]]
+        for q in sub_questions[1:]:
+            prompt = (
+                "Rewrite this question by replacing ANY vague reference to an "
+                "unspecified entity — i.e. a noun phrase that uses a definite article or "
+                "demonstrative ('that', 'the', 'those', 'this') to point at something "
+                "that is NOT named or defined anywhere in the question itself "
+                "(e.g. 'that series', 'the film', 'that car', 'the author', 'this work') "
+                "— with a [placeholder] token in square brackets.\n"
+                "If every noun phrase in the question refers to a clearly named entity, "
+                "return the question UNCHANGED.\n\n"
+                f"QUESTION: {q}\n\n"
+                "REWRITTEN (one line only):"
+            )
+            try:
+                result = await self.generate(prompt, temperature=0.0, max_tokens=80)
+                result = result.split("\n")[0].strip()
+                if not result:
+                    result = q
+            except Exception:
+                result = q
+            if result != q:
+                logger.info(f"[LLM] back-ref rewrite: '{q}' → '{result}'")
+            rewritten.append(result)
+        return rewritten
+
+    async def identify_answer_type(self, question: str) -> str:
+        """
+        Return a short phrase describing what type of answer this question requires.
+
+        Used to inject an ANSWER TYPE CONSTRAINT into the synthesis prompt —
+        the key improvement in benchmark v4/v5 that prevents the LLM from
+        returning the bridge entity instead of the actual requested value.
+
+        Examples: 'a year', 'a person\'s name', 'a song or album title',
+                  'yes or no', 'a number or count', 'a place name',
+                  'a job title or role', 'an award or distinction'.
+        """
+        prompt = (
+            "What type of answer does this question require? "
+            "Reply with one short phrase only — nothing else. No line breaks.\n"
+            "Examples: 'a year', 'a person's name', 'a song or album title', "
+            "'yes or no', 'a number or count', 'a place name', "
+            "'a job title or role', 'an award or distinction', 'a company name'.\n\n"
+            f"Question: {question}\n\nAnswer type:"
+        )
+        try:
+            raw = await self.generate(prompt, temperature=0.0, max_tokens=20)
+            # Collapse internal newlines that some models emit (e.g. 'yes or\nno')
+            return " ".join(raw.split())
+        except Exception:
+            return "an answer"
+
+    async def extract_name_for_hop(
+        self,
+        question: str,
+        verified_docs: list[dict],
+        original_question: str = "",
+    ) -> str:
+        """
+        Extract a short bridge-entity value (1–6 words) from verified docs.
+
+        Used between pipeline hops to fill [placeholder] tokens in the next
+        sub-question.  Mirrors _extract_name_only / _gemini_extract_name from
+        benchmark v4/v5: builds a plain-text context from the top 3 verified
+        docs, optionally adds a granularity hint derived from the original
+        question, and asks the LLM for just the name or value.
+        """
+        context_parts = []
+        for doc in verified_docs[:3]:
+            node = doc.get("original_obj", {})
+            text = (
+                node.get("summary") or node.get("description") or doc.get("text", "")
+            ).strip()
+            name = node.get("name", "")
+            if name and text:
+                context_parts.append(f"{name}: {text}")
+            elif text:
+                context_parts.append(text)
+        context = "\n\n".join(context_parts)
+
+        granularity_hint = ""
+        if original_question:
+            granularity_hint = (
+                f'\nIMPORTANT: The final question is: "{original_question}"\n'
+                "Extract only the part of the answer relevant to that question's "
+                "granularity (e.g. if the final question compares neighborhoods, "
+                "return the neighborhood name only — not the full address)."
+            )
+        prompt = (
+            f"Answer the question below with ONLY the name or value — "
+            f"no sentence, no explanation.{granularity_hint}\n\n"
+            f"CONTEXT:\n{context}\n\n"
+            f"QUESTION: {question}\n\nANSWER (1–6 words):"
+        )
+        try:
+            result = await self.generate(prompt, temperature=0.0, max_tokens=20)
+            return result.split("\n")[0].strip()
+        except Exception:
+            return ""
 
     async def generate_embedding_instruction(self, query: str) -> str:
         """
@@ -1225,12 +1523,15 @@ Now generate the instruction:
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         temperature=0.3,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
                     ),
                 )
                 instruction_text = response.text.strip()
             else:
-                model = settings.MODEL_BRAIN
-                extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
+                model = self._get_model_for_task("brain")
+                extra_body = self._with_keep_alive()
 
                 response = self.chat_client.chat.completions.create(
                     model=model,
@@ -1281,16 +1582,21 @@ Synonyms:"""
                 response = self.gemini_client.models.generate_content(
                     model=settings.GEMINI_MODEL,
                     contents=prompt,
-                    config=types.GenerateContentConfig(temperature=0.1),
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
+                    ),
                 )
                 answer = response.text.strip()
             else:
                 response = self.chat_client.chat.completions.create(
-                    model=settings.MODEL_BRAIN,
+                    model=self._get_model_for_task("brain"),
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
                     max_tokens=100,
-                    extra_body={"keep_alive": -1} if self.provider == "ollama" else {},
+                    extra_body=self._with_keep_alive(),
                 )
                 answer = response.choices[0].message.content.strip()
 
@@ -1313,12 +1619,48 @@ Synonyms:"""
             )
             return [entity_type.lower()]  # Fallback to original
 
-    async def synthesize(self, top_docs: list[dict], query: str) -> str:
+    # Synthesis rules ported from benchmark v4/v5 (the 0.74-scoring pipeline).
+    # Injected into BENCHMARK_MODE prompt and personal mode to enforce correct
+    # answer-type discipline, comparison direction, specificity, and past/present.
+    _SYNTHESIS_RULES = (
+        "Use the specific details in the evidence above to answer precisely.\n"
+        "RULE 1 (YES/NO): If the question asks whether two things share the same "
+        "property, extract the specific value for each from the evidence "
+        "(e.g. the exact neighborhood, not just the city), then compare. "
+        "ALL same → YES. ANY differ → NO. Never output the compared value.\n"
+        "RULE 2 (COMPARISON): If the question asks which had more/fewer/greater/less/"
+        "older/younger, compare the values, then output the WINNER'S NAME — not the "
+        "metric. For age: born in an EARLIER year = OLDER "
+        "(e.g. born 1965 is older than born 1970).\n"
+        "RULE 3 (MULTI-HOP): The final answer comes from the last relevant sub-question. "
+        "Bridge entities found along the way are NOT the final answer.\n"
+        "RULE 4 (ANSWER TYPE): Match the exact type of thing the question asks for — "
+        "never substitute a related entity:\n"
+        "  - 'What song/award/title/distinction...' → output the song/award/title, "
+        "NOT the person associated with it\n"
+        "  - 'How many / what population...' → output the number, NOT the entity being counted\n"
+        "  - 'What city/neighbourhood...' → output the city/location, "
+        "NOT a building or institution inside it\n"
+        "  - 'What position/role/office...' → output the title, NOT the person who held it\n"
+        "RULE 5 (SPECIFICITY): Use the most specific value the evidence supports. "
+        "If the evidence says 'formed in Fujioka, Gunma', answer with 'Fujioka, Gunma' — not 'Japan'. "
+        "If the evidence gives a specific street/neighbourhood, do not broaden to city or country.\n"
+        "RULE 6 (PAST vs CURRENT): If the question asks about a past or former state "
+        "(e.g. 'formerly known as', 'from 1988 to 1996', 'at the time'), answer with "
+        "the historical value from that period — not the current name or current value."
+    )
+
+    async def synthesize(
+        self, top_docs: list[dict], query: str, answer_type: str = ""
+    ) -> str:
         """
         Uses reasoning model for Synthesis with domain-aware prompting.
         Accepts structured Top Docs (not just string).
         STRICT: No Advice, Only Insights.
         Non-blocking (runs in thread).
+
+        answer_type: optional short phrase from identify_answer_type() injected as
+            an ANSWER TYPE CONSTRAINT into BENCHMARK_MODE prompt (v4/v5 pattern).
         """
         # Detect query domain for tailored system prompt
         query_domain = self._detect_query_domain(query)
@@ -1374,56 +1716,23 @@ Synonyms:"""
 
         # Benchmark mode uses factual, objective prompts for accurate evaluation
         if settings.BENCHMARK_MODE:
-            prompt = f"""
-        # ROLE
-        You are a factual question-answering system for benchmark evaluation.
-        Answer ONLY using the provided context.
-        
-        # YOUR PRIMARY TASK
-        Answer this EXACT question: "{query}"
-        
-        CRITICAL: The context may contain information gathered through multiple retrieval steps.
-        Some context may be background information (e.g., about movies, relationships, careers).
-        Your job is to find the FINAL ANSWER to the original question above.
-        
-        # REASONING STRATEGY (KEEP IT SIMPLE)
-        1. **Locate Facts**: Find the specific answers in the context.
-        2. **Compare (for Yes/No)**: 
-           - If Entity A is X and Entity B is X -> Answer YES.
-           - "American" and "US Citizen" -> YES.
-        3. **Answer Directly**: Provide the requested value (name, date, place) without preamble.
-
-        # ANSWER FORMAT
-        - **Yes/No Questions**: Start with "Yes" or "No", then explain briefly.
-        - **Specific Questions (Who/What/Where)**: Just the answer.
-        - **Conciseness**: Be direct. No filler.
-
-        
-        # NAME DISAMBIGUATION (CRITICAL)
-        - Match short names to their full biographical entries using profession/context
-        - Person A (profession X) = Person A Full Name if both have profession X
-        - ALWAYS check labels/professions to distinguish similar names
-        - "Jr." and "Sr." ALWAYS indicate different people (father and son)
-        - When multiple people share similar names, use the [Consensus - Label] prefix to distinguish
-        - Example: [Consensus - Person: Name] (occupation 1) vs [Consensus - Person: Name Sr.] (occupation 2)
-        
-        # CONSTRAINTS
-        - Use ONLY facts from the provided context
-        - Answer EXACTLY what the question asks (not related but different information)
-        - For multi-hop questions: You MUST connect facts from different parts of the context
-          * Example: If one part says "Jane Smith wrote Novel X" and another says "Jane Smith won the Pulitzer Prize",
-            you CAN and SHOULD answer "Pulitzer Prize" for "What award did the author of Novel X win?"
-          * The answer exists if ALL the connecting facts exist in the context, even if separated
-        - ONLY say "The answer is not in the provided context" if you genuinely cannot find the connecting facts
-        
-        # CONTEXT
-        {structured_context_str}
-        
-        # QUESTION (ANSWER THIS EXACTLY)
-        {query}
-        
-        # ANSWER
-        """
+            answer_type_constraint = (
+                f"ANSWER TYPE CONSTRAINT: This question requires {answer_type}. "
+                f"Your FINAL: answer MUST be {answer_type} — do not substitute a related "
+                "entity, person, or broader concept instead.\n\n"
+                if answer_type
+                else ""
+            )
+            prompt = (
+                "You are answering a multi-hop question using retrieved evidence below.\n\n"
+                f"{structured_context_str}\n\n"
+                f"Final question: {query}\n\n"
+                f"{answer_type_constraint}"
+                f"{self._SYNTHESIS_RULES}\n\n"
+                "First write 1–2 sentences of reasoning that end with a clear statement "
+                "of your answer, then on a new line write:\n"
+                "FINAL: <your answer (must match the conclusion in your reasoning)>"
+            )
         else:
             prompt = f"""
         # ROLE
@@ -1462,15 +1771,20 @@ Synonyms:"""
                 return self.gemini_client.models.generate_content(
                     model=settings.GEMINI_MODEL,
                     contents=prompt,
-                    config=types.GenerateContentConfig(temperature=0.1),
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
+                    ),
                 )
 
             logger.info(f"synthesize calling model: {settings.GEMINI_MODEL}")
             response = await loop.run_in_executor(None, _call_model)
             return response.text
         else:
-            model = settings.MODEL_BRAIN
-            extra_body = {"keep_alive": -1}
+            model = self._get_model_for_task("brain")
+            extra_body = self._with_keep_alive()
 
             def _call_model():
                 return self.chat_client.chat.completions.create(
@@ -1541,8 +1855,8 @@ ANSWER (be brief, max 2-3 sentences):"""
             )
             return response.content[0].text.strip()
         else:
-            # Ollama/OpenAI
-            extra_body = {"keep_alive": -1} if self.provider == "ollama" else {}
+            # Ollama/LM Studio/OpenAI
+            extra_body = self._with_keep_alive()
 
             response = self.chat_client.chat.completions.create(
                 model=model,
@@ -1556,13 +1870,9 @@ ANSWER (be brief, max 2-3 sentences):"""
     def _get_model_for_task(self, task: str) -> str:
         """Get the appropriate model name for a given task based on provider."""
         if self.provider == "ollama":
-            task_models = {
-                "extraction": settings.MODEL_ARCHITECT,
-                "summarization": settings.MODEL_SUMMARIZATION,
-                "reasoning": settings.MODEL_REASONING,
-                "brain": settings.MODEL_BRAIN,
-            }
-            return task_models.get(task, settings.MODEL_ARCHITECT)
+            return settings.OLLAMA_MODEL
+        elif self.provider == "lm_studio":
+            return self._resolve_lm_studio_model(settings.LM_STUDIO_MODEL)
         elif self.provider == "openai":
             if task == "reasoning":
                 return settings.OPENAI_MODEL_REASONING
@@ -1571,7 +1881,7 @@ ANSWER (be brief, max 2-3 sentences):"""
             return settings.GEMINI_MODEL
         elif self.provider == "anthropic":
             return settings.ANTHROPIC_MODEL
-        return settings.MODEL_ARCHITECT
+        return settings.OLLAMA_MODEL
 
     def detect_domain(self, text: str) -> str:
         """
@@ -1740,6 +2050,9 @@ ANSWER (be brief, max 2-3 sentences):"""
         # Benchmark mode uses factual, objective prompts
         if settings.BENCHMARK_MODE:
             format_rules = """### FORMAT RULES
+        - START with a FACTS line: "FACTS: <comma-separated key=value atomic facts, e.g. Origin=Lincoln Nebraska, Founded=1984, Genre=post-punk, Born=1962>."
+        - Then write a CONTEXT paragraph: prose summary of the entity.
+        - Include in FACTS any dates, locations, nationalities, classifications, or numeric values present in the context.
         - Use third-person, objective language (not "you" or "I").
         - Be factual and grounded IN THE PROVIDED CONTEXT ONLY.
         - Do NOT use personal framing or address any user."""
@@ -1747,6 +2060,8 @@ ANSWER (be brief, max 2-3 sentences):"""
         Generate a short descriptive title (MAX 5 WORDS) for '{entity_name}'."""
         else:
             format_rules = """### FORMAT RULES
+        - START with a FACTS line: "FACTS: <comma-separated key=value atomic facts, e.g. Origin=Lincoln Nebraska, Founded=1984, Genre=post-punk>."
+        - Then write a CONTEXT paragraph: prose summary of the entity.
         - ADDRESS USER AS "YOU" (not "I" or third person).
         - Be factual and grounded IN THE PROVIDED CONTEXT ONLY."""
             title_rules = f"""### TITLE RULES
@@ -1786,11 +2101,13 @@ ANSWER (be brief, max 2-3 sentences):"""
 
         try:
             model = (
-                settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_ARCHITECT
+                settings.GEMINI_MODEL
+                if self.is_gemini
+                else self._get_model_for_task("extraction")
             )
 
             if not self.is_gemini:
-                extra_body = {"keep_alive": -1, "format": "json"}
+                extra_body = self._with_keep_alive({"format": "json"})
                 response = self.chat_client.chat.completions.create(
                     model=model,
                     messages=[
@@ -1821,6 +2138,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                         temperature=0.1,
                         response_mime_type="application/json",
                         response_schema=self.SummaryUpdate.model_json_schema(),
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
                     ),
                 )
                 import json
@@ -1849,6 +2169,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
         # Benchmark mode uses factual, objective prompts
         if settings.BENCHMARK_MODE:
             format_rules = """### FORMAT RULES
+        - START with a FACTS line: "FACTS: <comma-separated key=value atomic facts, e.g. Origin=Lincoln Nebraska, Founded=1984, Genre=post-punk, Born=1962>."
+        - Then write a CONTEXT paragraph: prose summary of the entity.
+        - Include in FACTS any dates, locations, nationalities, classifications, or numeric values present in the context.
         - Use third-person, objective language (not "you" or "I").
         - Be factual and grounded IN THE PROVIDED CONTEXT ONLY.
         - Do NOT use personal framing or address any user."""
@@ -1856,6 +2179,8 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
         Generate a short descriptive title (MAX 5 WORDS) for '{entity_name}'."""
         else:
             format_rules = """### FORMAT RULES
+        - START with a FACTS line: "FACTS: <comma-separated key=value atomic facts>."
+        - Then write a CONTEXT paragraph: prose summary of the entity.
         - ADDRESS USER AS "YOU" (not "I" or third person).
         - Be factual and grounded IN THE PROVIDED CONTEXT ONLY."""
             title_rules = f"""### TITLE RULES
@@ -1895,7 +2220,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
 
         try:
             model = (
-                settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_ARCHITECT
+                settings.GEMINI_MODEL
+                if self.is_gemini
+                else self._get_model_for_task("extraction")
             )
 
             if self.is_gemini:
@@ -1907,6 +2234,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                         temperature=0.1,
                         response_mime_type="application/json",
                         response_schema=self.SummaryUpdate.model_json_schema(),
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
                     ),
                 )
                 import json
@@ -1918,13 +2248,20 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                         "summary", f"Information about {entity_name}."
                     ),
                 }
-            elif self.provider in ["ollama", "openai"]:
-                # Use async OpenAI client for Ollama and OpenAI batch processing
+            elif self.provider in ["ollama", "lm_studio", "openai"]:
+                # Use async OpenAI client for Ollama, LM Studio, and OpenAI batch processing
+                response_format = (
+                    self._lm_studio_text_response_format()
+                    if self.provider == "lm_studio"
+                    else {"type": "json_object"}
+                )
                 response = await self.async_chat_client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
-                    extra_body={"response_format": {"type": "json_object"}},
+                    extra_body=self._with_keep_alive(
+                        {"response_format": response_format}
+                    ),
                 )
                 import json
 
@@ -1946,6 +2283,110 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                 "title": entity_name,
                 "summary": f"Information about {entity_name}.",
             }
+
+    def extract_atomic_facts(
+        self,
+        context: str,
+        entity_name: str,
+        entity_type: str,
+    ) -> list[dict]:
+        """
+        Extract typed atomic (property, value) pairs from node context.
+
+        Applies to all node types: Entity, Concept, Task, Persona, Reference.
+
+        Returns a list of {"property": str, "value": str} dicts, e.g.:
+            Entity  → [{"property": "origin_city", "value": "Lincoln"}, ...]
+            Concept → [{"property": "domain", "value": "music theory"}, ...]
+            Ref     → [{"property": "author", "value": "Cal Newport"}, ...]
+
+        Stored as JSON under the `facts` property on the Neo4j node for
+        direct-match retrieval at query time (bypasses cosine similarity for
+        atomic lookups like "Where is X from?" or "When was X founded?").
+        """
+        if not context or not context.strip():
+            return []
+
+        prompt = (
+            f"Extract the most important atomic facts about '{entity_name}' "
+            f"({entity_type}) from the context below.\n\n"
+            f"Return ONLY facts explicitly stated in the context. Do NOT invent or infer.\n"
+            f"For each fact, use a short snake_case property name appropriate to the node type "
+            f"and the exact value from the text.\n\n"
+            f"Property name examples by type:\n"
+            f"  Entity/Person : birth_year, death_year, nationality, occupation, "
+            f"origin_city, origin_country, founded_year, parent_organization, genre, classification\n"
+            f"  Concept       : domain, category, definition_source, applies_to, "
+            f"related_field, type, scope\n"
+            f"  Task          : status, due_date, priority, project, assigned_to\n"
+            f"  Persona       : trait_category, intensity, context\n"
+            f"  Reference     : author, published_year, publisher, medium, url\n\n"
+            f"CONTEXT:\n{context}\n\n"
+            f"OUTPUT (JSON object with a 'facts' array, 2-8 items max):\n"
+            f'{{ "facts": [{{"property": "...", "value": "..."}}] }}'
+        )
+
+        class _Fact(BaseModel):
+            property: str
+            value: str
+
+        class _FactList(BaseModel):
+            facts: list[_Fact]
+
+        try:
+            model = (
+                settings.GEMINI_MODEL
+                if self.is_gemini
+                else self._get_model_for_task("extraction")
+            )
+            if not self.is_gemini:
+                extra_body = self._with_keep_alive({"format": "json"})
+                resp = self.chat_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": 'Return valid JSON only: {"facts": [{"property": "...", "value": "..."}]}',
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=400,
+                    extra_body=extra_body,
+                )
+                raw = resp.choices[0].message.content
+                cleaned = self._clean_json(raw)
+                try:
+                    parsed = _FactList.model_validate_json(cleaned)
+                    return [f.model_dump() for f in parsed.facts]
+                except Exception:
+                    import json as _json
+
+                    arr = _json.loads(cleaned)
+                    if isinstance(arr, list):
+                        return arr
+                    return []
+            else:
+                from google.genai import types as _gtypes
+
+                resp = self.gemini_client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=_gtypes.GenerateContentConfig(
+                        temperature=0.0,
+                        response_mime_type="application/json",
+                        response_schema=_FactList.model_json_schema(),
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
+                    ),
+                )
+                import json as _json
+
+                data = _json.loads(resp.text)
+                return data.get("facts", [])
+        except Exception as e:
+            logger.warning(f"Atomic fact extraction failed for {entity_name}: {e}")
+            return []
 
     def update_summary(
         self,
@@ -2032,14 +2473,16 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
 
         try:
             model = (
-                settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_ARCHITECT
+                settings.GEMINI_MODEL
+                if self.is_gemini
+                else self._get_model_for_task("extraction")
             )
             logger.info(f"update_summary calling model: {model}")
 
             # For Ollama: use raw client to get JSON, then clean and validate manually
             # This avoids Instructor's validation before we can sanitize control characters
             if not self.is_gemini:
-                extra_body = {"keep_alive": -1, "format": "json"}
+                extra_body = self._with_keep_alive({"format": "json"})
                 response = self.chat_client.chat.completions.create(
                     model=model,
                     messages=[
@@ -2070,6 +2513,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                         temperature=0.1,
                         response_mime_type="application/json",
                         response_schema=self.SummaryUpdate.model_json_schema(),
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
                     ),
                 )
                 import json
@@ -2172,7 +2618,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
 
         try:
             model = (
-                settings.GEMINI_MODEL if self.is_gemini else settings.MODEL_ARCHITECT
+                settings.GEMINI_MODEL
+                if self.is_gemini
+                else self._get_model_for_task("extraction")
             )
             logger.info(f"update_summary_async calling model: {model}")
 
@@ -2185,6 +2633,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                         temperature=0.1,
                         response_mime_type="application/json",
                         response_schema=self.SummaryUpdate.model_json_schema(),
+                        thinking_config=types.ThinkingConfig(
+                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        ),
                     ),
                 )
                 import json
@@ -2194,13 +2645,20 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                     "title": response_data.get("title", entity_name),
                     "summary": response_data.get("summary", existing_summary),
                 }
-            elif self.provider in ["ollama", "openai"]:
-                # Use async OpenAI client for Ollama and OpenAI batch processing
+            elif self.provider in ["ollama", "lm_studio", "openai"]:
+                # Use async OpenAI client for Ollama, LM Studio, and OpenAI batch processing
+                response_format = (
+                    self._lm_studio_text_response_format()
+                    if self.provider == "lm_studio"
+                    else {"type": "json_object"}
+                )
                 response = await self.async_chat_client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
-                    extra_body={"response_format": {"type": "json_object"}},
+                    extra_body=self._with_keep_alive(
+                        {"response_format": response_format}
+                    ),
                 )
                 import json
 
@@ -2245,14 +2703,16 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                 continue
 
             # Label based on type to signal authority level
-            if dtype == "graph_consensus":
+            # Supports both retrieval.py types (entity_match, vector_match, neighbor_node)
+            # and any legacy types (graph_consensus, vector_similar, related_node)
+            if dtype in ("entity_match", "graph_consensus"):
                 # Primary entity matches - highest authority
                 parts.append(f"[CORE CONSENSUS]: {text}")
-            elif dtype == "vector_similar":
+            elif dtype in ("vector_match", "vector_similar"):
                 # Semantic matches - may contain aliases, full names, related entities
                 # These are equally important as they catch name variations
                 parts.append(f"[SEMANTIC MATCH]: {text}")
-            elif dtype == "related_node":
+            elif dtype in ("neighbor_node", "related_node"):
                 # Graph neighbors - supporting context
                 parts.append(f"[RELATED CONTEXT]: {text}")
             elif dtype == "community_summary":
@@ -2329,8 +2789,11 @@ JSON response:"""
         try:
             # Select model based on provider
             if self.provider == "ollama":
-                model = settings.MODEL_SUMMARIZATION
-                extra_body = {"keep_alive": -1}
+                model = settings.OLLAMA_MODEL
+                extra_body = self._with_keep_alive()
+            elif self.provider == "lm_studio":
+                model = self._get_model_for_task("summarization")
+                extra_body = self._with_keep_alive()
             elif self.provider == "openai":
                 model = settings.OPENAI_MODEL
                 extra_body = {}
@@ -2352,7 +2815,7 @@ JSON response:"""
                 )
                 response_text = response.content[0].text.strip()
             else:
-                model = settings.MODEL_SUMMARIZATION
+                model = self._get_model_for_task("summarization")
                 extra_body = {}
 
             # Non-Anthropic providers use OpenAI-compatible API

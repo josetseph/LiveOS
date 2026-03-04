@@ -134,7 +134,7 @@ class RetrievalService:
         self.models_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), f"../../{settings.MODELS_PATH}")
         )
-        logger.info("RetrievalService initialized (hybrid symbolic+rerank mode)")
+        logger.info("RetrievalService initialized")
 
     def _log_retrieval_details(
         self,
@@ -230,45 +230,27 @@ class RetrievalService:
             if not related_nodes:
                 return ""
 
-            # Format relationships for LLM
+            # Format each connected node as natural language so the LLM
+            # reads prose rather than notation.
             relationships = []
             for related in related_nodes[:max_relationships]:
                 rel_name = related.get("name", "Unknown")
                 rel_path = related.get("relationship_path", [])
                 context_path = related.get("context_path", [])
 
-                if rel_path:
-                    rel_type = rel_path[0]
+                if context_path and context_path[0]:
+                    context = context_path[0]
+                    rel_str = f'"{rel_name}" ({context})'
+                elif rel_path:
+                    rel_natural = rel_path[0].replace("_", " ").title()
+                    rel_str = f'"{rel_name}" ({rel_natural})'
+                else:
+                    rel_str = f'"{rel_name}"'
 
-                    # Include relationship context/reasoning if available
-                    # Context contains LLM reasoning for alias detection relationships
-                    # or natural language for regular relationships
-                    if context_path and context_path[0]:
-                        context = context_path[0]
-                        # Truncate if too long to avoid token bloat
-                        if len(context) > 120:
-                            context = context[:120] + "..."
-
-                        # Format based on relationship type
-                        if rel_type in [
-                            "IS_SAME_AS",
-                            "IS_VARIANT_OF",
-                            "IS_SIMILAR_TO",
-                            "RELATED_TO",
-                        ]:
-                            # Alias detection relationships: show type and reasoning
-                            rel_str = f"{rel_type} → {rel_name} ({context})"
-                        else:
-                            # Regular relationships: context might be a complete sentence
-                            rel_str = f"{rel_type} → {rel_name}: {context}"
-                    else:
-                        # No context available - basic format
-                        rel_str = f"{rel_type} → {rel_name}"
-
-                    relationships.append(rel_str)
+                relationships.append(rel_str)
 
             if relationships:
-                return " | Connections: " + "; ".join(relationships)
+                return " and is connected to " + "; ".join(relationships)
 
             return ""
 
@@ -280,15 +262,38 @@ class RetrievalService:
 
     def _get_node_text(self, node: dict) -> str:
         """
-        Extract text content from a node.
+        Extract text content from a node, including atomic facts so the LLM
+        can answer fact-specific questions (e.g. "Where is X from?") directly
+        from candidate text without needing a separate lookup.
 
         Args:
             node: Node dict from Neo4j
 
         Returns:
-            Summary text
+            Summary text with facts appended when present.
         """
-        return node.get("summary") or node.get("description", "")
+        import json as _json
+
+        summary = node.get("summary") or node.get("description", "")
+        facts_raw = node.get("facts")
+        if facts_raw:
+            try:
+                facts = (
+                    _json.loads(facts_raw) if isinstance(facts_raw, str) else facts_raw
+                )
+                if isinstance(facts, list) and facts:
+                    facts_text = "; ".join(
+                        f"{f['property']}: {f['value']}"
+                        for f in facts
+                        if isinstance(f, dict) and f.get("property") and f.get("value")
+                    )
+                    if facts_text:
+                        summary = (
+                            f"{summary} Facts: {facts_text}" if summary else facts_text
+                        )
+            except Exception:
+                pass
+        return summary
 
     async def hybrid_search(self, query: str, top_k: int = 20) -> List[dict]:
         """
@@ -321,26 +326,21 @@ class RetrievalService:
         # Extract expected entity types for filtering/boosting
         expected_entity_types = query_analysis.get("expected_entity_types", [])
         question_attribute = query_analysis.get("question_attribute", None)
-        is_temporal_query = query_analysis.get(
-            "is_temporal", False
-        ) or self._is_temporal_query(query)
+        # The LLM is solely responsible for determining whether the query is temporal.
+        # No hardcoded keyword fallback — this keeps the system domain-agnostic.
+        is_temporal_query = query_analysis.get("is_temporal", False)
 
         # ============ ENTITY EXTRACTION ============
-        # Extract named entities from query using the same logic as ingestion
-        # This ensures we can find explicitly named entities like "Albert Einstein"
+        # The LLM is the sole source of entity names from the query.
+        # No regex/TitleCase fallback — the LLM already handles multi-word names.
         llm_entities_raw = query_analysis.get("entities", [])
 
-        # Also extract proper names using Title Case pattern detection
-        proper_names = self._extract_proper_names(query)
-
-        # Track what gets filtered for analysis
+        # Strip stopwords and single-character tokens that match everything
         filtered_by_length = []
         filtered_by_stopwords = []
 
-        # Filter out stopwords and short entities
         def is_valid_entity(e: str) -> bool:
             e_lower = e.lower().strip()
-            # Track filtering reasons
             if len(e_lower) < 2:
                 filtered_by_length.append(e)
                 return False
@@ -349,9 +349,8 @@ class RetrievalService:
                 return False
             return True
 
-        llm_entities = [e for e in llm_entities_raw if is_valid_entity(e)]
+        query_entities = [e for e in llm_entities_raw if is_valid_entity(e)]
 
-        # Log filtering statistics
         if filtered_by_stopwords or filtered_by_length:
             logger.info(f"  [Entity Filter] Raw LLM entities: {llm_entities_raw}")
             if filtered_by_stopwords:
@@ -362,13 +361,7 @@ class RetrievalService:
                 logger.info(
                     f"  [Entity Filter] Removed by length (<2): {filtered_by_length}"
                 )
-            logger.info(f"  [Entity Filter] Final entities: {llm_entities}")
-
-        # Merge proper names with LLM entities (proper names may catch multi-word names LLM splits)
-        query_entities = list(set(llm_entities))
-        for pn in proper_names:
-            if pn.lower() not in [e.lower() for e in query_entities]:
-                query_entities.append(pn)
+            logger.info(f"  [Entity Filter] Final entities: {query_entities}")
 
         logger.info(
             f"  [LLM Analysis] Intent: {query_analysis.get('intent')}, "
@@ -431,7 +424,7 @@ class RetrievalService:
                 # Search for variants of found names to catch fuller/alternate versions
                 # e.g., "Robert Smith" → also find "Robert Smith Jr."
                 variant_nodes = []
-                for node in entity_found[:5]:  # Top 5 to avoid explosion
+                for node in entity_found[:10]:  # Top 10 to avoid explosion
                     node_name = node.get("name", "")
                     node_type = (node.get("entity_type") or "").lower()
                     # Only expand Person entities with multi-word names
@@ -442,7 +435,7 @@ class RetrievalService:
                     ):
                         try:
                             variants = graph_service.find_name_variants(node_name)
-                            for v in variants[:3]:  # Top 3 variants per name
+                            for v in variants[:5]:  # Top 5 variants per name
                                 if (
                                     v["name"] not in node_names_found
                                     and v["name"] != node_name
@@ -503,7 +496,7 @@ class RetrievalService:
                 ):
                     try:
                         variants = graph_service.find_name_variants(vnode_name)
-                        for v in variants[:2]:  # Top 2 variants per name
+                        for v in variants[:5]:  # Top 5 variants per name
                             if (
                                 v["name"] not in node_names_found
                                 and v["name"] != vnode_name
@@ -537,27 +530,29 @@ class RetrievalService:
         # Expand from both entity matches and vector matches
         # This finds related context (e.g., "Albert Einstein" → "Princeton")
 
-        # PRIORITY: Follow IS_SAME_AS links first (alias resolution)
-        # These links created by alias detector indicate entity identity
+        # Follow IS_SAME_AS and IS_VARIANT_OF links to include canonical/related entities.
+        # Both the original node AND its canonical/variant targets are kept and later
+        # expanded 1-hop, so no context is lost.
         all_primary_nodes = entity_nodes + vector_nodes
         alias_resolved_nodes = []
 
         if all_primary_nodes:
             logger.info(
-                f"  [Alias] Checking {len(all_primary_nodes)} nodes for IS_SAME_AS links"
+                f"  [Alias] Checking {len(all_primary_nodes)} nodes for IS_SAME_AS / IS_VARIANT_OF links"
             )
 
             for node in all_primary_nodes:
                 node_name = node["name"]
 
-                # Check if this node is an alias (points to canonical entity)
+                # Follow both IS_SAME_AS (certain identity) and IS_VARIANT_OF (probable identity)
                 alias_query = """
-                MATCH (alias:Entity {name: $name})-[r:IS_SAME_AS]->(canonical:Entity)
-                RETURN canonical.name as canonical_name, 
+                MATCH (alias:Entity {name: $name})-[r:IS_SAME_AS|IS_VARIANT_OF]->(canonical:Entity)
+                RETURN canonical.name as canonical_name,
                        canonical.summary as summary,
                        canonical.type as entity_type,
                        canonical.embedding as embedding,
                        r.confidence as alias_confidence,
+                       type(r) as rel_type,
                        labels(canonical) as labels
                 """
 
@@ -566,41 +561,40 @@ class RetrievalService:
                 )
 
                 if alias_results:
-                    # Follow the IS_SAME_AS link to canonical entity
-                    canonical = alias_results[0]
-                    canonical_name = canonical["canonical_name"]
-                    alias_confidence = canonical.get("alias_confidence", 1.0)
-
-                    logger.info(
-                        f"  [Alias] Resolved '{node_name}' -> '{canonical_name}' "
-                        f"(confidence: {alias_confidence:.2f})"
-                    )
-
-                    # KEEP BOTH: alias node (for its unique contexts) AND canonical node (for main info)
-                    # This ensures we don't lose contexts that were specifically attached to the alias
-                    alias_resolved_nodes.append(node)  # Keep the alias node
-
-                    # Also add canonical node (if not already present)
-                    canonical_node_names = {n["name"] for n in alias_resolved_nodes}
-                    if canonical_name not in canonical_node_names:
-                        # Create full node dict from canonical entity
-                        canonical_node = {
-                            "name": canonical_name,
-                            "summary": canonical.get("summary"),
-                            "entity_type": canonical.get("entity_type"),
-                            "embedding": canonical.get("embedding"),
-                            "labels": canonical.get("labels", ["Entity"]),
-                            "_source": f"canonical_of_{node_name}",
-                            "_alias_confidence": alias_confidence,
-                        }
-                        alias_resolved_nodes.append(canonical_node)
-                else:
-                    # No alias - keep original node
+                    # Keep the original (alias) node so its own 1-hop neighbors are expanded too
                     alias_resolved_nodes.append(node)
 
+                    canonical_node_names = {n["name"] for n in alias_resolved_nodes}
+                    for row in alias_results:
+                        canonical_name = row["canonical_name"]
+                        alias_confidence = row.get("alias_confidence", 1.0)
+                        rel_type = row.get("rel_type", "IS_SAME_AS")
+
+                        logger.info(
+                            f"  [Alias] '{node_name}' -{rel_type}-> '{canonical_name}' "
+                            f"(confidence: {alias_confidence:.2f})"
+                        )
+
+                        if canonical_name not in canonical_node_names:
+                            canonical_node = {
+                                "name": canonical_name,
+                                "summary": row.get("summary"),
+                                "entity_type": row.get("entity_type"),
+                                "embedding": row.get("embedding"),
+                                "labels": row.get("labels", ["Entity"]),
+                                "_source": f"{rel_type.lower()}_of_{node_name}",
+                                "_alias_confidence": alias_confidence,
+                            }
+                            alias_resolved_nodes.append(canonical_node)
+                            canonical_node_names.add(canonical_name)
+                else:
+                    # No alias links — keep original node as-is
+                    alias_resolved_nodes.append(node)
+
+            added = len(alias_resolved_nodes) - len(all_primary_nodes)
             logger.info(
                 f"  [Alias] After alias resolution: {len(alias_resolved_nodes)} nodes "
-                f"({len(alias_resolved_nodes) - len(all_primary_nodes)} added via IS_SAME_AS)"
+                f"({added} added via IS_SAME_AS / IS_VARIANT_OF)"
             )
 
             # Use alias-resolved nodes for neighbor expansion
@@ -643,8 +637,17 @@ class RetrievalService:
                         )
 
                         # 2. Keyword relevance (fast heuristic)
-                        # Check if query keywords appear in neighbor summary/name
-                        neighbor_text = f"{neighbor.get('name', '')} {neighbor.get('summary', '')}".lower()
+                        # Check if query keywords appear in neighbor summary/name/edge-context.
+                        # Edge context (rel.context sentences from ingestion) often contains
+                        # the direct answer for hop questions — include it in the search text.
+                        edge_contexts = " ".join(
+                            c for c in (neighbor.get("context_path") or []) if c
+                        )
+                        neighbor_text = (
+                            f"{neighbor.get('name', '')} "
+                            f"{neighbor.get('summary', '')} "
+                            f"{edge_contexts}"
+                        ).lower()
                         query_keywords = set(query.lower().split()) - {
                             "what",
                             "where",
@@ -739,31 +742,28 @@ class RetrievalService:
         all_found_nodes = entity_nodes + vector_nodes + neighbor_nodes
         all_node_names = [n["name"] for n in all_found_nodes]
 
-        # STEP 4: Community summaries for broad queries
-        # If query is exploratory ("what have I learned", "what's happening with X")
-        # fetch relevant community summaries for high-level context
+        # STEP 4: Community summaries for broad / exploratory queries
+        # Use the LLM-determined intent rather than keyword matching to decide.
         community_summaries = []
-        broad_query_keywords = [
-            "what have",
-            "tell me about",
+        is_broad_or_exploratory = query_analysis.get("intent") in (
             "summarize",
-            "overview",
-            "lately",
-            "recently",
-            "all about",
-        ]
-        is_broad_query = any(kw in query.lower() for kw in broad_query_keywords)
-        exploratory_keywords = ["how", "why", "connected", "related", "relationship"]
-        is_exploratory = any(kw in query.lower() for kw in exploratory_keywords)
+            "explain",
+            "list",
+            "recent",
+        )
 
-        if is_broad_query or is_exploratory:
+        if is_broad_or_exploratory:
             try:
-                # For broad queries, get top communities
-                community_summaries = graph_service.get_all_communities()[:5]  # Top 5
+                # Search for communities semantically relevant to this query rather
+                # than blindly returning the most-populated ones.
+                community_summaries = graph_service.search_communities(
+                    full_vector, top_k=5, min_score=0.55
+                )
 
                 if community_summaries:
                     logger.info(
-                        f"  [Vector] Found {len(community_summaries)} relevant communities"
+                        f"  [Community] Found {len(community_summaries)} relevant communities: "
+                        f"{[c['name'] for c in community_summaries]}"
                     )
             except Exception as e:
                 logger.debug(f"  [Community] Failed to fetch communities: {e}")
@@ -805,23 +805,28 @@ class RetrievalService:
         # Label as "Consensus" to help LLM recognize these as Distilled Wisdom
         candidates = []
 
-        # A. Entity Nodes (highest priority - direct name matches from query)
+        # Build a name→summary lookup for source nodes so neighbor text can include
+        # source context in natural language ("Ed Wood, with context '...' was born in...")
+        source_summary_map: dict[str, str] = {}
+        for _n in all_primary_nodes:
+            _s = self._get_node_text(_n)
+            if _s and _n.get("name"):
+                source_summary_map[_n["name"]] = _s
+
+        # A. Entity Nodes (highest priority — direct name matches from query)
         for node in entity_nodes:
             summary = self._get_node_text(node)
             if not summary:
-                continue  # Skip nodes without content
+                continue
 
-            label = (
-                node.get("labels", ["Entity"])[0]
-                if isinstance(node.get("labels"), list)
-                else "Entity"
+            entity_type = node.get("entity_type", "") or ""
+            _article = (
+                "an" if entity_type and entity_type[0].lower() in "aeiou" else "a"
             )
-
-            # Add relationship context for multi-hop reasoning
+            type_clause = f", {_article} {entity_type}" if entity_type else ""
             rel_context = self._get_node_relationships(node)
 
-            # Use [Consensus: Name] to signal this is distilled knowledge
-            text = f"[Consensus - {label}: {node['name']}]{rel_context}: {summary}"
+            text = f'{node["name"]}{type_clause}, has context "{summary}"{rel_context}'
 
             # Attach linked notes for reference traceability (case-insensitive lookup)
             linked_notes = node_to_notes.get(node["name"].lower(), [])
@@ -842,26 +847,22 @@ class RetrievalService:
         for node in vector_nodes:
             vector_score = node.get("score", 0.0)
 
-            # IMPROVEMENT: Filter weak semantic matches to reduce noise
-            # Threshold tuned for qwen3-embedding:0.6b (lower than nomic)
+            # Filter weak semantic matches to reduce noise
             if vector_score < 0.7:
                 continue
 
             summary = self._get_node_text(node)
             if not summary:
-                continue  # Skip nodes without content
+                continue
 
-            label = (
-                node.get("labels", ["Entity"])[0]
-                if isinstance(node.get("labels"), list)
-                else "Entity"
+            entity_type = node.get("entity_type", "") or ""
+            _article = (
+                "an" if entity_type and entity_type[0].lower() in "aeiou" else "a"
             )
-
-            # Add relationship context for multi-hop reasoning
+            type_clause = f", {_article} {entity_type}" if entity_type else ""
             rel_context = self._get_node_relationships(node)
 
-            # Use [Consensus: Name] to signal this is distilled knowledge, not a raw note
-            text = f"[Consensus - {label}: {node['name']}] (similarity: {vector_score:.2f}){rel_context}: {summary}"
+            text = f'{node["name"]}{type_clause}, has context "{summary}"{rel_context}'
 
             # Attach linked notes for reference traceability (case-insensitive lookup)
             linked_notes = node_to_notes.get(node["name"].lower(), [])
@@ -884,29 +885,52 @@ class RetrievalService:
             if not summary:
                 continue
 
-            label = node.get("label", "Entity")
             expanded_from = node.get("_expanded_from", "")
-            rel_path = " → ".join(node.get("relationship_path", []))
-
-            # Include relationship context/reasoning (the "Why" behind the link)
             context_path = node.get("context_path", [])
-            rel_context = ""
+            rel_path_parts = node.get("relationship_path", [])
+
+            # Build fully natural-language text so the LLM receives prose, not notation.
+            # Format: "<source>, with context '<source_summary>' <edge_sentence> <dest>,
+            #          with context '<dest_summary>'"
+            # If no edge sentence is available, fall back to a readable rel-type phrase.
+            edge_sentence = ""
             if context_path:
-                # Filter out None values and truncate for readability
                 contexts = [c for c in context_path if c]
                 if contexts:
-                    # Truncate long contexts to avoid token bloat
-                    truncated_contexts = []
-                    for ctx in contexts[:2]:  # Max 2 contexts
-                        if len(ctx) > 100:
-                            ctx = ctx[:100] + "..."
-                        truncated_contexts.append(ctx)
-                    rel_context = f" | Why: {'; '.join(truncated_contexts)}"
+                    edge_sentence = contexts[0]
+
+            dest_context = summary
 
             if expanded_from:
-                text = f"[Neighbor - {label}: {node['name']}] (expanded from {expanded_from} via {rel_path}){rel_context}: {summary}"
+                src_summary = source_summary_map.get(expanded_from, "")
+                src_ctx_part = f', with context "{src_summary}"' if src_summary else ""
+                if edge_sentence:
+                    text = (
+                        f"{expanded_from}{src_ctx_part} — {edge_sentence} "
+                        f'{node["name"]}, with context "{dest_context}"'
+                    )
+                else:
+                    rel_natural = (
+                        " ".join(p.replace("_", " ").lower() for p in rel_path_parts)
+                        or "related to"
+                    )
+                    text = (
+                        f"{expanded_from}{src_ctx_part} is {rel_natural} "
+                        f'{node["name"]}, with context "{dest_context}"'
+                    )
             else:
-                text = f"[Neighbor - {label}: {node['name']}] (via {rel_path}){rel_context}: {summary}"
+                if edge_sentence:
+                    text = (
+                        f'{edge_sentence} {node["name"]}, with context "{dest_context}"'
+                    )
+                else:
+                    rel_natural = (
+                        " ".join(p.replace("_", " ").lower() for p in rel_path_parts)
+                        or "related"
+                    )
+                    text = (
+                        f'{node["name"]} ({rel_natural}), with context "{dest_context}"'
+                    )
 
             # Attach linked notes for reference traceability (case-insensitive lookup)
             linked_notes = node_to_notes.get(node["name"].lower(), [])
@@ -952,8 +976,12 @@ class RetrievalService:
             themes = community.get("themes", [])
             member_count = community.get("member_count", 0)
 
-            themes_str = f" Themes: {', '.join(themes[:3])}" if themes else ""
-            text = f"[Community - {domain}: {name}] ({member_count} members){themes_str}: {summary}"
+            themes_str = f", covering {', '.join(themes)}" if themes else ""
+            domain_str = f" ({domain})" if domain else ""
+            text = (
+                f'The "{name}" community{domain_str} has {member_count} members{themes_str}. '
+                f"Context: {summary}"
+            )
 
             # Attach linked notes from community members
             linked_notes = community_linked_notes.get(name, [])
@@ -1101,9 +1129,12 @@ class RetrievalService:
             # Fallback: compute similarity if not available
             # This handles entity_match candidates that don't have vector scores
             try:
-                summary_vector = embedding_service.embed_query(
-                    summary[:500]
-                )  # Limit for performance
+                # Reconstruct the exact text used at ingestion time:
+                # f"{title}: {summary} Facts: ..." (see _update_node_summary)
+                # so the vector sits in the same embedding space as stored nodes.
+                node_title = node.get("title") or ""
+                embed_text = f"{node_title}: {summary}" if node_title else summary
+                summary_vector = embedding_service.embed_documents([embed_text])[0]
                 # Cosine similarity
                 dot_product = sum(a * b for a, b in zip(query_vector, summary_vector))
                 norm_q = sum(a * a for a in query_vector) ** 0.5
@@ -1188,6 +1219,24 @@ class RetrievalService:
         # Take top_k candidates (already sorted by combined_score with domain boost)
         combined_results = candidates[:top_k]
 
+        # [Improvement #2] Guarantee every entity-match candidate survives the top_k cut.
+        # Explicitly-named entities from the query are high-value anchors — they must not
+        # be dropped by scoring rank if there are many high-scoring vector results.
+        entity_match_names_in_results = {
+            c.get("original_obj", {}).get("name")
+            for c in combined_results
+            if c.get("type") == "entity_match"
+        }
+        for cand in candidates[top_k:]:
+            if cand.get("type") == "entity_match":
+                node_name = cand.get("original_obj", {}).get("name")
+                if node_name and node_name not in entity_match_names_in_results:
+                    combined_results.append(cand)
+                    entity_match_names_in_results.add(node_name)
+                    logger.info(
+                        f"  [Priority] Force-included entity match outside top_k: {node_name}"
+                    )
+
         # Add boost details for logging
         for cand in combined_results:
             cand["boosts"] = {
@@ -1233,261 +1282,6 @@ class RetrievalService:
         self._current_query_embedding = None
 
         return combined_results
-
-    def _is_temporal_query(self, query: str) -> bool:
-        """
-        Detect if query is explicitly asking for recent/latest/newest notes.
-        Only returns True for queries that clearly want temporal priority.
-        """
-        query_lower = query.lower()
-        temporal_keywords = [
-            "recent",
-            "latest",
-            "newest",
-            "last",
-            "new",
-            "today",
-            "yesterday",
-            "this week",
-            "this month",
-            "lately",
-            "currently",
-        ]
-        # Must contain temporal keyword AND not be asking about specific entities
-        has_temporal_keyword = any(kw in query_lower for kw in temporal_keywords)
-
-        # Don't treat as temporal if asking about specific work/projects
-        entity_indicators = ["at", "with", "about", "regarding", "concerning"]
-        has_entity_focus = any(ind in query_lower for ind in entity_indicators)
-
-        # Temporal query = has temporal keyword AND either no entity focus OR explicitly asks "what are my recent..."
-        if has_temporal_keyword:
-            if "what are my recent" in query_lower or "what have i" in query_lower:
-                return True
-            if not has_entity_focus:
-                return True
-
-        return False
-
-    def _extract_proper_names(self, query: str) -> List[str]:
-        """
-        Extract proper names from query by finding consecutive Title Case words.
-        This catches multi-word names like "Albert Einstein", "New York City", "The Great Gatsby".
-
-        Returns list of proper names found in query.
-        """
-        import re
-
-        proper_names = []
-
-        # Clean query - remove punctuation except apostrophes within words
-        clean_query = re.sub(r"[^\w\s\'-]", " ", query)
-        words = clean_query.split()
-
-        # Skip these words when they appear between capitalized words
-        # (e.g., "Lord of the Rings" - "of" and "the" connect title case words)
-        connectors = {"and", "of", "the", "in", "for", "on", "at", "to", "vs", "or"}
-
-        # Common question starters to skip at position 0
-        question_starters = {
-            "what",
-            "where",
-            "when",
-            "who",
-            "which",
-            "how",
-            "why",
-            "is",
-            "are",
-            "was",
-            "were",
-            "do",
-            "does",
-            "did",
-            "can",
-            "could",
-        }
-
-        i = 0
-        while i < len(words):
-            word = words[i]
-            # Strip quotes from word
-            clean_word = word.strip("\"'")
-
-            # Skip question starters at beginning
-            if i == 0 and clean_word.lower() in question_starters:
-                i += 1
-                continue
-
-            # Check if this word starts a proper name (Title Case)
-            if clean_word and clean_word[0].isupper() and len(clean_word) >= 2:
-                # Start collecting a potential multi-word name
-                name_parts = [clean_word]
-                j = i + 1
-
-                while j < len(words):
-                    next_word = words[j].strip("\"'")
-                    next_lower = next_word.lower()
-
-                    # If it's a connector, peek ahead to see if another Title Case word follows
-                    if next_lower in connectors and j + 1 < len(words):
-                        peek_word = words[j + 1].strip("\"'")
-                        if peek_word and peek_word[0].isupper():
-                            name_parts.append(next_word)
-                            j += 1
-                            continue
-
-                    # If it's another Title Case word, add it
-                    if next_word and next_word[0].isupper() and len(next_word) >= 2:
-                        name_parts.append(next_word)
-                        j += 1
-                    else:
-                        break
-
-                # Only keep if it's a multi-word name (single words handled elsewhere)
-                if len(name_parts) >= 2:
-                    full_name = " ".join(name_parts)
-                    proper_names.append(full_name)
-
-                i = j
-            else:
-                i += 1
-
-        return proper_names
-
-    def _detect_query_domain(self, query: str) -> str:
-        """
-        Heuristic to detect if query is Academic, Personal, Professional, or Creative.
-
-        Academic: mentions concepts, learning, papers, theorems, courses
-        Personal: mentions feelings, daily life, relationships, goals
-        Professional: mentions work, projects, meetings, career
-        Creative: mentions poems, lyrics, metaphors, creative writing
-        """
-        query_lower = query.lower()
-
-        # Academic keywords
-        academic_keywords = [
-            "learn",
-            "study",
-            "concept",
-            "theorem",
-            "paper",
-            "book",
-            "course",
-            "lecture",
-            "understand",
-            "explain",
-            "theory",
-            "research",
-            "academic",
-            "mathematics",
-            "science",
-            "proof",
-            "definition",
-            "algorithm",
-        ]
-
-        # Personal keywords
-        personal_keywords = [
-            "feel",
-            "feeling",
-            "emotion",
-            "happy",
-            "sad",
-            "anxious",
-            "worried",
-            "relationship",
-            "friend",
-            "family",
-            "daily",
-            "today",
-            "yesterday",
-            "personal",
-            "goal",
-            "dream",
-            "hope",
-            "fear",
-            "love",
-            "hate",
-        ]
-
-        # Professional keywords
-        professional_keywords = [
-            "work",
-            "project",
-            "meeting",
-            "career",
-            "job",
-            "task",
-            "deadline",
-            "professional",
-            "team",
-            "client",
-            "manager",
-            "office",
-            "business",
-        ]
-
-        # Creative keywords
-        creative_keywords = [
-            "poem",
-            "poetry",
-            "verse",
-            "lyric",
-            "lyrics",
-            "song",
-            "metaphor",
-            "stanza",
-            "rhyme",
-            "creative",
-            "fiction",
-            "story",
-            "prose",
-            "writing",
-        ]
-
-        # Dreams keywords
-        dreams_keywords = [
-            "dream",
-            "dreamt",
-            "dreamed",
-            "nightmare",
-            "subconscious",
-            "recurring",
-            "symbol",
-            "sleep",
-            "woke",
-            "vision",
-        ]
-
-        academic_score = sum(1 for kw in academic_keywords if kw in query_lower)
-        personal_score = sum(1 for kw in personal_keywords if kw in query_lower)
-        professional_score = sum(1 for kw in professional_keywords if kw in query_lower)
-        creative_score = sum(1 for kw in creative_keywords if kw in query_lower)
-        dreams_score = sum(1 for kw in dreams_keywords if kw in query_lower)
-
-        # Return domain with highest score, default to Personal
-        max_score = max(
-            academic_score,
-            personal_score,
-            professional_score,
-            creative_score,
-            dreams_score,
-        )
-        if max_score == 0:
-            return "Personal"  # Default
-
-        if academic_score == max_score:
-            return "Academic"
-        elif professional_score == max_score:
-            return "Professional"
-        elif creative_score == max_score:
-            return "Creative"
-        elif dreams_score == max_score:
-            return "Dreams"
-        else:
-            return "Personal"
 
 
 retrieval_service = RetrievalService()

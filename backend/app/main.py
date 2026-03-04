@@ -183,8 +183,6 @@ async def get_graph_visualization():
                 continue
 
             name = record["source_name"]
-            if name and len(name) > 30:
-                name = name[:30] + "..."
 
             if s_id not in nodes:
                 nodes[s_id] = {

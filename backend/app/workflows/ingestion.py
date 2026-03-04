@@ -61,7 +61,6 @@ class IngestionWorkflow:
             "input": note_input,
             "content": "",
             "extraction": None,
-            "embedding": None,
             "note_id": note_id,
             "created_at": None,
             "errors": [],
@@ -178,9 +177,8 @@ class IngestionWorkflow:
         note_id: str,
         content: str,
         extraction: Extraction,
-        vector: list[float],
         created_at: str,
-        custom_title: str = None,  # If provided, use instead of generating
+        custom_title: str = None,
     ):
         # 0. Generate or use provided Title & Summary
         if custom_title:
@@ -985,6 +983,20 @@ Summarize the common themes and key insights that connect these items."""
                 label,
             )
 
+            # [Improvement #4] Extract structured atomic facts for direct-match retrieval.
+            # Runs synchronously in a thread so it doesn't block the event loop.
+            def _extract_facts():
+                return llm_service.extract_atomic_facts(all_contexts_text, name, label)
+
+            facts_list = await loop.run_in_executor(None, _extract_facts)
+            import json as _json
+
+            facts_json = _json.dumps(facts_list) if facts_list else "[]"
+            if facts_list:
+                logger.info(
+                    f"  [Ingestion] Extracted {len(facts_list)} atomic facts for {label}: {name}"
+                )
+
             logger.info(
                 f"  [Ingestion] Generated summary from {len(existing_contexts)} context(s) for {label}: {name}"
             )
@@ -993,7 +1005,14 @@ Summarize the common themes and key insights that connect these items."""
             from app.services.embedding import embedding_service
 
             def _generate_embedding():
-                text_to_embed = f"{summary_data['title']}: {summary_data['summary']}"
+                # Include atomic facts so fact-specific queries ("Where is X from?")
+                # surface this node via vector search even when the summary is brief.
+                facts_str = ""
+                if facts_list:
+                    facts_str = " Facts: " + "; ".join(
+                        f"{f['property']}: {f['value']}" for f in facts_list
+                    )
+                text_to_embed = f"{summary_data['title']}: {summary_data['summary']}{facts_str}"
                 # Use embed_documents (no instruction) for document indexing
                 # Only queries should have instruction prefix (for Qwen3)
                 return embedding_service.embed_documents([text_to_embed])[0]
@@ -1011,7 +1030,8 @@ Summarize the common themes and key insights that connect these items."""
                     f"MATCH (n:{label} {{{identifier_key}: $name}}) "
                     f"SET n.isolated_contexts = $isolated_contexts, "
                     f"n.isolated_context_count = $context_count, "
-                    f"n.summary = $summary, n.title = $title, n.embedding = $embedding, n:Indexable",
+                    f"n.summary = $summary, n.title = $title, n.embedding = $embedding, "
+                    f"n.facts = $facts, n:Indexable",
                     {
                         "name": name,
                         "isolated_contexts": existing_contexts,
@@ -1019,6 +1039,7 @@ Summarize the common themes and key insights that connect these items."""
                         "summary": summary_data["summary"],
                         "title": summary_data["title"],
                         "embedding": new_embedding,
+                        "facts": facts_json,
                     },
                 )
 

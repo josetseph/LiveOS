@@ -1576,6 +1576,35 @@ class GraphService:
         """
         return self.execute_query(query, {})
 
+    def search_communities(
+        self, vector: list[float], top_k: int = 5, min_score: float = 0.55
+    ) -> list[dict]:
+        """
+        Find communities whose summaries are semantically relevant to a query vector.
+        Uses the shared distilled_knowledge_index and filters to Community nodes only.
+
+        Returns communities ordered by relevance score, highest first.
+        """
+        query = """
+        CALL db.index.vector.queryNodes('distilled_knowledge_index', $top_k, $vector)
+        YIELD node, score
+        WHERE score >= $min_score AND node:Community
+        OPTIONAL MATCH (node)-[:CONTAINS]->(member)
+        RETURN
+            node.name as name,
+            node.domain as domain,
+            node.summary as summary,
+            node.themes as themes,
+            node.updated_at as last_updated,
+            count(member) as member_count,
+            score
+        ORDER BY score DESC
+        """
+        # Search a larger candidate pool so the Community filter has enough to pick from
+        return self.execute_query(
+            query, {"vector": vector, "top_k": top_k * 10, "min_score": min_score}
+        )
+
     def assign_node_to_community(self, node_name: str, community_name: str) -> bool:
         """
         Add a node to a community.

@@ -36,6 +36,16 @@ class Concept(BaseModel):
     definition: str = ""
     isolated_context: str = ""  # LLM-extracted context ONLY about this concept
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_keys(cls, data: Any) -> Any:
+        """Handle common LLM drift where concept name is emitted as `trait`."""
+        if not isinstance(data, dict):
+            return data
+        if "trait" in data and "name" not in data:
+            data["name"] = data["trait"]
+        return data
+
     @field_validator("*", mode="before")
     @classmethod
     def handle_none(cls, v: Any) -> Any:
@@ -199,6 +209,12 @@ class Extraction(BaseModel):
         """
         if not isinstance(data, dict):
             return data
+
+        # Some providers wrap the payload as {"extraction": {...}}.
+        # Unwrap early so downstream key mapping applies to the actual object.
+        wrapped = data.get("extraction")
+        if isinstance(wrapped, dict):
+            data = wrapped
 
         # Key mapping: LLM output -> Pydantic field name
         key_map = {

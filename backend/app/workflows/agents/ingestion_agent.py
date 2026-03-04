@@ -1,10 +1,10 @@
 from typing import TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
 from app.services.llm import llm_service
-from app.services.embedding import embedding_service
 from app.services.multimedia import multimedia_service
 from app.schemas.extraction import Extraction, NoteInput
 from app.core.log import get_logger
+from app.core.config import settings
 import uuid
 from datetime import datetime
 import asyncio
@@ -20,7 +20,6 @@ class IngestionState(TypedDict):
     input: NoteInput
     content: str
     extraction: Optional[Extraction]
-    embedding: Optional[List[float]]
     note_id: Optional[str]
     created_at: Optional[str]
     errors: List[str]
@@ -79,7 +78,7 @@ async def multimodal_node(state: IngestionState):
 
             # --- PDF ---
             elif lower_url.endswith(".pdf"):
-                logger.info(f"Detected PDF. Extracting text...")
+                logger.info("Detected PDF. Extracting text...")
                 pdf_text = await asyncio.to_thread(
                     multimedia_service.extract_text_from_pdf, url
                 )
@@ -126,7 +125,7 @@ async def multimodal_node(state: IngestionState):
 
             # --- IMAGE ---
             elif lower_url.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                logger.info(f"Detected Image. Describing...")
+                logger.info("Detected Image. Describing...")
                 img_desc = await asyncio.to_thread(
                     multimedia_service.describe_image, url
                 )
@@ -179,7 +178,87 @@ async def extraction_node(state: IngestionState):
 
     t_start = time.perf_counter()
     logger.info("Extracting Metadata (Knowledge Architect)...")
-    prompt = f"""
+
+    if settings.BENCHMARK_MODE:
+        prompt = f"""
+    You are the "Knowledge Architect" — a structured information extraction engine for encyclopedic and reference material.
+
+    DOMAIN (choose ONE):
+    - "Academic": Factual reference content — history, geography, science, sports, culture, politics, biographies, events.
+      Encyclopedia entries, Wikipedia passages, research excerpts. This covers the vast majority of benchmark passages.
+    - "Professional": Formal reports, technical specifications, organizational documents.
+
+    RULES:
+    1. Return ONLY a single valid JSON object.
+
+    2. ENTITY EXTRACTION (EXHAUSTIVE — CRITICAL):
+       Extract EVERY named person, place, organization, event, or notable work mentioned.
+       - TYPES: Person, Place, Organization, Event, Kingdom, Dynasty, Tournament, Award, Work, or any specific descriptive type
+       - **name**: The entity's canonical name as written in the text
+       - **type**: Specific type inferred from context (e.g. "Person" not "Human", "Kingdom" not "Thing")
+       - **isolated_context**: All sentences that mention or describe this specific entity
+
+       CRITICAL — LIST-FORMAT CONTENT:
+       If the text contains structured lists, records, or tabular data (e.g. "Name: date–date", ranked
+       lists, numbered items, bullet points, dynasty lineages), extract EACH named item as a separate Entity.
+       Do NOT skip or collapse list items. Do NOT return an empty entities list because text is structured.
+       Example: "Nuh: 1013/4–1041/2" → Entity: name="Nuh", type="Person", isolated_context="Nuh ruled 1013/4–1041/2."
+       Example: "1. Spain  2. France  3. Germany" → 3 separate Place entities.
+
+       CRITICAL — EXHAUSTIVE:
+       A 10-line list of rulers → 10 Person entities. A passage naming 6 countries → 6 Place entities.
+       Every named entity matters for downstream multi-hop reasoning. Do NOT omit any.
+
+       EXAMPLE (encyclopedia passage with list):
+       Text: "The Taifa of Morón was a medieval Muladi kingdom in Al-Andalus.\nList of Emirs\nDammarid dynasty\nAbu Tuziri al-Dammari: ?–1013/4\nNuh: 1013/4–1041/2\nMuhammad: 1041/2–1057"
+       Entities:
+       - name: "Taifa of Morón", type: "Kingdom", isolated_context: "The Taifa of Morón was a medieval Muladi kingdom in Al-Andalus."
+       - name: "Abu Tuziri al-Dammari", type: "Person", isolated_context: "Abu Tuziri al-Dammari: ?–1013/4. First emir of the Dammarid dynasty."
+       - name: "Nuh", type: "Person", isolated_context: "Nuh: 1013/4–1041/2. Emir."
+       - name: "Muhammad", type: "Person", isolated_context: "Muhammad: 1041/2–1057. Emir."
+
+    3. CONCEPT EXTRACTION:
+       Abstract topics, fields, or recurring themes the passage is about.
+       EXAMPLES: "Medieval History", "Al-Andalus", "Tennis", "Island Geography", "Dynastic Succession"
+       - **isolated_context**: Sentences covering this theme
+       Keep concepts to 2–5 per passage; avoid vague catch-alls like "History" or "Information".
+
+    4. TASK EXTRACTION: Leave EMPTY [] — reference passages are not actionable.
+
+    5. PERSONA EXTRACTION: Leave EMPTY [] — not applicable to third-person reference content.
+
+    6. REFERENCES: Extract explicitly cited works, papers, or books mentioned in the text.
+       - **type**: "Book", "Paper", "Article", "Film", "Song", "Quote"
+       - **title**: REQUIRED — full title of the work
+       - **source**: Author/creator name
+       - **isolated_context**: Sentences mentioning this work
+
+    7. RELATIONSHIPS: Extract factual connections between nodes identified above.
+       - source_name / source_type / target_name / target_type / relationship_type / confidence / context
+       - Keep only high-confidence factual relationships (confidence ≥ 0.7)
+
+       RELATIONSHIP TYPE EXAMPLES:
+       * Person↔Place: born_in, died_in, ruled, fought_at, lived_in
+       * Person↔Organization: member_of, led, founded, defeated, part_of
+       * Person↔Person: succeeded_by, preceded_by, son_of, married_to, fought_against
+       * Place↔Place: part_of, located_in, capital_of, borders, contains
+       * Organization↔Place: located_in, ruled, conquered, established_in
+       * Event↔Place: occurred_at, took_place_in
+       * Event↔Person: participated_in, won, organized_by
+
+       CRITICAL: Only extract relationships where BOTH nodes were identified above!
+
+    8. CRITICAL: Extract text snippets exactly as they appear. Do NOT wrap values in extra quotes.
+       Example: {{"quote": "text here"}}, NOT {{"quote": ""text here""}}.
+    9. NO COMMENTARY: Do not explain or apologize. Return ONLY valid JSON.
+    10. ENGLISH ONLY: All output keys and values MUST be in English.
+
+    CONTENT:
+    "{state['content']}"
+
+    """
+    else:
+        prompt = f"""
     Analyze the following user note and extract structured metadata.
     You are the "Knowledge Architect" - your job is to build isolated, content-rich knowledge nodes.
     
@@ -305,22 +384,81 @@ async def extraction_node(state: IngestionState):
 
         logger.info(f"Extraction Completed: {extraction}")
 
-        # FILTER: Remove garbage entities/concepts
-        extraction.entities = [
-            e
-            for e in extraction.entities
-            if e.name
-            and e.name.strip().lower() not in ["untitled", "none", "unknown", ""]
-        ]
-        logger.info(f"Filtered Entities: {extraction.entities}")
+        # GARBAGE NAME HANDLING: Attempt LLM rename before discarding.
+        # If the LLM assigned a garbage placeholder (untitled / none / unknown) but the
+        # entity/concept still carries an isolated_context, we can recover a real name.
+        # Only silently discard when there is no context AND no name.
+        GARBAGE_NAMES = {"untitled", "none", "unknown", ""}
 
-        extraction.concepts = [
-            c
-            for c in extraction.concepts
-            if c.name
-            and c.name.strip().lower() not in ["untitled", "none", "unknown", ""]
+        def _partition_garbage(items, attr="name"):
+            clean, renameable = [], []
+            for item in items:
+                val = (getattr(item, attr, None) or "").strip().lower()
+                if val not in GARBAGE_NAMES:
+                    clean.append(item)
+                elif getattr(item, "isolated_context", ""):
+                    renameable.append(item)
+                # else: no name and no context — silently drop
+            return clean, renameable
+
+        clean_entities, garbage_entities = _partition_garbage(extraction.entities)
+        clean_concepts, garbage_concepts = _partition_garbage(extraction.concepts)
+
+        # Batch-rename all garbage items that have context using a single LLM call
+        all_garbage = [(item, "entity") for item in garbage_entities] + [
+            (item, "concept") for item in garbage_concepts
         ]
-        logger.info(f"Filtered Concepts: {extraction.concepts}")
+        if all_garbage:
+            import json as _json, re as _re
+
+            batch_lines = "\n".join(
+                f'{i+1}. ({kind}) "{item.isolated_context}"'
+                for i, (item, kind) in enumerate(all_garbage)
+            )
+            rename_prompt = (
+                "For each numbered excerpt below, provide the most specific descriptive name "
+                "for the entity or concept it describes.\n"
+                "Return ONLY a JSON array of short names (1–5 words each) in the same order.\n\n"
+                f"{batch_lines}\n\n"
+                'Return ONLY: ["Name 1", "Name 2", ...]'
+            )
+            try:
+                rename_resp = await llm_service.generate(rename_prompt, temperature=0.0)
+                match = _re.search(r"\[.*?\]", rename_resp, _re.DOTALL)
+                if match:
+                    new_names = _json.loads(match.group())
+                    for (item, kind), new_name in zip(all_garbage, new_names):
+                        if (
+                            isinstance(new_name, str)
+                            and new_name.strip()
+                            and new_name.strip().lower() not in GARBAGE_NAMES
+                            and len(new_name.strip()) <= 80
+                        ):
+                            item.name = new_name.strip()
+                            logger.info(
+                                f"  [Rename] {kind} recovered via context → '{item.name}'"
+                            )
+                            if kind == "entity":
+                                clean_entities.append(item)
+                            else:
+                                clean_concepts.append(item)
+                        else:
+                            logger.info(
+                                f"  [Rename] Could not recover {kind} name (response: '{new_name}')"
+                            )
+                else:
+                    logger.warning("  [Rename] Could not parse batch rename response.")
+            except Exception as rename_err:
+                logger.warning(f"  [Rename] Batch rename failed: {rename_err}")
+
+        extraction.entities = clean_entities
+        extraction.concepts = clean_concepts
+        logger.info(
+            f"Filtered/Renamed Entities: {[e.name for e in extraction.entities]}"
+        )
+        logger.info(
+            f"Filtered/Renamed Concepts: {[c.name for c in extraction.concepts]}"
+        )
 
         # VALIDATION: Standardize extracted data to prevent quality issues
         from app.utils.data_validation import standardize_extraction
@@ -336,7 +474,7 @@ async def extraction_node(state: IngestionState):
         # HYBRID COMPLEXITY CHECK: Re-evaluate after extraction
         # If extraction found many entities/concepts, note is complex (needs refinement)
         extraction_quality = len(extraction.entities) + len(extraction.concepts)
-        if extraction_quality >= 8:  # Rich extraction = complex note
+        if extraction_quality >= 5:  # Rich extraction = complex note
             state["is_complex"] = True
             logs.append(
                 f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Note marked as COMPLEX by extraction richness ({extraction_quality} nodes) - Refinement enabled."
@@ -357,30 +495,6 @@ async def extraction_node(state: IngestionState):
         logger.error(f"Extraction Error: {e}")
         logs.append(f"ERROR: Extraction failed: {e}")
         return {"errors": [f"Extraction failed: {str(e)}"], "logs": logs}
-
-
-async def embedding_node(state: IngestionState):
-    if state.get("errors"):
-        return {}
-    logs = state["logs"]
-    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] EMBED: Generating Vectors...")
-    import time
-
-    t_start = time.perf_counter()
-    from app.core.config import settings
-
-    logger.info(f"Generating {settings.EMBEDDING_DIMENSIONS}-dim Embedding...")
-    # NOTE: Note-level embeddings are currently unused in retrieval (only node embeddings searched)
-    # Commenting out to save processing time - can re-enable for temporal/narrative features
-    # full_vector = await asyncio.to_thread(
-    #     embedding_service.embed_query, state["content"]
-    # )
-    full_vector = []  # Empty vector (not used)
-    t_end = time.perf_counter()
-    logger.info(
-        f"Embedding generation skipped (note embeddings unused) - {t_end - t_start:.4f}s"
-    )
-    return {"embedding": full_vector, "logs": logs, "status": "EMBEDDED"}
 
 
 async def storage_node(state: IngestionState):
@@ -408,7 +522,6 @@ async def storage_node(state: IngestionState):
             note_id,
             state["content"],
             state["extraction"],
-            state["embedding"],
             created_at,
             custom_title,  # Pass custom title if provided
         )
@@ -484,20 +597,49 @@ async def refinement_node(state: IngestionState):
     logger.info("[Agent] Refinement (Reasoning) triggered...")
 
     # In a full impl, we would RAG here. For now, we ask it to self-reflect on the extraction quality.
-    prompt = f"""
+    if settings.BENCHMARK_MODE:
+        prompt = f"""
+    AUDIT CHECK:
+    You are a Named Entity Completeness Auditor. Review the Extraction below against the Source Text.
+    Identify ANY named Entities (Persons, Places, Organizations, Kingdoms, Events, Works, etc.) that
+    were overlooked — especially items buried in lists, tables, or ranked sequences.
+
+    SOURCE TEXT:
+    "{state['content']}"
+
+    CURRENTLY EXTRACTED:
+    Entities:    {[e.name for e in state['extraction'].entities]}
+    Concepts:    {[c.name for c in state['extraction'].concepts]}
+    References:  {[r.title for r in state['extraction'].references]}
+
+    INSTRUCTIONS:
+    1. Specify ONLY new/missing nodes in the relevant lists.
+    2. Leave tasks and persona_traits as EMPTY lists [].
+    3. Pay special attention to list-format content: every "Name: date–date" record or ranked item
+       is a separate Entity that must be individually extracted.
+    4. Return valid JSON.
+    """
+    else:
+        prompt = f"""
     AUDIT CHECK:
     You are a Quality Assurance Auditor. Review the Extraction below against the Source Text.
-    Identify any CRITICAL missing Entities (People, Places, Organizations) that were overlooked.
-    
-    SOURCE TEXT: 
-    "{state['content'][:3000]}..."
-    
+    Identify ANY critical missing nodes that were overlooked — this includes Entities (People,
+    Places, Organizations, Tools, or any descriptive type), Concepts (abstract themes, topics),
+    Tasks (actionable items), References (papers, books, quotes, songs), and Persona traits.
+
+    SOURCE TEXT:
+    "{state['content']}"
+
     CURRENTLY EXTRACTED:
-    {[e.name for e in state['extraction'].entities]}
-    
+    Entities:    {[e.name for e in state['extraction'].entities]}
+    Concepts:    {[c.name for c in state['extraction'].concepts]}
+    Tasks:       {[t.name for t in state['extraction'].tasks]}
+    References:  {[r.title for r in state['extraction'].references]}
+    Personas:    {[p.trait for p in state['extraction'].persona_traits]}
+
     INSTRUCTIONS:
-    1. specificy ONLY new/missing entities in the `entities` list.
-    2. Leave other fields (summary, concepts) empty unless strictly necessary.
+    1. Specify ONLY new/missing nodes in the relevant lists.
+    2. Follow the same extraction rules as the original extraction.
     3. Return valid JSON.
     """
     try:
@@ -552,8 +694,7 @@ workflow = StateGraph(IngestionState)
 # Add Nodes
 workflow.add_node("multimodal", multimodal_node)
 workflow.add_node("extraction", extraction_node)
-workflow.add_node("refinement", refinement_node)  # NEW
-workflow.add_node("embedding", embedding_node)
+workflow.add_node("refinement", refinement_node)
 workflow.add_node("storage", storage_node)
 workflow.add_node("summarization", summarization_node)
 
@@ -561,15 +702,14 @@ workflow.add_node("summarization", summarization_node)
 workflow.set_entry_point("multimodal")
 workflow.add_edge("multimodal", "extraction")
 
-# Conditional Logic for Tier 2
+# Conditional Logic for Tier 2: complex notes pass through the Refiner first
 workflow.add_conditional_edges(
     "extraction",
     should_refine,
-    {"refine": "refinement", "skip": "embedding", "end": END},
+    {"refine": "refinement", "skip": "storage", "end": END},
 )
-workflow.add_edge("refinement", "embedding")  # After refinement, go to embedding
+workflow.add_edge("refinement", "storage")
 
-workflow.add_edge("embedding", "storage")
 workflow.add_edge("storage", "summarization")
 workflow.add_edge("summarization", END)
 
