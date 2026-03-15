@@ -7,7 +7,6 @@ from app.core.log import get_logger
 from app.schemas.extraction import Extraction, NoteInput
 from app.services.graph import graph_service
 from app.services.llm import llm_service
-from app.services.alias_detector import alias_detector
 from app.workflows.agents.ingestion_agent import ingestion_agent
 
 logger = get_logger("IngestionPipeline")
@@ -87,11 +86,6 @@ class IngestionWorkflow:
         logger.info(
             f"[{datetime.now()}] SUCCESS: Note {note_id} fully indexed in {duration:.2f}s."
         )
-
-        # Notify ingestion tracker for auto-scheduled alias detection
-        from app.services.ingestion_tracker import ingestion_tracker
-
-        ingestion_tracker.mark_ingestion_complete()
 
         return {
             "note_id": final_state["note_id"],
@@ -741,23 +735,21 @@ class IngestionWorkflow:
 
     def _assign_to_communities(self, extraction: Extraction, content: str):
         """
-        Assign extracted nodes to domain-based communities.
+        Assign extracted nodes to a topic-specific community.
 
-        Communities are high-level groupings (Professional, Academic, Personal, Creative, Dreams)
-        that provide summarized context for broad queries.
+        Uses the LLM to name a specific topic from the note (e.g. "Cave Exploration &
+        Speleology" instead of "Personal Knowledge"), then embeds that topic and finds
+        an existing community with cosine-similarity >= 0.75 to merge into.  If none
+        match, a new community is created with the LLM-chosen name.
         """
         from app.services.llm import llm_service
-
-        # Detect the domain of this note's content
-        domain = llm_service.detect_domain(content)
+        from app.services.embedding import embedding_service
 
         # Collect all node names from this extraction
-        node_names = []
-
+        node_names: list[str] = []
         for entity in extraction.entities or []:
             if entity.name and entity.name.strip():
                 node_names.append(entity.name.strip().title())
-
         for concept in extraction.concepts or []:
             if concept.name and concept.name.strip():
                 node_names.append(concept.name.strip().title())
@@ -765,9 +757,52 @@ class IngestionWorkflow:
         if not node_names:
             return
 
-        # Create/update domain community
-        community_name = f"{domain} Knowledge"
+        # ── Step 1: Ask LLM for a specific topic name ──────────────────────────
+        snippet = content[:1500]
+        topic_prompt = (
+            "You are a knowledge organiser. Read this note and suggest a specific, "
+            "descriptive topic name (3-7 words) for its main theme.\n\n"
+            'GOOD: "Cave Exploration & Speleology", "Distributed Systems Latency", '
+            '"Personal Finance & Investing", "Medieval Architecture & History"\n'
+            'BAD:  "Personal Knowledge", "Academic Knowledge", "General", "Notes"\n\n'
+            f"Note:\n{snippet}\n\n"
+            "Reply with ONLY the topic name, nothing else."
+        )
+        raw_topic = (
+            (llm_service.reason(topic_prompt) or "").strip().strip('"').strip("'")
+        )
 
+        # Fallback to domain bucket when LLM returns something too generic
+        domain = llm_service.detect_domain(content)
+        _bad = {"knowledge", "notes", "general", "content", "information"}
+        if not raw_topic or len(raw_topic) < 4 or raw_topic.lower() in _bad:
+            raw_topic = f"{domain} Knowledge"
+
+        # ── Step 2: Embed the topic for similarity matching ────────────────────
+        topic_embedding = embedding_service.embed_query(raw_topic)
+        if not topic_embedding:
+            # Can still create community without embedding; summary step adds it later
+            community_name = raw_topic
+        else:
+            # ── Step 3: Find an existing community close enough to merge into ──
+            similar = graph_service.search_communities(
+                vector=topic_embedding, top_k=3, min_score=0.75
+            )
+            if similar:
+                community_name = similar[0]["name"]
+                logger.info(
+                    f"[Community] Merging {len(node_names)} nodes into existing "
+                    f"'{community_name}' (score={similar[0].get('score', 0):.2f}, "
+                    f"topic='{raw_topic}')"
+                )
+            else:
+                community_name = raw_topic
+                logger.info(
+                    f"[Community] Creating new community '{community_name}' "
+                    f"for {len(node_names)} nodes"
+                )
+
+        # ── Step 4: Add nodes and regenerate summary ───────────────────────────
         try:
             graph_service.create_or_update_community(
                 name=community_name,
@@ -777,10 +812,7 @@ class IngestionWorkflow:
             logger.info(
                 f"[Community] Assigned {len(node_names)} nodes to '{community_name}'"
             )
-
-            # Generate/update community summary based on member nodes
             self._update_community_summary(community_name, domain)
-
         except Exception as e:
             logger.warning(f"[Community] Failed to assign to community: {e}")
 
@@ -1012,7 +1044,9 @@ Summarize the common themes and key insights that connect these items."""
                     facts_str = " Facts: " + "; ".join(
                         f"{f['property']}: {f['value']}" for f in facts_list
                     )
-                text_to_embed = f"{summary_data['title']}: {summary_data['summary']}{facts_str}"
+                text_to_embed = (
+                    f"{summary_data['title']}: {summary_data['summary']}{facts_str}"
+                )
                 # Use embed_documents (no instruction) for document indexing
                 # Only queries should have instruction prefix (for Qwen3)
                 return embedding_service.embed_documents([text_to_embed])[0]
@@ -1048,65 +1082,132 @@ Summarize the common themes and key insights that connect these items."""
                 f"  Summary updated for {label}: {name} (Title: {summary_data['title']})"
             )
 
-            # Trigger alias detection for all node types (non-blocking)
-            # This runs in the background without slowing down ingestion
-            asyncio.create_task(self._check_node_aliases(name, label, identifier_key))
-
-    async def _check_node_aliases(
-        self, node_value: str, node_label: str, identifier_property: str
-    ):
+    def rebuild_semantic_communities(
+        self, min_community_size: int = 4, max_members_for_prompt: int = 15
+    ) -> int:
         """
-        Check if newly updated node might be an alias of existing nodes.
-        Runs asynchronously in background without blocking ingestion.
+        Replace/augment domain-based communities with topology-derived Louvain clusters.
 
-        Args:
-            node_value: Value of the node identifier (name/trait/title)
-            node_label: Node label (Entity, Concept, Task, Persona, Reference)
-            identifier_property: Property name (name, trait, title)
+        Each cluster is named and summarised by the LLM based on the actual content
+        of its members, producing descriptions like:
+          "Distributed Systems & African Power Grid Latency"
+        instead of the generic "Academic Knowledge".
+
+        Call this after a batch ingestion run (not per-note — it touches the whole graph).
+
+        Returns:
+            Number of semantic communities created/updated.
         """
+        from app.services.llm import llm_service
+        from app.services.embedding import embedding_service
+
+        logger.info("[Community] Starting Louvain semantic community rebuild...")
+
         try:
-            loop = asyncio.get_running_loop()
-
-            # For Entity nodes, we need to get the type (Person, Place, etc.)
-            # For other labels, type is None
-            node_type = None
-            if node_label == "Entity":
-
-                def _get_entity_type():
-                    result = graph_service.execute_query(
-                        "MATCH (e:Entity {name: $name}) RETURN e.type as type",
-                        {"name": node_value},
-                    )
-                    return result[0]["type"] if result else None
-
-                node_type = await loop.run_in_executor(None, _get_entity_type)
-
-                if not node_type:
-                    logger.debug(
-                        f"  [Alias] No type found for {node_value}, skipping alias check"
-                    )
-                    return
-
-                logger.info(
-                    f"  [Alias] Checking for aliases of: {node_value} ({node_label}:{node_type})"
-                )
-            else:
-                logger.info(
-                    f"  [Alias] Checking for aliases of: {node_value} ({node_label})"
-                )
-
-            # Call generic alias detection
-            await alias_detector.detect_and_link_aliases_for_node(
-                node_value=node_value,
-                node_label=node_label,
-                identifier_property=identifier_property,
-                node_type=node_type,
+            raw_communities = graph_service.compute_louvain_communities(
+                min_community_size=min_community_size
             )
-        except Exception as e:
-            # Don't let alias detection errors break ingestion
-            logger.warning(
-                f"  [Alias] Failed to check aliases for {node_label} '{node_value}': {e}"
-            )
+        except ImportError as exc:
+            logger.warning(f"[Community] Louvain skipped — missing dependency: {exc}")
+            return 0
+        except Exception as exc:
+            logger.error(f"[Community] Louvain detection failed: {exc}")
+            return 0
+
+        logger.info(
+            f"[Community] Louvain found {len(raw_communities)} structural communities "
+            f"(min size {min_community_size})"
+        )
+
+        created = 0
+        for cid, member_names in raw_communities.items():
+            try:
+                # Fetch summaries for a representative sample of members
+                sample_names = member_names[:max_members_for_prompt]
+                rows = graph_service.execute_query(
+                    """
+                    MATCH (n:Indexable)
+                    WHERE n.name IN $names AND n.summary IS NOT NULL
+                    RETURN n.name AS name, n.summary AS summary,
+                           labels(n) AS labels
+                    LIMIT $limit
+                    """,
+                    {"names": sample_names, "limit": max_members_for_prompt},
+                )
+
+                if not rows:
+                    continue
+
+                context = "\n".join(
+                    f"- {r['name']} "
+                    f"({r['labels'][0] if r.get('labels') else 'Node'}): "
+                    f"{(r.get('summary') or '')[:200]}"
+                    for r in rows
+                )[:2500]
+
+                if not context.strip():
+                    continue
+
+                # Ask the LLM to name and summarise this cluster
+                prompt = (
+                    "These knowledge-graph nodes form a densely connected cluster.\n\n"
+                    f"{context}\n\n"
+                    "Give this cluster:\n"
+                    "1. A short descriptive name (5-8 words, e.g. "
+                    '"Distributed Systems & Latency in African Power Grids")\n'
+                    "2. A single sentence summarising the common theme\n\n"
+                    "Reply in EXACTLY this format:\n"
+                    "NAME: <name>\n"
+                    "SUMMARY: <summary>"
+                )
+
+                raw = llm_service.reason(prompt) or ""
+                name: str | None = None
+                summary: str | None = None
+                for line in raw.splitlines():
+                    line = line.strip()
+                    if line.upper().startswith("NAME:"):
+                        name = line.split(":", 1)[1].strip()
+                    elif line.upper().startswith("SUMMARY:"):
+                        summary = line.split(":", 1)[1].strip()
+
+                if not name:
+                    name = f"Semantic Cluster {cid}"
+                if not summary:
+                    summary = (
+                        f"Structural cluster of {len(member_names)} related nodes."
+                    )
+
+                # Generate embedding for the new community summary
+                community_embedding = embedding_service.embed_query(
+                    f"Community: {name}. {summary}"
+                )
+                themes = [r["name"] for r in rows[:5]]
+
+                graph_service.create_or_update_community(
+                    name=name,
+                    domain="Semantic",
+                    member_names=member_names,
+                    summary=summary,
+                    themes=themes,
+                )
+                graph_service.update_community_summary(
+                    name, summary, themes, embedding=community_embedding
+                )
+                logger.info(
+                    f"[Community] Created '{name}' "
+                    f"({len(member_names)} nodes, cluster {cid})"
+                )
+                created += 1
+
+            except Exception as exc:
+                logger.warning(f"[Community] Failed to process cluster {cid}: {exc}")
+                continue
+
+        logger.info(
+            f"[Community] Semantic community rebuild complete: {created} communities."
+        )
+        return created
 
 
 ingestion_workflow = IngestionWorkflow()

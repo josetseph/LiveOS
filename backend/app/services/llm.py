@@ -37,9 +37,9 @@ class LLMService:
     def _init_clients(self):
         """Initialize clients for the configured provider."""
         if self.provider == "ollama":
-            logger.info(f"Initializing Ollama (URL: {settings.OLLAMA_BASE_URL})")
-            base_url = f"{settings.OLLAMA_BASE_URL}/v1"
-            api_key = "ollama"
+            base_url = f"{settings.LLM_BASE_URL.rstrip('/')}/v1"
+            logger.info(f"Initializing Ollama (URL: {base_url})")
+            api_key = settings.LLM_API_KEY
 
             self.extraction_client = instructor.patch(
                 OpenAI(base_url=base_url, api_key=api_key, timeout=300.0),
@@ -52,11 +52,11 @@ class LLMService:
             )
 
         elif self.provider == "lm_studio":
+            base_url = f"{settings.LLM_BASE_URL.rstrip('/')}/v1"
             logger.info(
-                f"Initializing LM Studio (URL: {settings.LM_STUDIO_BASE_URL}, Model: {settings.LM_STUDIO_MODEL})"
+                f"Initializing LM Studio (URL: {base_url}, Model: {settings.LLM_MODEL})"
             )
-            base_url = f"{settings.LM_STUDIO_BASE_URL.rstrip('/')}/v1"
-            api_key = settings.LM_STUDIO_API_KEY
+            api_key = settings.LLM_API_KEY
 
             self.extraction_client = instructor.patch(
                 OpenAI(base_url=base_url, api_key=api_key, timeout=300.0)
@@ -175,10 +175,8 @@ class LLMService:
     def _with_keep_alive(self, extra_body: dict | None = None) -> dict:
         """Attach provider keep-alive controls for local OpenAI-compatible backends."""
         body = dict(extra_body or {})
-        if self.provider == "ollama":
-            body.setdefault("keep_alive", settings.OLLAMA_KEEP_ALIVE)
-        elif self.provider == "lm_studio":
-            body.setdefault("keep_alive", settings.LM_STUDIO_KEEP_ALIVE)
+        if self.provider in ("ollama", "lm_studio"):
+            body.setdefault("keep_alive", settings.LLM_KEEP_ALIVE)
         return body
 
     def _lm_studio_json_response_format(
@@ -200,7 +198,7 @@ class LLMService:
         """
         Prioritize json_object to avoid schema-compiler hangs in LM Studio.
         """
-        mode = settings.LM_STUDIO_RESPONSE_FORMAT.lower().strip()
+        mode = settings.LLM_RESPONSE_FORMAT.lower().strip()
         json_object = {"type": "json_object"}
         text = {"type": "text"}
         if mode == "text":
@@ -342,11 +340,11 @@ class LLMService:
         self, prompt: str, response_model: Type[BaseModel], temperature: float
     ) -> BaseModel:
         """Ollama extraction with native structured outputs."""
-        model = settings.OLLAMA_MODEL
+        model = settings.LLM_MODEL
         logger.info(f"[Ollama] Extracting with {model} (schema enforced)")
 
         extra_body = {
-            "keep_alive": settings.OLLAMA_KEEP_ALIVE,
+            "keep_alive": settings.LLM_KEEP_ALIVE,
             "format": response_model.model_json_schema(),  # Native schema enforcement!
         }
 
@@ -426,7 +424,9 @@ class LLMService:
         logger.info(f"[LM Studio] Extracting with {model} (JSON mode)")
 
         # Keep schema compact to reduce prompt-processing overhead.
-        schema_json = json.dumps(response_model.model_json_schema(), separators=(",", ":"))
+        schema_json = json.dumps(
+            response_model.model_json_schema(), separators=(",", ":")
+        )
         system_prompt = (
             "You are a structured extraction engine. "
             "Return ONLY valid JSON with no markdown fences and no extra text. "
@@ -453,7 +453,7 @@ class LLMService:
             if isinstance(data, dict) and isinstance(data.get("extraction"), dict):
                 return response_model.model_validate(data["extraction"])
             raise
-        
+
     def _extract_lm_studio_with_fallback(
         self,
         model: str,
@@ -491,7 +491,9 @@ class LLMService:
 
         if last_error:
             raise last_error
-        raise RuntimeError("[LM Studio] Extraction failed with no response formats to try")
+        raise RuntimeError(
+            "[LM Studio] Extraction failed with no response formats to try"
+        )
 
     def _extract_gemini(
         self, prompt: str, response_model: Type[BaseModel], temperature: float
@@ -1416,6 +1418,71 @@ Now extract entities from the context above:
         except Exception:
             return "an answer"
 
+    async def select_relevant_docs(
+        self,
+        docs: list[dict],
+        question: str,
+        keep: int = 6,
+    ) -> list[dict]:
+        """
+        Batch context filter — single LLM call, O(1) per retrieval pass.
+
+        Shows all accumulated docs as a numbered list and asks the LLM to
+        pick the `keep` most relevant ones.  Much cheaper than the O(n)
+        per-doc YES/NO pattern used in _verify_candidates.
+
+        Falls back to returning all docs unmodified on any failure so the
+        pipeline is never blocked by a bad LLM response.
+        """
+        if len(docs) <= keep:
+            return docs
+
+        lines = []
+        for i, doc in enumerate(docs):
+            node = doc.get("original_obj", {})
+            name = node.get("name") or doc.get("name", "?")
+            summary = (
+                node.get("summary") or node.get("description") or doc.get("text", "")
+            ).strip()
+            snippet = summary[:200] if summary else "(no text)"
+            lines.append(f"{i}: [{name}] {snippet}")
+
+        doc_list = "\n".join(lines)
+        prompt = (
+            f"QUESTION: {question}\n\n"
+            f"Below are {len(docs)} retrieved knowledge-graph passages numbered "
+            f"0–{len(docs) - 1}.\n"
+            f"Select the {keep} passage numbers most likely to contain the answer.\n"
+            f"Reply with ONLY a comma-separated list of numbers, e.g.: 0, 3, 7\n\n"
+            f"PASSAGES:\n{doc_list}\n\n"
+            f"Most relevant passage numbers:"
+        )
+
+        try:
+            raw = await self.generate(prompt, temperature=0.0, max_tokens=40)
+            indices = []
+            for part in re.split(r"[,\s]+", raw.strip()):
+                part = part.strip().rstrip(".")
+                if part.isdigit():
+                    idx = int(part)
+                    if 0 <= idx < len(docs):
+                        indices.append(idx)
+            # Deduplicate while preserving order
+            seen: set[int] = set()
+            unique_indices = [
+                idx for idx in indices if not (idx in seen or seen.add(idx))  # type: ignore[func-returns-value]
+            ]
+            if unique_indices:
+                logger.debug(
+                    f"[LLM] select_relevant_docs: selected {unique_indices} "
+                    f"from {len(docs)} docs"
+                )
+                return [docs[i] for i in unique_indices]
+        except Exception as e:
+            logger.warning(f"[LLM] select_relevant_docs failed: {e}")
+
+        return docs  # fail-open
+
     async def extract_name_for_hop(
         self,
         question: str,
@@ -1647,7 +1714,13 @@ Synonyms:"""
         "If the evidence gives a specific street/neighbourhood, do not broaden to city or country.\n"
         "RULE 6 (PAST vs CURRENT): If the question asks about a past or former state "
         "(e.g. 'formerly known as', 'from 1988 to 1996', 'at the time'), answer with "
-        "the historical value from that period — not the current name or current value."
+        "the historical value from that period — not the current name or current value.\n"
+        "RULE 7 (CHAIN TRACING): For multi-hop questions, explicitly trace the reasoning chain "
+        "before committing to an answer:\n"
+        "  Step 1 — identify the bridge entity (the intermediate fact that connects the two hops).\n"
+        "  Step 2 — use only the bridge entity to locate the final answer in the evidence.\n"
+        "  The bridge entity is NOT the final answer; it is the key to finding it. "
+        "State both steps in your reasoning before writing FINAL."
     )
 
     async def synthesize(
@@ -1731,7 +1804,7 @@ Synonyms:"""
                 f"{self._SYNTHESIS_RULES}\n\n"
                 "First write 1–2 sentences of reasoning that end with a clear statement "
                 "of your answer, then on a new line write:\n"
-                "FINAL: <your answer (must match the conclusion in your reasoning)>"
+                "FINAL: <bare answer only — a name, number, or yes/no — no surrounding explanation or extra words>"
             )
         else:
             prompt = f"""
@@ -1869,10 +1942,8 @@ ANSWER (be brief, max 2-3 sentences):"""
 
     def _get_model_for_task(self, task: str) -> str:
         """Get the appropriate model name for a given task based on provider."""
-        if self.provider == "ollama":
-            return settings.OLLAMA_MODEL
-        elif self.provider == "lm_studio":
-            return self._resolve_lm_studio_model(settings.LM_STUDIO_MODEL)
+        if self.provider in ("ollama", "lm_studio"):
+            return settings.LLM_MODEL
         elif self.provider == "openai":
             if task == "reasoning":
                 return settings.OPENAI_MODEL_REASONING
@@ -1881,7 +1952,7 @@ ANSWER (be brief, max 2-3 sentences):"""
             return settings.GEMINI_MODEL
         elif self.provider == "anthropic":
             return settings.ANTHROPIC_MODEL
-        return settings.OLLAMA_MODEL
+        return settings.LLM_MODEL
 
     def detect_domain(self, text: str) -> str:
         """
@@ -2788,11 +2859,8 @@ JSON response:"""
 
         try:
             # Select model based on provider
-            if self.provider == "ollama":
-                model = settings.OLLAMA_MODEL
-                extra_body = self._with_keep_alive()
-            elif self.provider == "lm_studio":
-                model = self._get_model_for_task("summarization")
+            if self.provider in ("ollama", "lm_studio"):
+                model = settings.LLM_MODEL
                 extra_body = self._with_keep_alive()
             elif self.provider == "openai":
                 model = settings.OPENAI_MODEL

@@ -1,7 +1,6 @@
 from app.services.retrieval import retrieval_service
 from app.services.llm import llm_service
 from app.core.log import get_logger
-import re
 import time
 
 logger = get_logger("ChatWorkflow")
@@ -19,100 +18,33 @@ def _doc_passage(doc: dict) -> str:
 class ChatWorkflow:
     async def chat(self, user_query: str) -> dict:
         """
-        Multi-hop retrieval pipeline (mirrors benchmark v4/v5 — current best 0.74):
+        Agentic self-correcting retrieval pipeline:
 
-        1. Decompose question into ordered sub-questions
-           (identify_information_needs → rewrite_back_references)
-        2. For each sub-question:
-           a. Fill [placeholder] with the previous step's bridge entity
-           b. Retrieve candidates via hybrid_search
-           c. Per-candidate YES/NO verification against both the sub-question
-              and the original question (drops irrelevant docs)
-           d. Zero-result fallback: retry with top_k=50 if nothing verified
-           e. Extract short bridge entity for the next hop
-        3. Identify answer type (yes/no / place / person / year …)
-        4. Synthesize with SYNTHESIS_RULES + ANSWER TYPE CONSTRAINT + FINAL: format
+        1. retrieve_with_self_correction runs up to 3 iterative hops:
+           - Initial hybrid search (entity match + vector + type-first 2nd-hop expansion)
+           - LLM sufficiency check: "Can you answer? If not, what bridge entity is missing?"
+           - Targeted bridge-entity search on missing entity → merge → repeat
+        2. Identify answer type (yes/no / place / person / year …)
+        3. Synthesize with SYNTHESIS_RULES + ANSWER TYPE CONSTRAINT + FINAL: format
         """
         start_time = time.perf_counter()
         logger.info(f"\n[Chat] Started processing query: '{user_query}'")
 
-        # ── Step 1: decompose + rewrite back-references ──────────────────────
+        # ── Agentic retrieval (self-correcting multi-hop) ─────────────────────
         t0 = time.perf_counter()
-        information_needs = await llm_service.identify_information_needs(user_query)
-        # LLM-based back-reference rewriter (safety net for vague pronouns /
-        # definite articles that survive the decomposition prompt rules)
-        information_needs = await llm_service.rewrite_back_references(information_needs)
-        logger.info(
-            f"[Chat] Decomposed in {time.perf_counter() - t0:.2f}s: "
-            f"{len(information_needs)} sub-questions"
+        all_retrieved_docs = await retrieval_service.retrieve_with_self_correction(
+            user_query, top_k=12, max_hops=3, filter_docs=False
         )
-        for i, n in enumerate(information_needs, 1):
-            logger.info(f"  {i}. {n}")
-
-        # ── Step 2: retrieve → verify → bridge per sub-question ──────────────
-        all_retrieved_docs: list[dict] = []
-        prev_short_answers: list[str] = []
-
-        for step_num, raw_need in enumerate(information_needs, 1):
-            logger.info(
-                f"\n[Chat] Step {step_num}/{len(information_needs)}: {raw_need}"
+        logger.info(
+            f"[Chat] Agentic retrieval: {len(all_retrieved_docs)} docs "
+            f"in {time.perf_counter() - t0:.2f}s"
+        )
+        if all_retrieved_docs:
+            top = all_retrieved_docs[0]
+            print(
+                f"\n🔍 TOP RESULT: [{top.get('original_obj',{}).get('name','?')}] "
+                f"{_doc_passage(top)[:200]}..."
             )
-
-            # Fill [placeholder] with the most recent bridge entity
-            need = raw_need
-            if prev_short_answers and re.search(r"\[[^\]]+\]", need):
-                latest = prev_short_answers[-1]
-                need = re.sub(r"\[[^\]]+\]", latest, need)
-                logger.info(f"[Chat]   Filled: {need}")
-
-            # Retrieve candidates
-            t_ret = time.perf_counter()
-            docs = await retrieval_service.hybrid_search(need, top_k=10)
-            logger.info(
-                f"[Chat]   Retrieved {len(docs)} docs in "
-                f"{time.perf_counter() - t_ret:.2f}s"
-            )
-
-            # Per-candidate YES/NO verification (benchmark v4/v5 core pattern):
-            # each passage is judged against the sub-question AND the original
-            # question so off-topic candidates are dropped before synthesis.
-            verified = await self._verify_candidates(docs, need, user_query)
-
-            # Zero-result fallback: widen search before giving up
-            if not verified:
-                logger.info("[Chat]   (no verified docs — retrying top_k=50)")
-                already_seen = {d.get("original_obj", {}).get("name") for d in docs}
-                docs_wide = await retrieval_service.hybrid_search(need, top_k=50)
-                new_docs = [
-                    d
-                    for d in docs_wide
-                    if d.get("original_obj", {}).get("name") not in already_seen
-                ]
-                verified = await self._verify_candidates(new_docs, need, user_query)
-
-            if verified:
-                logger.info(f"[Chat]   {len(verified)} verified doc(s)")
-                node_name = verified[0].get("original_obj", {}).get("name", "?")
-                print(f"\n📄 CONTEXT for '{need}':")
-                print(f"   [{node_name}] {_doc_passage(verified[0])[:200]}...")
-            else:
-                logger.info("[Chat]   (no verified docs after fallback)")
-
-            # Use verified docs when available; fall back to all candidates so
-            # synthesis still has something to reason over.
-            all_retrieved_docs.extend(verified if verified else docs)
-
-            # Extract bridge entity for the next [placeholder] (only needed when
-            # more steps follow)
-            if step_num < len(information_needs):
-                if verified:
-                    short_answer = await llm_service.extract_name_for_hop(
-                        need, verified, original_question=user_query
-                    )
-                else:
-                    short_answer = ""
-                prev_short_answers.append(short_answer)
-                logger.info(f"[Chat]   Bridge entity: '{short_answer}'")
 
         # Deduplicate by node name / note id
         seen_ids: set[str] = set()
@@ -176,7 +108,7 @@ class ChatWorkflow:
             "query": user_query,
             "answer": answer,
             "context": unique_docs,
-            "information_needs": information_needs,
+            "information_needs": [user_query],
             "discovered_entities": {},  # kept for API response compatibility
         }
 

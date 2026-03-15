@@ -403,7 +403,6 @@ class RetrievalService:
         t_phase_start = time.perf_counter()
         entity_nodes = []  # Found by name matching
         vector_nodes = []  # Found by vector search
-        neighbor_nodes = []  # Found by neighbor expansion
         node_names_found = set()  # Track names to avoid duplicates
 
         # STEP 1: ENTITY NAME MATCHING - Find nodes by extracted entity names
@@ -526,13 +525,7 @@ class RetrievalService:
         t_vector = time.perf_counter() - t_vector_start
         logger.info(f"  [⏱️ Timing] Vector search: {t_vector:.2f}s")
 
-        # STEP 3: NEIGHBOR EXPANSION - Get 1-hop neighbors of top results
-        # Expand from both entity matches and vector matches
-        # This finds related context (e.g., "Albert Einstein" → "Princeton")
-
         # Follow IS_SAME_AS and IS_VARIANT_OF links to include canonical/related entities.
-        # Both the original node AND its canonical/variant targets are kept and later
-        # expanded 1-hop, so no context is lost.
         all_primary_nodes = entity_nodes + vector_nodes
         alias_resolved_nodes = []
 
@@ -597,149 +590,10 @@ class RetrievalService:
                 f"({added} added via IS_SAME_AS / IS_VARIANT_OF)"
             )
 
-            # Use alias-resolved nodes for neighbor expansion
             all_primary_nodes = alias_resolved_nodes
 
-        # Track primary node names to avoid duplicate expansion
-        primary_node_names = (
-            {node["name"] for node in all_primary_nodes} if all_primary_nodes else set()
-        )
-
-        if all_primary_nodes:
-            t_expand_start = time.perf_counter()
-            for node in all_primary_nodes[:15]:  # Top 15 primary results
-                try:
-                    label = (
-                        node.get("labels", ["Entity"])[0]
-                        if isinstance(node.get("labels"), list)
-                        else "Entity"
-                    )
-                    neighbors = graph_service.get_related_nodes(
-                        node_name=node["name"],
-                        node_label=label,
-                        max_depth=1,  # Only 1-hop neighbors
-                        min_confidence=0.5,
-                    )
-
-                    # Score neighbors by QUERY RELEVANCE, not just confidence
-                    # This ensures we expand to contextually relevant neighbors
-                    # E.g., "Where was Ed Wood born?" → Baltimore (not Johnny Depp)
-                    for neighbor in neighbors:
-                        # Skip neighbor if it's already a primary node (avoid canonical as neighbor of alias)
-                        if neighbor.get("name") in primary_node_names:
-                            continue
-                        # 1. Confidence score (relationship strength)
-                        confidence_path = neighbor.get("confidence_path", [])
-                        avg_confidence = (
-                            sum(confidence_path) / len(confidence_path)
-                            if confidence_path
-                            else 0.5
-                        )
-
-                        # 2. Keyword relevance (fast heuristic)
-                        # Check if query keywords appear in neighbor summary/name/edge-context.
-                        # Edge context (rel.context sentences from ingestion) often contains
-                        # the direct answer for hop questions — include it in the search text.
-                        edge_contexts = " ".join(
-                            c for c in (neighbor.get("context_path") or []) if c
-                        )
-                        neighbor_text = (
-                            f"{neighbor.get('name', '')} "
-                            f"{neighbor.get('summary', '')} "
-                            f"{edge_contexts}"
-                        ).lower()
-                        query_keywords = set(query.lower().split()) - {
-                            "what",
-                            "where",
-                            "when",
-                            "who",
-                            "how",
-                            "the",
-                            "is",
-                            "was",
-                            "are",
-                            "were",
-                        }
-                        keyword_matches = sum(
-                            1 for kw in query_keywords if kw in neighbor_text
-                        )
-                        keyword_relevance = min(
-                            keyword_matches / max(len(query_keywords), 1), 1.0
-                        )
-
-                        # 3. Type match score (if expected types specified)
-                        neighbor_type = (
-                            neighbor.get("entity_type", "").lower()
-                            if neighbor.get("entity_type")
-                            else ""
-                        )
-                        if expected_entity_types and neighbor_type:
-                            expected_lower = [t.lower() for t in expected_entity_types]
-                            if neighbor_type in expected_lower:
-                                type_relevance = 1.0
-                            else:
-                                # Check synonyms
-                                type_synonyms = {
-                                    "film": ["movie", "cinema"],
-                                    "person": ["actor", "director", "writer"],
-                                    "place": ["location", "city", "country", "venue"],
-                                }
-                                matches_synonym = False
-                                for exp_type in expected_lower:
-                                    synonyms = type_synonyms.get(exp_type, [])
-                                    if neighbor_type in synonyms:
-                                        matches_synonym = True
-                                        break
-                                type_relevance = 0.7 if matches_synonym else 0.2
-                        else:
-                            type_relevance = 0.5  # Neutral if no type filtering
-
-                        # Combined selection score: type > keyword > confidence
-                        # Prioritize type match (most important for disambiguation)
-                        neighbor["_selection_score"] = (
-                            type_relevance * 0.5
-                            + keyword_relevance * 0.3
-                            + avg_confidence * 0.2
-                        )
-                        neighbor["_avg_confidence"] = avg_confidence
-                        neighbor["_keyword_relevance"] = keyword_relevance
-                        neighbor["_type_relevance"] = type_relevance
-
-                    # Sort by selection score (query-aware), not just confidence
-                    neighbors.sort(
-                        key=lambda n: n.get("_selection_score", 0.0), reverse=True
-                    )
-
-                    # Filter duplicates and add top 3 by RELEVANCE
-                    for neighbor in neighbors[:3]:  # Top 3 most relevant neighbors
-                        if neighbor["name"] not in node_names_found:
-                            neighbor["_source"] = "neighbor"
-                            neighbor["_expanded_from"] = node["name"]
-                            neighbor_nodes.append(neighbor)
-                            node_names_found.add(neighbor["name"])
-                except Exception as e:
-                    logger.debug(f"  [Neighbor] Failed to expand {node['name']}: {e}")
-
-            if neighbor_nodes:
-                logger.info(
-                    f"  [Neighbor] Expanded to {len(neighbor_nodes)} 1-hop neighbors (query-aware): "
-                    f"{[n['name'] for n in neighbor_nodes[:10]]}"
-                )
-                # Log selection scores for debugging
-                if neighbor_nodes:
-                    sample = neighbor_nodes[0]
-                    logger.debug(
-                        f"  [Neighbor] Example score - "
-                        f"type: {sample.get('_type_relevance', 0):.2f}, "
-                        f"keyword: {sample.get('_keyword_relevance', 0):.2f}, "
-                        f"confidence: {sample.get('_avg_confidence', 0):.2f}, "
-                        f"combined: {sample.get('_selection_score', 0):.2f}"
-                    )
-            t_expand = time.perf_counter() - t_expand_start
-            logger.info(f"  [⏱️ Timing] Neighbor expansion: {t_expand:.2f}s")
-
         # Combine all found nodes
-        all_found_nodes = entity_nodes + vector_nodes + neighbor_nodes
+        all_found_nodes = entity_nodes + vector_nodes
         all_node_names = [n["name"] for n in all_found_nodes]
 
         # STEP 4: Community summaries for broad / exploratory queries
@@ -797,21 +651,12 @@ class RetrievalService:
         t_candidates = time.perf_counter() - t_phase_start
         logger.info(
             f"  [⏱️ Timing] Retrieval phase: {t_candidates:.2f}s "
-            f"({len(entity_nodes)} entity + {len(vector_nodes)} vector + {len(neighbor_nodes)} neighbor nodes)"
+            f"({len(entity_nodes)} entity + {len(vector_nodes)} vector nodes)"
         )
 
         # ============ PREPARE CANDIDATES (NODE SUMMARIES FIRST) ============
         # Node summaries are PRIMARY evidence - they contain distilled, isolated knowledge
-        # Label as "Consensus" to help LLM recognize these as Distilled Wisdom
         candidates = []
-
-        # Build a name→summary lookup for source nodes so neighbor text can include
-        # source context in natural language ("Ed Wood, with context '...' was born in...")
-        source_summary_map: dict[str, str] = {}
-        for _n in all_primary_nodes:
-            _s = self._get_node_text(_n)
-            if _s and _n.get("name"):
-                source_summary_map[_n["name"]] = _s
 
         # A. Entity Nodes (highest priority — direct name matches from query)
         for node in entity_nodes:
@@ -879,74 +724,6 @@ class RetrievalService:
                 }
             )
 
-        # C. Neighbor Nodes (1-hop expansion from entity/vector results)
-        for node in neighbor_nodes:
-            summary = self._get_node_text(node)
-            if not summary:
-                continue
-
-            expanded_from = node.get("_expanded_from", "")
-            context_path = node.get("context_path", [])
-            rel_path_parts = node.get("relationship_path", [])
-
-            # Build fully natural-language text so the LLM receives prose, not notation.
-            # Format: "<source>, with context '<source_summary>' <edge_sentence> <dest>,
-            #          with context '<dest_summary>'"
-            # If no edge sentence is available, fall back to a readable rel-type phrase.
-            edge_sentence = ""
-            if context_path:
-                contexts = [c for c in context_path if c]
-                if contexts:
-                    edge_sentence = contexts[0]
-
-            dest_context = summary
-
-            if expanded_from:
-                src_summary = source_summary_map.get(expanded_from, "")
-                src_ctx_part = f', with context "{src_summary}"' if src_summary else ""
-                if edge_sentence:
-                    text = (
-                        f"{expanded_from}{src_ctx_part} — {edge_sentence} "
-                        f'{node["name"]}, with context "{dest_context}"'
-                    )
-                else:
-                    rel_natural = (
-                        " ".join(p.replace("_", " ").lower() for p in rel_path_parts)
-                        or "related to"
-                    )
-                    text = (
-                        f"{expanded_from}{src_ctx_part} is {rel_natural} "
-                        f'{node["name"]}, with context "{dest_context}"'
-                    )
-            else:
-                if edge_sentence:
-                    text = (
-                        f'{edge_sentence} {node["name"]}, with context "{dest_context}"'
-                    )
-                else:
-                    rel_natural = (
-                        " ".join(p.replace("_", " ").lower() for p in rel_path_parts)
-                        or "related"
-                    )
-                    text = (
-                        f'{node["name"]} ({rel_natural}), with context "{dest_context}"'
-                    )
-
-            # Attach linked notes for reference traceability (case-insensitive lookup)
-            linked_notes = node_to_notes.get(node["name"].lower(), [])
-
-            candidates.append(
-                {
-                    "text": text,
-                    "type": "neighbor_node",
-                    "original_obj": node,
-                    "is_recent": False,
-                    "priority": "secondary",  # Neighbor expansion
-                    "relationship_path": node.get("relationship_path", []),
-                    "linked_notes": linked_notes,
-                }
-            )
-
         # C. Community Summaries (high-level context for broad queries)
         # Fetch linked notes for community members
         community_linked_notes: dict[str, list[dict]] = {}
@@ -999,7 +776,7 @@ class RetrievalService:
 
         logger.info(
             f"  [Retrieval] Prepared {len(candidates)} candidates "
-            f"({len(entity_nodes)} entity + {len(vector_nodes)} vector + {len(neighbor_nodes)} neighbor + {len(community_summaries)} community)"
+            f"({len(entity_nodes)} entity + {len(vector_nodes)} vector + {len(community_summaries)} community)"
         )
 
         # ============ RANKING ============
@@ -1178,13 +955,13 @@ class RetrievalService:
             cand["type_score"] = get_type_score(cand)
             cand["semantic_score"] = get_attribute_relevance(cand, full_vector)
 
-            # Combined score: semantic similarity is primary, type match is secondary
-            # Weights: semantic (50%), type (30%), source priority (20% via sort)
-            # Vector score is already factored into semantic_score
+            # Combined score: type match is now primary (entity type precision matters most),
+            # semantic similarity is secondary, vector score is a small tiebreaker.
+            # Weights: type (45%), semantic (40%), vector (15%)
             cand["combined_score"] = (
-                cand["semantic_score"] * 0.5
-                + cand["type_score"] * 0.3
-                + cand["vector_score"] * 0.2  # Direct vector score contribution
+                cand["type_score"] * 0.45
+                + cand["semantic_score"] * 0.40
+                + cand["vector_score"] * 0.15  # Direct vector score contribution
             )
 
         # NOTE: Domain boosting removed for nodes (only Notes have domain property)
@@ -1282,6 +1059,155 @@ class RetrievalService:
         self._current_query_embedding = None
 
         return combined_results
+
+    async def retrieve_with_self_correction(
+        self,
+        query: str,
+        top_k: int = 20,
+        max_hops: int = 10,
+        filter_docs: bool = True,
+    ) -> List[dict]:
+        """
+        Agentic retrieval loop with self-correction.
+
+        Each hop:
+          1. Runs hybrid_search for the current query / bridge entity.
+          2. Merges results (deduplicating by node name).
+          3. Asks the LLM whether the accumulated context is sufficient to
+             answer *query*, or whether a specific bridge entity is missing.
+          4. If missing → targeted search for that entity → repeat.
+          5. Returns accumulated results once the LLM says sufficient, or
+             after max_hops hops.
+
+        filter_docs: if True (default), applies a single batch LLM call after
+          all hops to filter the accumulated docs down to the most relevant
+          ones before returning.  O(1) extra LLM call instead of O(n).
+
+        The bridge-entity prompt is intentionally brief (context is truncated
+        at ~3000 chars) to avoid slow LLM calls on large context windows.
+        """
+        from app.services.llm import llm_service
+
+        seen_names: set[str] = set()
+        accumulated: List[dict] = []
+        searched_for: set[str] = {query.lower()}
+
+        def _merge(new_results: List[dict]) -> None:
+            for cand in new_results:
+                name = (cand.get("original_obj") or {}).get("name") or cand.get(
+                    "name", ""
+                )
+                if name and name not in seen_names:
+                    accumulated.append(cand)
+                    seen_names.add(name)
+
+        def _build_context_snippet(results: List[dict], max_chars: int = 3000) -> str:
+            lines = []
+            total = 0
+            for r in results[:20]:
+                obj = r.get("original_obj") or {}
+                name = obj.get("name") or r.get("name", "?")
+                summary = obj.get("summary") or r.get("text", "")
+                etype = obj.get("entity_type") or obj.get("type", "")
+                line = f"- [{etype}] {name}: {summary}"[:200]
+                if total + len(line) > max_chars:
+                    break
+                lines.append(line)
+                total += len(line)
+            return "\n".join(lines)
+
+        def _check_sufficiency(context: str) -> tuple[bool, str | None]:
+            """
+            Ask the LLM whether the context is sufficient to answer *query*.
+
+            Expected reply (strict format):
+              SUFFICIENT: yes
+              MISSING: <entity or concept name>   ← omit or leave blank if sufficient
+            """
+            prompt = (
+                f"You are an intelligent retrieval assistant.\n\n"
+                f"QUESTION: {query}\n\n"
+                f"AVAILABLE CONTEXT (knowledge graph excerpts):\n{context}\n\n"
+                f"Determine if the context above is sufficient to answer the question.\n"
+                f"Reply in EXACTLY this format (two lines only):\n"
+                f"SUFFICIENT: yes\n"
+                f"or\n"
+                f"SUFFICIENT: no\n"
+                f"MISSING: <name of one key entity or concept that is absent from the context>\n\n"
+                f"Reply:"
+            )
+            try:
+                raw = llm_service.reason(prompt) or ""
+            except Exception as e:
+                logger.warning(f"  [SelfCorrect] LLM check failed: {e}")
+                return True, None  # fail-open: don't loop forever
+
+            sufficient = True
+            missing_entity: str | None = None
+
+            for line in raw.splitlines():
+                line = line.strip()
+                if line.lower().startswith("sufficient:"):
+                    val = line.split(":", 1)[1].strip().lower()
+                    sufficient = val.startswith("y")
+                elif line.lower().startswith("missing:"):
+                    missing_entity = line.split(":", 1)[1].strip()
+                    if not missing_entity:
+                        missing_entity = None
+
+            return sufficient, missing_entity
+
+        # ── Hop 0: initial retrieval ──────────────────────────────────────────
+        logger.info(f"  [SelfCorrect] Hop 0 — searching for: '{query}'")
+        hop0 = await self.hybrid_search(query, top_k=top_k)
+        _merge(hop0)
+
+        for hop in range(1, max_hops + 1):
+            context_snippet = _build_context_snippet(accumulated)
+            sufficient, missing = _check_sufficiency(context_snippet)
+
+            logger.info(
+                f"  [SelfCorrect] Hop {hop} check — sufficient={sufficient}, "
+                f"missing='{missing}'"
+            )
+
+            if sufficient or not missing:
+                break
+
+            if missing.lower() in searched_for:
+                logger.info(
+                    f"  [SelfCorrect] Already searched for '{missing}', stopping."
+                )
+                break
+
+            searched_for.add(missing.lower())
+            logger.info(f"  [SelfCorrect] Hop {hop} — bridge search for: '{missing}'")
+            bridge_results = await self.hybrid_search(missing, top_k=top_k // 2)
+            _merge(bridge_results)
+
+        logger.info(
+            f"  [SelfCorrect] Done after {hop} hops — "
+            f"{len(accumulated)} unique nodes accumulated."
+        )
+        # Return top_k by combined_score (best score first)
+        accumulated.sort(key=lambda c: c.get("combined_score", 0.0), reverse=True)
+        candidates = accumulated[:top_k]
+
+        # Batch context filter: single LLM call selects the most relevant docs.
+        # Reduces synthesis noise without the O(n) cost of per-doc verification.
+        keep_k = max(4, top_k // 2)
+        if filter_docs and len(candidates) > keep_k:
+            logger.info(
+                f"  [SelfCorrect] Filtering {len(candidates)} docs → keep={keep_k}"
+            )
+            candidates = await llm_service.select_relevant_docs(
+                candidates, query, keep=keep_k
+            )
+            logger.info(
+                f"  [SelfCorrect] After filter: {len(candidates)} docs"
+            )
+
+        return candidates
 
 
 retrieval_service = RetrievalService()

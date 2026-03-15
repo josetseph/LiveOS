@@ -1,5 +1,4 @@
 import os
-from langchain_ollama import OllamaEmbeddings
 from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
 from app.core.config import settings
@@ -36,77 +35,84 @@ def compute_cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
 
 
 class EmbeddingService:
+    """
+    Provider-agnostic embedding service.
+
+    Supported EMBEDDING_PROVIDER values:
+      "ollama"    – Ollama's /v1/embeddings (OpenAI-compatible, no API key)
+      "lm_studio" – LM Studio's /v1/embeddings (OpenAI-compatible)
+      "auto"      – follows LLM_PROVIDER (defaults to "ollama" for non-lm_studio providers)
+
+    All local providers share the same config keys:
+      EMBEDDING_BASE_URL, EMBEDDING_API_KEY, EMBEDDING_MODEL
+    """
+
     def __init__(self):
-        self.provider = settings.LLM_PROVIDER.lower()
-        configured_embedding_provider = settings.EMBEDDING_PROVIDER.lower().strip()
-        if configured_embedding_provider == "auto":
+        # Resolve effective embedding provider
+        configured = settings.EMBEDDING_PROVIDER.lower().strip()
+        if configured == "auto":
             self.embedding_provider = (
-                "lm_studio" if self.provider == "lm_studio" else "ollama"
+                "lm_studio"
+                if settings.LLM_PROVIDER.lower() == "lm_studio"
+                else "ollama"
             )
         else:
-            self.embedding_provider = configured_embedding_provider
+            self.embedding_provider = configured
 
-        self.embedding_model = None
-
-        if self.embedding_provider == "lm_studio":
-            embedding_model = self._resolve_lm_studio_embedding_model(
-                settings.LM_STUDIO_MODEL_EMBEDDING
-            )
-            self.embedding_model = embedding_model
-
-            self.embeddings = OpenAIEmbeddings(
-                model=embedding_model,
-                base_url=f"{settings.LM_STUDIO_BASE_URL.rstrip('/')}/v1",
-                api_key=settings.LM_STUDIO_API_KEY,
-                # Send raw text to LM Studio embeddings endpoint without
-                # tokenizer-based pre-processing (avoids HF tokenizer lookup).
-                check_embedding_ctx_length=False,
-            )
-        elif self.embedding_provider == "ollama":
-            # Use Ollama embeddings, independent of chat/reasoning provider.
-            # keep_alive=-1 tells Ollama to never unload this model from VRAM
-            self.embeddings = OllamaEmbeddings(
-                base_url=settings.OLLAMA_BASE_URL,
-                model=settings.MODEL_EMBEDDING,
-                keep_alive=settings.OLLAMA_KEEP_ALIVE,
-            )
-            self.embedding_model = settings.MODEL_EMBEDDING
-        elif self.embedding_provider == "mlx":
-            # MLX local inference — Apple Silicon, no server required.
-            # Model lives at MODELS_PATH/MLX_EMBEDDING_MODEL (e.g. models/Qwen3-Embedding-8B-4bit-DWQ)
-            self.embedding_model = settings.MLX_EMBEDDING_MODEL
-            self._mlx_model_path = os.path.join(
-                settings.MODELS_PATH, settings.MLX_EMBEDDING_MODEL
-            )
-            # Lazy-loaded on first call to avoid slowing startup
-            self._mlx_model = None
-            self._mlx_tokenizer = None
-            self.embeddings = None  # Not used for MLX; direct inference instead
-        else:
+        if self.embedding_provider not in ("ollama", "lm_studio"):
             raise ValueError(
-                f"Unsupported EMBEDDING_PROVIDER: {settings.EMBEDDING_PROVIDER}"
+                f"Unsupported EMBEDDING_PROVIDER: '{settings.EMBEDDING_PROVIDER}'. "
+                "Supported: 'ollama', 'lm_studio', 'auto'."
             )
 
-        logger.info(
-            f"[Embedding] Provider: {self.embedding_provider} | Model: {self.embedding_model}"
+        # For LM Studio, attempt to auto-resolve the exact loaded model ID.
+        # For Ollama, use the configured model name directly.
+        if self.embedding_provider == "lm_studio":
+            self.embedding_model = self._resolve_lm_studio_embedding_model(
+                settings.EMBEDDING_MODEL
+            )
+        else:
+            self.embedding_model = settings.EMBEDDING_MODEL
+
+        # Both providers speak the OpenAI /v1/embeddings protocol.
+        base_url = f"{settings.EMBEDDING_BASE_URL.rstrip('/')}/v1"
+        self.embeddings = OpenAIEmbeddings(
+            model=self.embedding_model,
+            base_url=base_url,
+            api_key=settings.EMBEDDING_API_KEY,
+            # Disables HuggingFace tokenizer pre-processing so raw text is sent
+            # directly to the server (required for LM Studio; harmless for Ollama).
+            check_embedding_ctx_length=False,
         )
 
-        # Qwen3-Embedding instruction prefix for QUERIES (not documents)
-        # This is CRITICAL for Qwen3 series - without it, performance drops significantly
-        # Tailored for Personal Knowledge Management (PKM) retrieval
-        self.query_instruction = "Instruct: Given a question about personal knowledge, notes, or experiences, retrieve relevant information from the knowledge base that helps answer the question\nQuery: "
+        logger.info(
+            f"[Embedding] Provider: {self.embedding_provider} | "
+            f"URL: {base_url} | Model: {self.embedding_model}"
+        )
 
-        # Check if current model is Qwen3 to apply instruction.
-        # Use only the leaf folder/model name (not a full path) so the substring
-        # check works regardless of MODELS_PATH depth.
+        # Qwen3-Embedding instruction prefix for QUERIES (not documents).
+        # Critical for Qwen3 series — omitting it degrades recall significantly.
+        self.query_instruction = (
+            "Instruct: Given a question about personal knowledge, notes, or "
+            "experiences, retrieve relevant information from the knowledge base "
+            "that helps answer the question\nQuery: "
+        )
+
+        # Detect Qwen3 by leaf model name so MODELS_PATH depth doesn't matter.
         model_name_lower = os.path.basename(self.embedding_model).lower()
         self.is_qwen3 = "qwen3" in model_name_lower
 
+    # ── Model resolution ──────────────────────────────────────────────────────
+
     def _resolve_lm_studio_embedding_model(self, configured_model: str | None) -> str:
-        """Resolve common aliases and prefer an available downloaded LM Studio model ID."""
+        """
+        Resolve common aliases and prefer an available downloaded LM Studio model ID.
+
+        Falls back to the configured value as-is if the server is unreachable.
+        """
         if not configured_model:
             raise ValueError(
-                "LM_STUDIO_MODEL_EMBEDDING is required when using lm_studio"
+                "EMBEDDING_MODEL is required when using EMBEDDING_PROVIDER=lm_studio"
             )
 
         model = configured_model.strip()
@@ -123,150 +129,83 @@ class EmbeddingService:
             candidates.append(f"text-embedding-{model.replace('-dwq', '')}")
 
         try:
+            base_url = f"{settings.EMBEDDING_BASE_URL.rstrip('/')}/v1"
             client = OpenAI(
-                base_url=f"{settings.LM_STUDIO_BASE_URL.rstrip('/')}/v1",
-                api_key=settings.LM_STUDIO_API_KEY,
+                base_url=base_url,
+                api_key=settings.EMBEDDING_API_KEY,
                 timeout=30.0,
             )
             available = [m.id for m in client.models.list().data]
             for candidate in candidates:
                 if candidate in available:
-                    if candidate != model:
+                    if candidate != configured_model:
                         logger.warning(
-                            f"[LM Studio] Embedding model '{configured_model}' not found, using '{candidate}'"
+                            f"[Embedding] Model '{configured_model}' not found, "
+                            f"using '{candidate}'"
                         )
                     return candidate
 
-            prefixed = []
-            for candidate in candidates:
-                prefixed.extend(
-                    [mid for mid in available if mid.startswith(f"{candidate}@")]
-                )
+            # Try quant-suffix variants (e.g. model@4bit)
+            prefixed = [
+                mid
+                for candidate in candidates
+                for mid in available
+                if mid.startswith(f"{candidate}@")
+            ]
             if prefixed:
                 logger.warning(
-                    f"[LM Studio] Embedding model '{configured_model}' not found, using '{prefixed[0]}'"
+                    f"[Embedding] Model '{configured_model}' not found, "
+                    f"using '{prefixed[0]}'"
                 )
                 return prefixed[0]
 
-            contains = []
-            for candidate in candidates:
-                contains.extend([mid for mid in available if candidate in mid])
+            # Substring match
+            contains = [
+                mid for candidate in candidates for mid in available if candidate in mid
+            ]
             if contains:
                 logger.warning(
-                    f"[LM Studio] Embedding model '{configured_model}' not found, using '{contains[0]}'"
+                    f"[Embedding] Model '{configured_model}' not found, "
+                    f"using '{contains[0]}'"
                 )
                 return contains[0]
-        except Exception as e:
-            logger.warning(
-                f"[LM Studio] Could not list models for embedding resolution: {e}"
-            )
 
-        logger.warning(
-            f"[LM Studio] Using configured embedding model '{configured_model}' as-is"
-        )
+        except Exception as e:
+            logger.warning(f"[Embedding] Could not list models for resolution: {e}")
+
+        logger.warning(f"[Embedding] Using configured model '{configured_model}' as-is")
         return model
 
     def _raise_lm_studio_embedding_error(self, exc: Exception) -> None:
         """Map opaque LM Studio 400s to an actionable setup error."""
         if self.embedding_provider != "lm_studio":
             return
-        message = str(exc)
-        if "No models loaded" in message:
+        if "No models loaded" in str(exc):
             raise RuntimeError(
                 "LM Studio returned 'No models loaded' for embeddings. "
-                f"Load an embedding model first (for example: `lms load {self.embedding_model}`), "
-                "or load it in the LM Studio Developer page and retry ingestion."
+                f"Load an embedding model first (e.g. `lms load {self.embedding_model}`), "
+                "or load it via the LM Studio Developer page and retry."
             ) from exc
 
-    def _mlx_load(self) -> None:
-        """Lazy-load the MLX model and tokenizer on first use."""
-        if self._mlx_model is None:
-            from mlx_lm import load  # type: ignore
+    # ── Public API ────────────────────────────────────────────────────────────
 
-            logger.info(
-                f"[MLX Embedding] Loading model from '{self._mlx_model_path}'..."
-            )
-            self._mlx_model, self._mlx_tokenizer = load(self._mlx_model_path)
-            logger.info("[MLX Embedding] Model loaded and ready.")
-
-    def _mlx_embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """
-        Embed a list of strings in a single batched MLX forward pass.
-
-        Uses tokenizer padding so all sequences are the same length, then
-        extracts the last-token (EOS) hidden state and L2-normalises.
-        """
-        import mlx.core as mx  # type: ignore
-        import numpy as np  # type: ignore
-
-        self._mlx_load()
-
-        # mlx_lm's TokenizerWrapper only supports .encode()/.decode() — it is
-        # NOT callable with HuggingFace-style kwargs (padding=True, etc.).
-        # We manually encode each text, ensure EOS is present, then left-pad
-        # so that index -1 is ALWAYS the true last (EOS) token for every row.
-        pad_id = self._mlx_tokenizer.pad_token_id
-        if pad_id is None:
-            pad_id = self._mlx_tokenizer.eos_token_id  # fallback: pad with EOS
-
-        token_lists = []
-        for text in texts:
-            tokens = self._mlx_tokenizer.encode(text)
-            if tokens[-1] != self._mlx_tokenizer.eos_token_id:
-                tokens.append(self._mlx_tokenizer.eos_token_id)
-            token_lists.append(tokens)
-
-        # Left-pad to the length of the longest sequence.
-        max_len = max(len(t) for t in token_lists)
-        padded = np.array(
-            [[pad_id] * (max_len - len(t)) + t for t in token_lists],
-            dtype=np.int32,
-        )
-
-        input_ids = mx.array(padded)  # [batch, seq_len]
-
-        # Forward pass through the transformer backbone.
-        # mlx_lm models expose `.model` as the bare transformer (no LM head).
-        output = self._mlx_model.model(input_ids)  # [batch, seq_len, dim]
-
-        # Last-token pooling — safe with left-padding because EOS is always
-        # at position -1 for every row.
-        embeddings = output[:, -1, :]  # [batch, dim]
-
-        # L2 normalise (+ epsilon for numerical stability).
-        norm = mx.sqrt(mx.sum(mx.square(embeddings), axis=-1, keepdims=True))
-        normalized = embeddings / (norm + 1e-9)  # [batch, dim]
-
-        mx.eval(normalized)
-        return normalized.tolist()
-
-    def embed_query(self, text: str, custom_instruction: str = None) -> list[float]:
+    def embed_query(
+        self, text: str, custom_instruction: str | None = None
+    ) -> list[float]:
         """
         Embed a search query with instruction prefix for Qwen3 models.
 
-        For Qwen3-Embedding models, prepends instruction to align query representation
-        with passage representation space. This is the "Instruction Paradox" fix.
+        For Qwen3-Embedding models, prepends an instruction to align the query
+        representation with the passage space (the "Instruction Paradox" fix).
 
         Args:
-            text: The query text to embed
-            custom_instruction: Optional LLM-generated instruction (overrides default)
+            text: The query text to embed.
+            custom_instruction: Optional LLM-generated instruction (overrides default).
         """
         try:
-            if self.embedding_provider == "mlx":
-                if self.is_qwen3:
-                    instruction = (
-                        custom_instruction
-                        if custom_instruction
-                        else self.query_instruction
-                    )
-                    text = instruction + text
-                return self._mlx_embed_batch([text])[0]
             if self.is_qwen3:
-                instruction = (
-                    custom_instruction if custom_instruction else self.query_instruction
-                )
-                prefixed_text = instruction + text
-                return self.embeddings.embed_query(prefixed_text)
+                instruction = custom_instruction or self.query_instruction
+                text = instruction + text
             return self.embeddings.embed_query(text)
         except Exception as exc:
             self._raise_lm_studio_embedding_error(exc)
@@ -276,11 +215,9 @@ class EmbeddingService:
         """
         Embed documents/passages WITHOUT instruction prefix.
 
-        Only queries get the instruction prefix, not the documents being indexed.
+        Only queries get the instruction prefix; documents are embedded as-is.
         """
         try:
-            if self.embedding_provider == "mlx":
-                return self._mlx_embed_batch(texts)
             return self.embeddings.embed_documents(texts)
         except Exception as exc:
             self._raise_lm_studio_embedding_error(exc)
@@ -289,7 +226,8 @@ class EmbeddingService:
     def get_dimension(self) -> int:
         """
         Returns the dimension of the embedding model.
-        Note: Uses embed_documents (not embed_query) to avoid instruction prefix in dimension test.
+
+        Uses embed_documents (not embed_query) to avoid instruction prefix noise.
         """
         try:
             dummy_vec = self.embed_documents(["test"])[0]
