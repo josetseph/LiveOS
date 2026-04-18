@@ -16,6 +16,7 @@ interface Note {
   created_at: string;
   updated_at: string;
   processed?: boolean;
+  failed?: boolean;
 }
 
 interface FilePreview {
@@ -24,13 +25,14 @@ interface FilePreview {
   type: "image" | "pdf" | "audio" | "other";
 }
 
-type ProcessedFilter = "all" | "ingested" | "not-ingested";
+type ProcessedFilter = "all" | "ingested" | "ingesting" | "saved" | "failed";
 
 export default function NotesPage() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedNote, setSelectedNote] = useState<Note | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [processedFilter, setProcessedFilter] = useState<ProcessedFilter>("all");
+  const [ingestingNoteIds, setIngestingNoteIds] = useState<Set<string>>(new Set());
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -123,8 +125,20 @@ export default function NotesPage() {
   const fetchNotes = async (search?: string, filter?: ProcessedFilter) => {
     try {
       setIsLoading(true);
-      const processed = filter === "ingested" ? true : filter === "not-ingested" ? false : undefined;
-      const data = await api.getNotes(search, processed);
+      let processed: boolean | undefined;
+      let failed: boolean | undefined;
+      if (filter === "ingested") {
+        processed = true;
+      } else if (filter === "saved") {
+        processed = false; failed = false;
+      } else if (filter === "failed") {
+        failed = true;
+      } else if (filter === "ingesting") {
+        // fetch unprocessed+non-failed candidates; client-side filtered below
+        processed = false; failed = false;
+      }
+      // "all" → no filters
+      const data = await api.getNotes(search, processed, failed);
       setNotes(data);
     } catch (error) {
       console.error("Error fetching notes:", error);
@@ -174,15 +188,13 @@ export default function NotesPage() {
     
     try {
       setIsSaving(true);
-      
-      // Trigger ingestion for the note
       await api.ingestNote(selectedNote.id);
-      
-      // Refresh to get updated metadata (processed=true)
-      await fetchNotes(searchQuery, processedFilter);
-      const updatedNote = await api.getNote(selectedNote.id);
-      setSelectedNote(updatedNote);
-      contentBeforeEditRef.current = updatedNote.content;
+      // Track as in-flight — polling will update state when done
+      setIngestingNoteIds(prev => new Set([...prev, selectedNote.id]));
+      // Optimistically clear any previous failure flag
+      const patched = { ...selectedNote, failed: false };
+      setSelectedNote(patched);
+      setNotes(prev => prev.map(n => n.id === selectedNote.id ? patched : n));
     } catch (error) {
       console.error("Error ingesting note:", error);
       alert("Failed to ingest note. Please try again.");
@@ -190,6 +202,45 @@ export default function NotesPage() {
       setIsSaving(false);
     }
   };
+
+  // Poll status for any notes that have been queued for ingestion
+  useEffect(() => {
+    if (ingestingNoteIds.size === 0) return;
+
+    const poll = async () => {
+      const completed: Array<{ id: string; processed: boolean; failed: boolean }> = [];
+      await Promise.all(
+        Array.from(ingestingNoteIds).map(async (noteId) => {
+          try {
+            const status = await api.getNoteStatus(noteId);
+            if (status.processed || status.failed) {
+              completed.push({ id: noteId, processed: status.processed, failed: status.failed });
+            }
+          } catch (_) {}
+        })
+      );
+      if (completed.length === 0) return;
+      setIngestingNoteIds(prev => {
+        const next = new Set(prev);
+        completed.forEach(c => next.delete(c.id));
+        return next;
+      });
+      setNotes(prev =>
+        prev.map(n => {
+          const update = completed.find(c => c.id === n.id);
+          return update ? { ...n, processed: update.processed, failed: update.failed } : n;
+        })
+      );
+      setSelectedNote(prev => {
+        if (!prev) return null;
+        const update = completed.find(c => c.id === prev.id);
+        return update ? { ...prev, processed: update.processed, failed: update.failed } : prev;
+      });
+    };
+
+    const interval = setInterval(poll, 5000);
+    return () => clearInterval(interval);
+  }, [ingestingNoteIds]);
 
   const handleContentChange = (content: string) => {
     if (!selectedNote) return;
@@ -402,40 +453,66 @@ export default function NotesPage() {
           </div>
           
           {/* Filter Buttons */}
-          <div className="flex gap-1 px-2 mt-2">
-            <button
-              onClick={() => setProcessedFilter("all")}
-              className={cn(
-                "flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all",
-                processedFilter === "all"
-                  ? "bg-white/10 text-white border border-white/20"
-                  : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
-              )}
-            >
-              All
-            </button>
-            <button
-              onClick={() => setProcessedFilter("ingested")}
-              className={cn(
-                "flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all",
-                processedFilter === "ingested"
-                  ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                  : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
-              )}
-            >
-              Ingested
-            </button>
-            <button
-              onClick={() => setProcessedFilter("not-ingested")}
-              className={cn(
-                "flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all",
-                processedFilter === "not-ingested"
-                  ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
-                  : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
-              )}
-            >
-              Drafts
-            </button>
+          <div className="mt-2 space-y-1 px-2">
+            <div className="flex gap-1">
+              <button
+                onClick={() => setProcessedFilter("all")}
+                className={cn(
+                  "flex-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-all",
+                  processedFilter === "all"
+                    ? "bg-white/10 text-white border border-white/20"
+                    : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
+                )}
+              >
+                All
+              </button>
+              <button
+                onClick={() => setProcessedFilter("ingested")}
+                className={cn(
+                  "flex-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-all",
+                  processedFilter === "ingested"
+                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                    : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
+                )}
+              >
+                Ingested
+              </button>
+              <button
+                onClick={() => setProcessedFilter("saved")}
+                className={cn(
+                  "flex-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-all",
+                  processedFilter === "saved"
+                    ? "bg-white/10 text-white/80 border border-white/20"
+                    : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
+                )}
+              >
+                Saved
+              </button>
+            </div>
+            <div className="flex gap-1">
+              <button
+                onClick={() => setProcessedFilter("ingesting")}
+                className={cn(
+                  "flex-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-all",
+                  processedFilter === "ingesting"
+                    ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                    : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
+                )}
+              >
+                Ingesting
+              </button>
+              <button
+                onClick={() => setProcessedFilter("failed")}
+                className={cn(
+                  "flex-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-all",
+                  processedFilter === "failed"
+                    ? "bg-red-500/20 text-red-400 border border-red-500/30"
+                    : "bg-white/5 text-white/60 border border-transparent hover:bg-white/10"
+                )}
+              >
+                Failed
+              </button>
+            </div>
           </div>
         </div>
 
@@ -453,7 +530,8 @@ export default function NotesPage() {
             </div>
           ) : (
             <div className="space-y-1 p-2">
-              {notes.map((note) => (
+              {/* Note list: client-side filter for "ingesting" (local state only) */}
+              {(processedFilter === "ingesting" ? notes.filter(n => ingestingNoteIds.has(n.id)) : notes).map((note) => (
                 <button
                   key={note.id}
                   onClick={() => handleNoteSelect(note)}
@@ -467,9 +545,13 @@ export default function NotesPage() {
                   {/* Ingestion Status Indicator */}
                   <div className="absolute top-3 right-3">
                     {note.processed ? (
-                      <div className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]" title="Ingested into brain" />
+                      <div className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]" title="Ingested" />
+                    ) : note.failed ? (
+                      <div className="h-2 w-2 rounded-full bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.6)]" title="Ingestion failed" />
+                    ) : ingestingNoteIds.has(note.id) ? (
+                      <div className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)] animate-pulse" title="Ingesting…" />
                     ) : (
-                      <div className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]" title="Draft - not ingested" />
+                      <div className="h-2 w-2 rounded-full bg-white/20" title="Saved — not ingested" />
                     )}
                   </div>
                   <h3 className="mb-1 truncate font-medium text-white pr-6">{note.title || "Untitled"}</h3>
@@ -485,7 +567,9 @@ export default function NotesPage() {
 
         <div className="border-t border-white/10 p-3">
           <p className="text-xs text-white/40 text-center">
-            {notes.length} {notes.length === 1 ? "note" : "notes"}
+            {processedFilter === "ingesting"
+              ? `${ingestingNoteIds.size} ingesting`
+              : `${notes.length} ${notes.length === 1 ? "note" : "notes"}`}
           </p>
         </div>
       </div>
@@ -498,15 +582,38 @@ export default function NotesPage() {
                 {isPreviewMode && (
                   <>
                     <h2 className="text-xl font-bold text-white">{selectedNote.title || "Untitled"}</h2>
-                    <p className="text-sm text-white/40 mt-1">
-                      {new Date(selectedNote.created_at).toLocaleDateString("en-US", { 
-                        month: "long", 
-                        day: "numeric", 
-                        year: "numeric",
-                        hour: "numeric",
-                        minute: "2-digit"
-                      })}
-                    </p>
+                    <div className="flex items-center gap-2 mt-1">
+                      <p className="text-sm text-white/40">
+                        {new Date(selectedNote.created_at).toLocaleDateString("en-US", { 
+                          month: "long", 
+                          day: "numeric", 
+                          year: "numeric",
+                          hour: "numeric",
+                          minute: "2-digit"
+                        })}
+                      </p>
+                      {selectedNote.processed ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-400">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                          Ingested
+                        </span>
+                      ) : selectedNote.failed ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-medium text-red-400">
+                          <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
+                          Failed
+                        </span>
+                      ) : ingestingNoteIds.has(selectedNote.id) ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-400">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Ingesting…
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-white/8 px-2 py-0.5 text-xs font-medium text-white/40">
+                          <span className="h-1.5 w-1.5 rounded-full bg-white/30" />
+                          Saved
+                        </span>
+                      )}
+                    </div>
                   </>
                 )}
                 {!isPreviewMode && (
@@ -514,15 +621,38 @@ export default function NotesPage() {
                     <p className="text-sm text-white/60">
                       {isSaving ? "Saving..." : isUploading ? "Uploading..." : "Saved"}
                     </p>
-                    <p className="text-xs text-white/40 mt-0.5">
-                      {new Date(selectedNote.created_at).toLocaleDateString("en-US", { 
-                        month: "short", 
-                        day: "numeric", 
-                        year: "numeric",
-                        hour: "numeric",
-                        minute: "2-digit"
-                      })}
-                    </p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <p className="text-xs text-white/40">
+                        {new Date(selectedNote.created_at).toLocaleDateString("en-US", { 
+                          month: "short", 
+                          day: "numeric", 
+                          year: "numeric",
+                          hour: "numeric",
+                          minute: "2-digit"
+                        })}
+                      </p>
+                      {selectedNote.processed ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-400">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                          Ingested
+                        </span>
+                      ) : selectedNote.failed ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-medium text-red-400">
+                          <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
+                          Failed
+                        </span>
+                      ) : ingestingNoteIds.has(selectedNote.id) ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-400">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Ingesting…
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-white/8 px-2 py-0.5 text-xs font-medium text-white/40">
+                          <span className="h-1.5 w-1.5 rounded-full bg-white/30" />
+                          Saved
+                        </span>
+                      )}
+                    </div>
                   </>
                 )}
               </div>
@@ -532,15 +662,20 @@ export default function NotesPage() {
                   <>
                     <button
                       onClick={handleIngestNote}
-                      disabled={isSaving || !selectedNote?.content.trim()}
+                      disabled={isSaving || !selectedNote?.content.trim() || ingestingNoteIds.has(selectedNote?.id ?? "")}
                       className="flex h-9 items-center gap-2 rounded-lg bg-linear-to-r from-purple-500 to-pink-500 px-4 text-sm font-medium text-white transition-all hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      {isSaving ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
+                      {ingestingNoteIds.has(selectedNote?.id ?? "") ? (
+                        <><Loader2 className="h-4 w-4 animate-spin" />Ingesting…</>
+                      ) : isSaving ? (
+                        <><Loader2 className="h-4 w-4 animate-spin" />Saving…</>
+                      ) : selectedNote?.processed ? (
+                        <><Database className="h-4 w-4" />Re-ingest</>
+                      ) : selectedNote?.failed ? (
+                        <><Database className="h-4 w-4" />Retry Ingest</>
                       ) : (
-                        <Database className="h-4 w-4" />
+                        <><Database className="h-4 w-4" />Ingest Note</>
                       )}
-                      {isSaving ? "Ingesting..." : "Ingest Note"}
                     </button>
                     <button
                       onClick={() => setShowDatePicker(!showDatePicker)}

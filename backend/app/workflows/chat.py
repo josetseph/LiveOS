@@ -18,88 +18,145 @@ def _doc_passage(doc: dict) -> str:
 class ChatWorkflow:
     async def chat(self, user_query: str) -> dict:
         """
-        Agentic self-correcting retrieval pipeline:
+        Research-style retrieval loop:
 
-        1. retrieve_with_self_correction runs up to 3 iterative hops:
-           - Initial hybrid search (entity match + vector + type-first 2nd-hop expansion)
-           - LLM sufficiency check: "Can you answer? If not, what bridge entity is missing?"
-           - Targeted bridge-entity search on missing entity → merge → repeat
-        2. Identify answer type (yes/no / place / person / year …)
-        3. Synthesize with SYNTHESIS_RULES + ANSWER TYPE CONSTRAINT + FINAL: format
+        1. Generate a focused search query for the original question.
+        2. Search, filter, expand neighbours, and distill a finding.
+        3. Decide whether to answer now or issue a new focused search.
+        4. Repeat up to the loop limit, then fall back to a final synthesis.
         """
         start_time = time.perf_counter()
         logger.info(f"\n[Chat] Started processing query: '{user_query}'")
 
-        # ── Agentic retrieval (self-correcting multi-hop) ─────────────────────
+        # ── Research loop retrieval ──────────────────────────────────────────
         t0 = time.perf_counter()
-        all_retrieved_docs = await retrieval_service.retrieve_with_self_correction(
-            user_query, top_k=12, max_hops=3, filter_docs=False
+        final_answer, all_docs = await retrieval_service.retrieve_with_self_correction(
+            user_query, top_k=50, max_hops=10, filter_docs=False
         )
         logger.info(
-            f"[Chat] Agentic retrieval: {len(all_retrieved_docs)} docs "
+            f"[Chat] Research loop retrieval: {len(all_docs)} docs accumulated "
             f"in {time.perf_counter() - t0:.2f}s"
         )
-        if all_retrieved_docs:
-            top = all_retrieved_docs[0]
-            print(
-                f"\n🔍 TOP RESULT: [{top.get('original_obj',{}).get('name','?')}] "
-                f"{_doc_passage(top)[:200]}..."
-            )
 
-        # Deduplicate by node name / note id
-        seen_ids: set[str] = set()
-        unique_docs: list[dict] = []
-        for doc in all_retrieved_docs:
-            doc_id = (
-                doc.get("original_obj", {}).get("name")
-                or doc.get("note_id")
-                or doc.get("text", "")[:100]
-            )
-            if doc_id not in seen_ids:
-                unique_docs.append(doc)
-                seen_ids.add(doc_id)
+        def _dedupe_docs(docs: list[dict]) -> list[dict]:
+            seen_local: set[str] = set()
+            deduped: list[dict] = []
+            for doc in docs:
+                doc_id = (
+                    doc.get("original_obj", {}).get("name")
+                    or doc.get("note_id")
+                    or doc.get("text", "")[:100]
+                )
+                if doc_id and doc_id not in seen_local:
+                    deduped.append(doc)
+                    seen_local.add(doc_id)
+            return deduped
 
-        logger.info(
-            f"[Chat] Unique docs for synthesis: {len(unique_docs)} "
-            f"(from {len(all_retrieved_docs)} total)"
-        )
+        async def _run_structured_fallback(
+            trigger_reason: str,
+        ) -> tuple[str | None, list[dict]]:
+            logger.info(
+                f"[Chat] Triggering structured sub-question fallback ({trigger_reason})"
+            )
+            t_fb = time.perf_counter()
+            fb_answer, fb_docs = (
+                await retrieval_service.retrieve_with_structured_subquestions(
+                    user_query,
+                    top_k=50,
+                )
+            )
+            logger.info(
+                f"[Chat] Structured fallback: {len(fb_docs)} docs in "
+                f"{time.perf_counter() - t_fb:.2f}s"
+            )
+            return fb_answer, fb_docs
+
+        # Deduplicate docs
+        unique_docs: list[dict] = _dedupe_docs(all_docs)
+
+        logger.info(f"[Chat] Unique docs: {len(unique_docs)}")
         if unique_docs:
-            print(f"\n🔍 FINAL CONTEXT ({len(unique_docs)} docs):")
+            print(f"\n🔍 CONTEXT ({len(unique_docs)} docs):")
             for i, doc in enumerate(unique_docs[:5]):
                 print(
                     f"  {i+1}. [{doc.get('original_obj',{}).get('name','?')}] "
                     f"{_doc_passage(doc)[:150]}..."
                 )
 
-        # ── Step 3: identify answer type + synthesize ────────────────────────
+        # ── Answer assembly ──────────────────────────────────────────────────
         answer = ""
-        if not unique_docs:
-            answer = (
-                "I couldn't find any relevant context in your brain to answer that."
-            )
-            logger.info("[Chat] No context found.")
-        else:
-            # Identify the type of answer needed — injected as a hard constraint
-            # into the synthesis prompt (key improvement from benchmark v4/v5)
+        if unique_docs:
+            # Keep loop retrieval for context discovery, but always run
+            # constrained synthesis so we still answer when loop control
+            # fails to emit a direct final answer.
             answer_type = await llm_service.identify_answer_type(user_query)
             logger.info(f"[Chat] Answer type: '{answer_type}'")
 
             t_synth = time.perf_counter()
-            answer = await llm_service.synthesize(
+            synthesized = await llm_service.synthesize(
                 unique_docs, user_query, answer_type=answer_type
             )
             logger.info(f"[Chat] Synthesis: {time.perf_counter() - t_synth:.2f}s")
 
-            # Extract the FINAL: answer when the synthesis prompt produced one
-            # (benchmark mode prompt always produces 'FINAL: <answer>')
-            if "FINAL:" in answer:
-                parts = answer.split("FINAL:", 1)
-                answer = parts[1].strip().split("\n")[0].strip()
+            if synthesized and "FINAL:" in synthesized:
+                answer = (
+                    synthesized.split("FINAL:", 1)[1].strip().split("\n")[0].strip()
+                )
+            elif synthesized:
+                answer = synthesized.strip().split("\n")[0].strip()
 
-            # Append references
-            references = self._extract_references(unique_docs)
-            if references:
-                answer += "\n\n### References\n" + "\n".join(references)
+            if not answer and final_answer:
+                logger.info(f"[Chat] Falling back to loop answer: '{final_answer}'")
+                answer = final_answer
+
+        if not answer:
+            fallback_reason = "no loop context" if not unique_docs else "no loop answer"
+            fb_answer, fb_docs = await _run_structured_fallback(fallback_reason)
+
+            if fb_docs:
+                unique_docs = _dedupe_docs(unique_docs + fb_docs)
+                logger.info(f"[Chat] Fallback merged unique docs: {len(unique_docs)}")
+
+            # Prefer synthesis over full merged context so we do not rely
+            # on condensed per-step fallback answers.
+            if unique_docs:
+                answer_type = await llm_service.identify_answer_type(user_query)
+                logger.info(f"[Chat] Fallback answer type: '{answer_type}'")
+                t_synth_fb = time.perf_counter()
+                synthesized_fb = await llm_service.synthesize(
+                    unique_docs, user_query, answer_type=answer_type
+                )
+                logger.info(
+                    f"[Chat] Fallback synthesis: {time.perf_counter() - t_synth_fb:.2f}s"
+                )
+                if synthesized_fb and "FINAL:" in synthesized_fb:
+                    answer = (
+                        synthesized_fb.split("FINAL:", 1)[1]
+                        .strip()
+                        .split("\n")[0]
+                        .strip()
+                    )
+                elif synthesized_fb:
+                    answer = synthesized_fb.strip().split("\n")[0].strip()
+
+            if not answer and fb_answer:
+                logger.info("[Chat] Falling back to structured fallback direct answer.")
+                answer = fb_answer
+
+            if not answer:
+                answer = (
+                    "I couldn't find any relevant context in your brain to answer that."
+                    if not unique_docs
+                    else "I couldn't find enough information to answer that."
+                )
+                logger.info(
+                    "[Chat] Both primary and fallback retrieval paths exhausted."
+                )
+
+        # Append references
+        references = self._extract_references(unique_docs)
+        if references:
+            answer += "\n\n### References\n" + "\n".join(references)
 
         total_time = time.perf_counter() - start_time
         logger.info(f"[Chat] Total pipeline duration: {total_time:.2f}s\n")
@@ -109,7 +166,7 @@ class ChatWorkflow:
             "answer": answer,
             "context": unique_docs,
             "information_needs": [user_query],
-            "discovered_entities": {},  # kept for API response compatibility
+            "discovered_entities": {},
         }
 
     async def _verify_candidates(

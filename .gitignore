@@ -31,3 +31,9 @@ __pycache__/
 .env
 .env.local
 /batch-note-processing/notes
+/.context
+/.github/agents
+/.github/instructions
+/.github/hooks
+/.github/prompts
+.github/copilot-instructions.md

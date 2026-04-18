@@ -1,5 +1,4 @@
 from app.services.graph import graph_service
-from app.core.config import settings
 from app.core.log import get_logger
 import sys
 
@@ -17,31 +16,13 @@ def init_db():
     graph_service.execute_query(
         "CREATE CONSTRAINT note_id_unique IF NOT EXISTS FOR (n:Note) REQUIRE n.id IS UNIQUE"
     )
-
-    # 2. Vector Index
-    logger.info("Cleaning up old Vector Index...")
-    try:
-        graph_service.execute_query("DROP INDEX note_vector_index IF EXISTS")
-    except Exception as e:
-        logger.warning(f"Could not drop index: {e}")
-
-    logger.info(f"Creating {settings.EMBEDDING_DIMENSIONS}-dim Vector Index...")
-    try:
-        query_index = f"""
-        CREATE VECTOR INDEX note_vector_index IF NOT EXISTS
-        FOR (n:Note)
-        ON (n.embedding)
-        OPTIONS {{indexConfig: {{
-         `vector.dimensions`: {settings.EMBEDDING_DIMENSIONS},
-         `vector.similarity_function`: 'cosine'
-        }}}}
-        """
-        graph_service.execute_query(query_index)
-        print(
-            f"Vector Index 'note_vector_index' created/verified with {settings.EMBEDDING_DIMENSIONS} dims."
-        )
-    except Exception as e:
-        print(f"Error creating vector index: {e}")
+    graph_service.execute_query(
+        "CREATE CONSTRAINT indexable_id_unique IF NOT EXISTS FOR (n:Indexable) REQUIRE n.id IS UNIQUE"
+    )
+    graph_service.execute_query(
+        "CREATE CONSTRAINT community_id_unique IF NOT EXISTS FOR (n:Community) REQUIRE n.id IS UNIQUE"
+    )
+    logger.info("Neo4j initialised for structural-only graph storage.")
 
 
 if __name__ == "__main__":

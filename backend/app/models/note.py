@@ -18,5 +18,6 @@ class Note(Base):
         default=datetime.now(timezone.utc),
     )
     processed = Column(Boolean, default=False)
+    failed = Column(Boolean, default=False)
     domain = Column(String, default="Personal")
     # Could add user_id later

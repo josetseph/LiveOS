@@ -3,11 +3,22 @@ import uuid
 from collections import defaultdict
 from datetime import datetime
 
+from app.core.config import settings
 from app.core.log import get_logger
 from app.schemas.extraction import Extraction, NoteInput
+from app.services.elasticsearch_service import elasticsearch_service
 from app.services.graph import graph_service
+from app.services.ingestion_tracker import ingestion_tracker
 from app.services.llm import llm_service
+from app.services.qdrant_service import qdrant_service
 from app.workflows.agents.ingestion_agent import ingestion_agent
+
+# Hard cap on concurrent ingestion pipelines.
+# Each pipeline makes sequential DB calls; capping at 20 keeps peak pool
+# usage at ~20 (ingestion) + ~20 (HTTP handlers) = 40, well within the
+# pool_size=30 + max_overflow=20 = 50 ceiling set in database.py.
+_PROCESS_CONCURRENCY = 20
+_process_semaphore = asyncio.Semaphore(_PROCESS_CONCURRENCY)
 
 logger = get_logger("IngestionPipeline")
 
@@ -53,46 +64,87 @@ class IngestionWorkflow:
     async def process_note(self, note_input: NoteInput, note_id: str = None):
         if not note_id:
             note_id = str(uuid.uuid4())
-        logger.info(f"[{datetime.now()}] START: Ingesting Note {note_id}")
 
-        # Trigger the LangGraph Agent
-        initial_state = {
-            "input": note_input,
-            "content": "",
-            "extraction": None,
-            "note_id": note_id,
-            "created_at": None,
-            "errors": [],
-        }
+        # Register with the tracker BEFORE the semaphore so the community-detection
+        # idle timer never fires while tasks are queued waiting for a slot.
+        await ingestion_tracker.begin_ingestion()
 
-        # Use ainvoke because the graph contains async nodes (multimodal_node)
-        import time
-
-        t_start = time.perf_counter()
-        final_state = await ingestion_agent.ainvoke(initial_state)
-        t_end = time.perf_counter()
-
-        if final_state["errors"]:
-            logger.error(
-                f"[{datetime.now()}] FAILURE: Ingestion Failed for {note_id}: {final_state['errors']}"
+        # Wait for a pipeline slot.  Without this cap, sending 990 notes at once
+        # spawns 990 concurrent coroutines that all hit the DB pool simultaneously.
+        async with _process_semaphore:
+            logger.info(
+                f"\n{'='*70}\n"
+                f"[Ingestion] START note_id={note_id}\n"
+                f"  content_length={len(note_input.content or '')} chars\n"
+                f"  title='{note_input.title or '(auto-generate)'}'\n"
+                f"{'='*70}"
             )
-            raise Exception(f"Ingestion Agent Failed: {final_state['errors']}")
 
-        # Mark as processed in Postgres
-        await self._mark_note_processed(note_id)
+            # Trigger the LangGraph Agent
+            initial_state = {
+                "input": note_input,
+                "content": "",
+                "extraction": None,
+                "note_id": note_id,
+                "created_at": None,
+                "errors": [],
+            }
 
-        duration = t_end - t_start
-        logger.info(f"\n[Ingestion] Total Pipeline Duration: {duration:.4f}s")
-        logger.info(
-            f"[{datetime.now()}] SUCCESS: Note {note_id} fully indexed in {duration:.2f}s."
-        )
+            # Use ainvoke because the graph contains async nodes (multimodal_node)
+            import time
 
-        return {
-            "note_id": final_state["note_id"],
-            "extraction": final_state["extraction"].model_dump(),
-            "status": "success",
-            "processed_content": final_state["content"],
-        }
+            t_start = time.perf_counter()
+            try:
+                final_state = await ingestion_agent.ainvoke(initial_state)
+                t_end = time.perf_counter()
+
+                if final_state["errors"]:
+                    logger.error(
+                        f"[Ingestion] FAILURE note_id={note_id}: {final_state['errors']}"
+                    )
+                    raise Exception(f"Ingestion Agent Failed: {final_state['errors']}")
+
+                extraction = final_state.get("extraction")
+                if extraction:
+                    logger.info(
+                        f"[Ingestion] Agent complete — extracted "
+                        f"{len(getattr(extraction, 'nodes', []))} nodes, "
+                        f"{len(getattr(extraction, 'relationships', []))} relationships"
+                    )
+                    for n in getattr(extraction, 'nodes', []):
+                        logger.debug(f"  [Extraction] node: '{n.name}' type='{n.type}'")
+                    for r in getattr(extraction, 'relationships', []):
+                        logger.debug(
+                            f"  [Extraction] rel: '{r.source_name}' --[{r.relationship_type}]--> '{r.target_name}' "
+                            f"(strength={r.strength}, confidence={r.confidence}, relevance={r.relevance})"
+                        )
+
+                # Mark as processed in Postgres
+                await self._mark_note_processed(note_id)
+                await self._queue_leiden_recompute_if_due(note_id)
+
+                duration = t_end - t_start
+                logger.info(
+                    f"\n{'='*70}\n"
+                    f"[Ingestion] SUCCESS note_id={note_id} in {duration:.2f}s\n"
+                    f"{'='*70}"
+                )
+
+                return {
+                    "note_id": final_state["note_id"],
+                    "extraction": final_state["extraction"].model_dump(),
+                    "status": "success",
+                    "processed_content": final_state["content"],
+                }
+
+            except Exception as exc:
+                await self._mark_note_failed(note_id)
+                raise
+
+            finally:
+                # Always decrement the active counter and potentially schedule
+                # community recompute, regardless of success or failure.
+                await ingestion_tracker.end_ingestion(self.rebuild_leiden_communities)
 
     # Internal helpers reused by the Agent
     from tenacity import retry, stop_after_attempt, wait_exponential
@@ -166,6 +218,29 @@ class IngestionWorkflow:
                 logger.error(f"Error marking note processed: {e}")
                 raise e
 
+    @retry(
+        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
+    )
+    async def _mark_note_failed(self, note_id: str):
+        """
+        Sets failed = True in Postgres so callers can distinguish a permanent
+        failure from a note that is still being processed.
+        """
+        from app.core.database import AsyncSessionLocal
+        from app.models.note import Note
+        from sqlalchemy import update
+
+        async with AsyncSessionLocal() as session:
+            try:
+                await session.execute(
+                    update(Note).where(Note.id == note_id).values(failed=True)
+                )
+                await session.commit()
+                logger.info(f"[Ingestion] Marked Note {note_id} as Failed.")
+            except Exception as e:
+                logger.error(f"Error marking note failed: {e}")
+                raise e
+
     def _write_ontology(
         self,
         note_id: str,
@@ -174,385 +249,125 @@ class IngestionWorkflow:
         created_at: str,
         custom_title: str = None,
     ):
+        logger.info(f"[Ontology] Writing ontology for note {note_id}")
         # 0. Generate or use provided Title & Summary
         if custom_title:
             title = custom_title
-            logger.info(f"[Ingestion] Using provided title: '{title}'")
+            logger.info(f"[Ontology] Using provided title: '{title}'")
         else:
             title = llm_service.generate_title(content)
-            logger.info(f"[Ingestion] Generated title: '{title}'")
+            logger.info(f"[Ontology] Generated title: '{title}'")
         summary = llm_service.summarize(content)
+        logger.debug(f"[Ontology] Summary ({len(summary or '')} chars): {(summary or '')[:120]}...")
 
-        # Base Note Node (Neo4j - The Mind)
-        # NOTE: Note embeddings commented out (unused in retrieval - only node embeddings searched)
+        # Base Note Node — bare structural node in Neo4j with :Note label.
+        # All content (title, summary, domain) lives in Qdrant node_cores.
         query_note = """
-        MERGE (n:Note {id: $id})
-        SET n.summary = $summary,
-            n.title = $title,
-            n.sentiment = $sentiment,
-            n.domain = $domain,
-            n.created_at = $created_at
+        MERGE (n:Note:Indexable {id: $id})
         """
-        # Prune old relationships to ensure state matches current extraction
-        query_prune = """
-        MATCH (n:Note {id: $id})-[r]->() 
-        WHERE type(r) IN ['MENTIONS', 'CONTRIBUTES_TO', 'PRODUCES_TASK', 'REVEALED_BY', 'CITES'] 
-        DELETE r
-        """
-        graph_service.execute_query(query_prune, {"id": note_id})
-
         graph_service.execute_query(
             query_note,
-            {
-                "id": note_id,
-                "summary": summary,
-                "title": title,
-                "sentiment": extraction.sentiment,
-                "domain": extraction.domain,
-                "created_at": created_at,
-                # "vector": vector,  # Commented out - note embeddings unused
-            },
+            {"id": note_id},
         )
 
         # Helper to normalize names: strip # prefix, extra whitespace, and lowercase
         def normalize_name(name: str) -> str:
-            """Normalize names to prevent duplicates like #svtlottery vs Svtlottery vs SVTLottery.
-
-            All node names are stored in lowercase for consistent merging.
-            """
             if not name:
                 return ""
-            # Remove leading # (common in task references like #project)
-            # Then lowercase for consistent storage
-            name = name.lstrip("#").strip().lower()
-            return name
+            return name.lstrip("#").strip().lower()
 
-        # 1. ENTITIES (Batch)
-        if extraction.entities:
-            # Generate embeddings for entities
+        # 1. NODES (Batch — unified single type)
+        if extraction.nodes:
             from app.services.embedding import embedding_service
 
-            entity_embeddings = {}
-            for e in extraction.entities:
-                normalized_name = normalize_name(e.name)
-                text_to_embed = f"{normalized_name} ({e.type})"
-                entity_embeddings[normalized_name] = embedding_service.embed_query(
-                    text_to_embed
-                )
-
-            query_entities = """
-            MERGE (n:Note {id: $note_id})
-            WITH n
-            UNWIND $data AS item
-            MERGE (e:Entity {name: item.name})
-            ON CREATE SET e.type = item.type, e.importance = item.importance
-            SET e:Indexable, e.embedding = item.embedding
-            MERGE (n)-[r:MENTIONS]->(e)
-            SET r.created_at = $created_at,
-                r.valid_from = $created_at,
-                r.is_active = true
-            """
-            # Prepare dict list with normalized names
-            entity_data = [
-                {
-                    "name": normalize_name(e.name),
-                    "type": e.type,
-                    "importance": e.importance,
-                    "embedding": entity_embeddings[normalize_name(e.name)],
-                }
-                for e in extraction.entities
-            ]
-            graph_service.execute_query(
-                query_entities,
-                {"data": entity_data, "note_id": note_id, "created_at": created_at},
-            )
-
-            # ALIAS DETECTION: Disabled - too risky for false positives
-            # The deterministic find_name_variants() handles common patterns
-            # (Bob→Robert, Jr. variants, etc.) without LLM-based guessing
-            # self._detect_and_create_aliases(extraction.entities, note_id)
-
-        # 2. CONCEPTS (Batch with Academic Relationships)
-        if extraction.concepts:
-            # Generate embeddings for concepts
-            from app.services.embedding import embedding_service
-
-            concept_embeddings = {}
-            for c in extraction.concepts:
-                normalized_name = c.name.lower().strip()
-                text_to_embed = f"{normalized_name}: {c.definition or ''}"
-                concept_embeddings[normalized_name] = embedding_service.embed_query(
-                    text_to_embed
-                )
-
-            query_concepts = """
-            MERGE (n:Note {id: $note_id})
-            WITH n
-            UNWIND $data AS item
-            MERGE (c:Concept {name: item.name})
-            ON CREATE SET c.definition = item.definition
-            SET c:Indexable, c.embedding = item.embedding
-            MERGE (n)-[r:CONTRIBUTES_TO]->(c)
-            SET r.created_at = $created_at,
-                r.valid_from = $created_at,
-                r.is_active = true
-            """
-            concept_data = [
-                {
-                    "name": c.name.lower().strip(),
-                    "definition": c.definition,
-                    "embedding": concept_embeddings[c.name.lower().strip()],
-                }
-                for c in extraction.concepts
-            ]
-            graph_service.execute_query(
-                query_concepts,
-                {"data": concept_data, "note_id": note_id, "created_at": created_at},
-            )
-
-            # ACADEMIC RELATIONSHIPS: Link concepts based on definition text hints
-            # For example: "builds on X", "contradicts Y", "extends Z"
-            # This is a simplified heuristic - could be improved with LLM reasoning
-            for concept in extraction.concepts:
-                definition_lower = (
-                    concept.definition.lower() if concept.definition else ""
-                )
-
-                # Check for prerequisite keywords
-                if any(
-                    keyword in definition_lower
-                    for keyword in [
-                        "requires",
-                        "builds on",
-                        "extends",
-                        "based on",
-                        "assumes",
-                    ]
-                ):
-                    # Try to find referenced concepts in the definition
-                    query_prereq = """
-                    MATCH (c1:Concept {name: $concept_name})
-                    MATCH (c2:Concept)
-                    WHERE c2.name <> $concept_name 
-                      AND toLower(c2.name) IN [word IN split(toLower($definition), ' ') | word]
-                    MERGE (c1)-[r:PREREQUISITE_FOR]->(c2)
-                    SET r.created_at = $created_at
-                    """
-                    graph_service.execute_query(
-                        query_prereq,
-                        {
-                            "concept_name": concept.name.lower().strip(),
-                            "definition": concept.definition,
-                            "created_at": created_at,
-                        },
-                    )
-
-                # Check for contradiction keywords
-                if any(
-                    keyword in definition_lower
-                    for keyword in [
-                        "contradicts",
-                        "opposes",
-                        "differs from",
-                        "challenges",
-                    ]
-                ):
-                    query_contradict = """
-                    MATCH (c1:Concept {name: $concept_name})
-                    MATCH (c2:Concept)
-                    WHERE c2.name <> $concept_name 
-                      AND toLower(c2.name) IN [word IN split(toLower($definition), ' ') | word]
-                    MERGE (c1)-[r:CONTRADICTS]->(c2)
-                    SET r.created_at = $created_at
-                    """
-                    graph_service.execute_query(
-                        query_contradict,
-                        {
-                            "concept_name": concept.name.lower().strip(),
-                            "definition": concept.definition,
-                            "created_at": created_at,
-                        },
-                    )
-
-        # 3. TASKS (Batch)
-        if extraction.tasks:
-            # Generate embeddings for tasks
-            from app.services.embedding import embedding_service
-
-            task_embeddings = []
-            for t in extraction.tasks:
-                # Use name if available, fall back to description
-                task_label = t.name or t.description or "Untitled Task"
-                text_to_embed = f"Task: {task_label} (Status: {t.status})"
-                task_embeddings.append(embedding_service.embed_query(text_to_embed))
-
-            query_tasks = """
-            MERGE (n:Note {id: $note_id})
-            WITH n
-            UNWIND $data AS item
-            // MERGE by normalized name to update existing tasks
-            MERGE (t:Task {name: item.name})
-            ON CREATE SET 
-                t.id = item.task_id,
-                t:Indexable,
-                t.created_at = $created_at
-            // Always update these fields (latest note wins)
-            SET t.description = CASE WHEN item.desc <> '' THEN item.desc ELSE t.description END,
-                t.status = item.status,
-                t.due_date = CASE WHEN item.due_date IS NOT NULL THEN item.due_date ELSE t.due_date END,
-                t.isolated_context = item.isolated_context,
-                t.embedding = item.embedding,
-                t.updated_at = $created_at
-            MERGE (n)-[r:PRODUCES_TASK]->(t)
-            SET r.created_at = $created_at,
-                r.valid_from = $created_at,
-                r.is_active = true
-            """
-            # Use task.name if available, otherwise generate from description
-            from app.utils.data_validation import generate_unique_task_name
-
-            def normalize_task_name(name: str) -> str:
-                """Normalize task names for consistent merging.
-                - Strips # prefix (e.g., 'complete #svtlottery' -> 'complete svtlottery')
-                - Lowercases for consistent storage
-                """
-                if not name:
-                    return ""
-                # Remove # symbols from task names, then lowercase
-                name = name.replace("#", "").strip().lower()
-                return name
-
-            task_data = [
-                {
-                    "task_id": str(uuid.uuid4()),
-                    "name": normalize_task_name(t.name)
-                    or normalize_task_name(
-                        generate_unique_task_name(t.description, str(uuid.uuid4()))
-                    ),
-                    "desc": t.description,
-                    "status": t.status,  # Already standardized in extraction_node
-                    "due_date": t.due_date,
-                    "isolated_context": getattr(t, "isolated_context", "") or "",
-                    "embedding": task_embeddings[i],
-                }
-                for i, t in enumerate(extraction.tasks)
-            ]
-            graph_service.execute_query(
-                query_tasks,
-                {"data": task_data, "note_id": note_id, "created_at": created_at},
-            )
-
-        # 4. PERSONA (Batch)
-        if extraction.persona_traits:
-            # Generate embeddings for persona traits
-            from app.services.embedding import embedding_service
-
-            persona_embeddings = {}
-            for t in extraction.persona_traits:
-                # Normalize trait to lowercase
-                trait_lower = t.trait.strip().lower()
-                if not trait_lower:
+            node_embeddings = {}
+            for n in extraction.nodes:
+                norm_name = normalize_name(n.name)
+                if not norm_name:
                     continue
+                text_to_embed = f"{norm_name} ({n.type}): {(n.isolated_context or '')[:200]}"
+                node_embeddings[norm_name] = embedding_service.embed_query(text_to_embed)
 
-                # Use isolated_context if available, fall back to legacy evidence_quote
-                context = (
-                    getattr(t, "isolated_context", "")
-                    or getattr(t, "evidence_quote", "")
-                    or ""
-                )
-                text_to_embed = f"Personality trait: {trait_lower}. Evidence: {context}"
-                persona_embeddings[trait_lower] = embedding_service.embed_query(
-                    text_to_embed
+            # Resolve or assign stable IDs: look up Qdrant first so we reuse
+            # existing IDs for known nodes and generate fresh ones for new nodes.
+            node_data = []
+            for node in extraction.nodes:
+                norm_name = normalize_name(node.name)
+                if not norm_name:
+                    continue
+                existing_id = qdrant_service.find_node_id_by_name(norm_name)
+                is_new = existing_id is None
+                assigned_id = existing_id or f"node_{str(uuid.uuid4())}"
+                node_data.append({
+                    "id": assigned_id,
+                    "name": norm_name,
+                    "type": (node.type or "thing").lower().strip(),
+                    "embedding": node_embeddings.get(norm_name),
+                    "is_new": is_new,
+                })
+                logger.info(
+                    f"  [Ontology] node '{norm_name}' type='{(node.type or 'thing').lower()}' "
+                    f"id={assigned_id} ({'NEW' if is_new else 'EXISTING'})"
                 )
 
-            query_persona = """
-            MERGE (n:Note {id: $note_id})
-            WITH n
+            # Build name→ID map for relationship creation below
+            name_to_id: dict[str, str] = {d["name"]: d["id"] for d in node_data}
+            logger.info(f"[Ontology] {len(node_data)} nodes resolved ({sum(1 for d in node_data if not qdrant_service.find_node_id_by_name(d['name']) is not None)} new) — writing to Neo4j")
+
+            # Write bare structural nodes to Neo4j (id only — no content)
+            query_nodes = """
+            MERGE (note:Indexable {id: $note_id})
+            WITH note
             UNWIND $data AS item
-            // Generic visualization uses 'name'
-            MERGE (p:Persona {trait: item.trait})
-            ON CREATE SET p.name = item.trait
-            SET p:Indexable, p.embedding = item.embedding, p.isolated_context = item.isolated_context
-            MERGE (p)-[r:REVEALED_BY]->(n)
-            SET r.quote = item.isolated_context, 
-                r.created_at = $created_at,
-                r.valid_from = $created_at,
+            MERGE (n:Indexable {id: item.id})
+            MERGE (note)-[r:REFERENCES]->(n)
+            SET r.note_id = $note_id,
                 r.is_active = true
             """
-            persona_data = [
-                {
-                    "trait": t.trait.strip().lower(),
-                    "isolated_context": getattr(t, "isolated_context", "")
-                    or getattr(t, "evidence_quote", "")
-                    or "",
-                    "embedding": persona_embeddings[t.trait.strip().lower()],
-                }
-                for t in extraction.persona_traits
-                if t.trait.strip().lower() in persona_embeddings
-            ]
-            graph_service.execute_query(
-                query_persona,
-                {"data": persona_data, "note_id": note_id, "created_at": created_at},
-            )
 
-        # 5. EXTERNAL REFERENCES (New for Academic/Professional domains)
-        if extraction.references:
-            # Generate embeddings for references
-            from app.services.embedding import embedding_service
-
-            reference_embeddings = {}
-            for ref in extraction.references:
-                # Normalize title and source to lowercase
-                title_lower = ref.title.strip().lower()
-                if not title_lower:
-                    continue
-                source_lower = (ref.source or "Unknown").strip().lower()
-
-                text_to_embed = (
-                    f"{title_lower}: {ref.content or ''} (Source: {source_lower})"
-                )
-                ref_key = f"{title_lower}|{source_lower}"
-                reference_embeddings[ref_key] = embedding_service.embed_query(
-                    text_to_embed
+            if node_data:
+                graph_service.execute_query(
+                    query_nodes,
+                    {"data": [{"id": d["id"]} for d in node_data], "note_id": note_id},
                 )
 
-            query_references = """
-            MERGE (n:Note {id: $note_id})
-            WITH n
-            UNWIND $data AS item
-            MERGE (r:Reference {title: item.title, source: item.source})
-            ON CREATE SET r.type = item.type, r.content = item.content
-            SET r:Indexable, r.embedding = item.embedding, r.name = item.title, r.isolated_context = item.isolated_context
-            MERGE (n)-[rel:CITES]->(r)
-            SET rel.created_at = $created_at,
-                rel.valid_from = $created_at,
-                rel.status = 'active'
-            """
-            reference_data = []
-            for ref in extraction.references:
-                title_lower = ref.title.strip().lower()
-                if not title_lower:
-                    continue
-                source_lower = (ref.source or "Unknown").strip().lower()
-                ref_key = f"{title_lower}|{source_lower}"
-
-                if ref_key in reference_embeddings:
-                    reference_data.append(
+                self._detect_and_create_similarities(
+                    nodes=[
                         {
-                            "title": title_lower,
-                            "type": ref.type,
-                            "content": ref.content,
-                            "source": source_lower,
-                            "isolated_context": getattr(ref, "isolated_context", "")
-                            or "",
-                            "embedding": reference_embeddings[ref_key],
+                            "name": d["name"],
+                            "entity_type": d["type"],
+                            "context": next(
+                                (n.isolated_context for n in extraction.nodes
+                                 if normalize_name(n.name) == d["name"]),
+                                "",
+                            ),
+                            "embedding": d["embedding"],
+                            "node_id": d["id"],
                         }
-                    )
+                        for d in node_data
+                    ],
+                    note_id=note_id,
+                    node_label="Indexable",
+                )
 
-            graph_service.execute_query(
-                query_references,
-                {"data": reference_data, "note_id": note_id, "created_at": created_at},
-            )
+                # Seed Qdrant node_cores stubs for NEW nodes so that
+                # _update_node_summary (running immediately after) finds the
+                # correct ID via find_node_id_by_name instead of minting a
+                # second different ID.  The stub is overwritten moments later
+                # by _update_node_summary with the real description + embedding.
+                for d in node_data:
+                    if d["is_new"] and d["embedding"]:
+                        qdrant_service.upsert_node_core(
+                            node_id=d["id"],
+                            name=d["name"],
+                            node_type=d["type"],
+                            description="",
+                            description_vector=d["embedding"],
+                        )
+                logger.info(
+                    f"[Ontology] Seeded Qdrant stubs for "
+                    f"{sum(1 for d in node_data if d['is_new'])} new node(s)"
+                )
 
         # 6. RELATIONSHIPS (New - Inter-node connections)
         if extraction.relationships:
@@ -560,17 +375,7 @@ class IngestionWorkflow:
                 f"[Ingestion] Creating {len(extraction.relationships)} relationships..."
             )
 
-            # Map extracted node types to Neo4j labels
-            type_mapping = {
-                "Person": "Entity",  # Person entities are stored as Entity nodes
-                "Place": "Entity",
-                "Tool": "Entity",
-                "Organization": "Entity",
-                "Entity": "Entity",
-                "Concept": "Concept",
-                "Task": "Task",
-                "Event": "Entity",  # Events treated as entities
-            }
+            # All nodes are :Indexable — no type mapping needed
 
             for rel in extraction.relationships:
                 try:
@@ -593,16 +398,47 @@ class IngestionWorkflow:
                             f"defaulting to 'relates_to'"
                         )
 
-                    # Map types to Neo4j labels
-                    source_label = type_mapping.get(rel.source_type, "Entity")
-                    target_label = type_mapping.get(rel.target_type, "Entity")
+                    source_label = "Indexable"
+                    target_label = "Indexable"
 
                     # Normalize names to lowercase to match node storage
                     source_name_normalized = rel.source_name.lower().strip()
                     target_name_normalized = rel.target_name.lower().strip()
 
+                    # Look up IDs from the name_to_id map (built from node_data above)
+                    # falling back to Qdrant for nodes not created in this ingestion pass.
+                    src_node_id = (
+                        name_to_id.get(source_name_normalized)
+                        or qdrant_service.find_node_id_by_name(source_name_normalized)
+                        or ""
+                    )
+                    tgt_node_id = (
+                        name_to_id.get(target_name_normalized)
+                        or qdrant_service.find_node_id_by_name(target_name_normalized)
+                        or ""
+                    )
+
+                    if not src_node_id:
+                        logger.warning(
+                            f"  [Ontology] Relationship skipped — source '{source_name_normalized}' "
+                            f"not found in name_to_id or Qdrant"
+                        )
+                        continue
+                    if not tgt_node_id:
+                        logger.warning(
+                            f"  [Ontology] Relationship skipped — target '{target_name_normalized}' "
+                            f"not found in name_to_id or Qdrant"
+                        )
+                        continue
+
+                    logger.debug(
+                        f"  [Ontology] Creating rel: '{source_name_normalized}' "
+                        f"--[{rel_type}]--> '{target_name_normalized}' "
+                        f"(strength={rel.strength}, confidence={rel.confidence}, relevance={rel.relevance}) "
+                        f"NL: '{(rel.natural_language or '')[:80]}'"
+                    )
+
                     # Create or update relationship with bi-temporal support
-                    # event_time = when this fact became true (note's date)
                     result = graph_service.create_or_update_relationship(
                         source_name=source_name_normalized,
                         source_label=source_label,
@@ -610,14 +446,38 @@ class IngestionWorkflow:
                         target_label=target_label,
                         relationship_type=rel_type,
                         confidence=rel.confidence,
-                        context=rel.context,
+                        strength=rel.strength,
+                        relevance=rel.relevance,
+                        natural_language=rel.natural_language or "",
                         note_id=note_id,
-                        event_time=created_at,  # When the fact became true
+                        source_id=src_node_id,
+                        target_id=tgt_node_id,
                     )
 
+                    # Write relationship to Qdrant node_relationships on new/evolved rels.
+                    if result.get("action") in ("created", "evolved") and src_node_id and tgt_node_id:
+                        from app.services.embedding import embedding_service as _emb
+
+                        nl_text = result.get("natural_language") or (
+                            f"{source_name_normalized} "
+                            f"{rel_type.replace('_', ' ')} "
+                            f"{target_name_normalized}"
+                        )
+                        nl_vector = _emb.embed_documents([nl_text])[0]
+                        qdrant_service.upsert_node_relationship(
+                            relationship_id=result["relationship_id"],
+                            natural_language=nl_text,
+                            nl_vector=nl_vector,
+                            source_node_id=src_node_id,
+                            target_node_id=tgt_node_id,
+                        )
+                        logger.debug(
+                            f"  [Ontology] Qdrant rel written: '{nl_text[:100]}'"
+                        )
+
                     logger.info(
-                        f"[Relationship] {result['action']}: "
-                        f"({source_name_normalized})-[{rel_type}]->({target_name_normalized})"
+                        f"  [Ontology] Rel {result['action'].upper()}: "
+                        f"'{source_name_normalized}' --[{rel_type}]--> '{target_name_normalized}'"
                     )
 
                 except Exception as e:
@@ -627,341 +487,245 @@ class IngestionWorkflow:
                     )
                     continue
 
-        # 7. COMMUNITY ASSIGNMENT
-        # Group extracted nodes into domain-based communities
-        self._assign_to_communities(extraction, content)
-
         return title
 
-    def _detect_and_create_aliases(
-        self, entities: list, note_id: str, min_confidence: float = 0.8
+    def _detect_and_create_similarities(
+        self,
+        nodes: list,
+        note_id: str,
+        node_label: str = "Indexable",
+        entity_embeddings: dict = None,
+        min_confidence: float = 0.8,
+        cosine_threshold: float = 0.70,
     ):
         """
-        Detect and create ALIAS_OF relationships for entities that might refer to the same real-world entity.
+        4-gate similarity detection run after nodes are stored.
 
-        This is called during ingestion after entities are created/merged.
-        For each Person entity, we check if existing entities might be aliases.
+        Gate 1 — name similarity  : find_similar_entities (name containment / token overlap)
+        Gate 2 — type match       : built into find_similar_entities query
+        Gate 3 — embedding cosine : ≥ 0.60 between new node and candidate embeddings
+        Gate 4 — LLM verification : detect_similarity returns (has_relationship, confidence, rel_type)
+
+        On success writes a typed relationship such as IS_SHORTENED_TITLE or IS_CANONICAL_NAME_VARIANT.
 
         Args:
-            entities: List of Entity objects from extraction
-            note_id: ID of the note being ingested
-            min_confidence: Minimum confidence threshold for creating alias relationships
+            nodes           : Either extraction entity objects (with .name/.type/.isolated_context)
+                              OR dicts with keys: name, entity_type, context, embedding
+            note_id         : Note being ingested (written to similarity relationship)
+            node_label      : Neo4j label to operate on (Entity, Task, Persona, Concept, Reference)
+            entity_embeddings: Legacy {normalised_name: vector} dict — used when nodes are objects
+            min_confidence  : Gate 4 minimum confidence threshold
         """
+        import math
+
         from app.services.llm import llm_service
 
-        # Helper to normalize names
+        def _cosine(a: list[float], b: list[float]) -> float:
+            if not a or not b or len(a) != len(b):
+                return 0.0
+            dot = sum(x * y for x, y in zip(a, b))
+            mag_a = math.sqrt(sum(x * x for x in a))
+            mag_b = math.sqrt(sum(x * x for x in b))
+            if mag_a == 0 or mag_b == 0:
+                return 0.0
+            return dot / (mag_a * mag_b)
+
         def normalize_name(name: str) -> str:
             if not name:
                 return ""
             return name.lstrip("#").strip().lower()
 
-        # Only check Person entities with multi-word names (most likely to have aliases)
-        person_entities = [
-            e
-            for e in entities
-            if e.type.lower() == "person" and len(e.name.split()) >= 2
+        # Normalize input to dicts regardless of whether objects or dicts were passed
+        def _to_dict(n) -> dict:
+            if isinstance(n, dict):
+                return n
+            # Legacy entity object path
+            raw_name = normalize_name(getattr(n, "name", ""))
+            return {
+                "name": raw_name,
+                "entity_type": getattr(n, "type", ""),
+                "context": getattr(n, "isolated_context", "") or "",
+                "embedding": (entity_embeddings or {}).get(raw_name),
+            }
+
+        # Skip single-word names — too many false positives
+        candidates = [
+            _to_dict(n)
+            for n in nodes
+            if len(
+                normalize_name(
+                    n.get("name", "") if isinstance(n, dict) else getattr(n, "name", "")
+                ).split()
+            )
+            >= 2
         ]
 
-        if not person_entities:
+        if not candidates:
             return
 
         logger.info(
-            f"[Alias] Checking {len(person_entities)} Person entities for potential aliases..."
+            f"[Similarity] Checking {len(candidates)} {node_label} nodes for potential similarities..."
         )
 
-        for entity in person_entities:
-            entity_name = normalize_name(entity.name)
+        for node in candidates:
+            entity_name = normalize_name(node["name"])
+            entity_type = node.get("entity_type", "")
+            entity_vec = node.get("embedding")
+            entity_context = node.get("context", "")
 
             try:
-                # Find potential aliases in the graph
-                potential_aliases = graph_service.find_potential_aliases(
-                    entity_name=entity_name, entity_type=entity.type, limit=5
+                potential_aliases = graph_service.find_similar_entities(
+                    entity_name=entity_name,
+                    entity_type=entity_type,
+                    limit=10,
+                    node_label=node_label,
                 )
 
                 if not potential_aliases:
                     continue
 
-                logger.info(
-                    f"[Alias] Found {len(potential_aliases)} potential aliases for '{entity_name}': "
-                    f"{[p['name'] for p in potential_aliases]}"
-                )
+                existing_aliases = {
+                    a["name"]
+                    for a in graph_service.get_similar_entities(
+                        entity_name, node_label=node_label
+                    )
+                }
 
-                # Get the summary of the new entity for context
-                entity_summary = entity.isolated_context or ""
-
+                gate3_survivors = []
                 for potential in potential_aliases:
                     potential_name = potential.get("name", "")
-                    potential_summary = potential.get("summary", "") or ""
-
-                    # Skip if already an alias
-                    existing_aliases = graph_service.get_aliases(entity_name)
-                    if any(a["name"] == potential_name for a in existing_aliases):
-                        logger.debug(
-                            f"[Alias] {entity_name} <-> {potential_name} already linked"
-                        )
+                    if not potential_name or potential_name in existing_aliases:
                         continue
 
-                    # Use LLM to verify if they're truly the same entity
-                    is_same, confidence = llm_service.verify_alias(
+                    candidate_vec = potential.get("embedding")
+                    if entity_vec and candidate_vec:
+                        sim = _cosine(entity_vec, candidate_vec)
+                        if sim < cosine_threshold:
+                            logger.debug(
+                                f"[Similarity] Gate3 fail: '{entity_name}' <-> "
+                                f"'{potential_name}' cosine={sim:.3f}"
+                            )
+                            continue
+                        logger.debug(
+                            f"[Similarity] Gate3 pass: '{entity_name}' <-> "
+                            f"'{potential_name}' cosine={sim:.3f}"
+                        )
+                    gate3_survivors.append(potential)
+
+                if not gate3_survivors:
+                    continue
+
+                logger.info(
+                    f"[Similarity] {len(gate3_survivors)} gate-3 survivors for "
+                    f"'{entity_name}': {[p['name'] for p in gate3_survivors]}"
+                )
+
+                entity_facts = ""
+                # Use the node_id from the dict if present (populated from name_to_id),
+                # otherwise fall back to Qdrant name lookup.
+                _enid = node.get("node_id") or qdrant_service.find_node_id_by_name(entity_name)
+                if _enid:
+                    _content = qdrant_service.get_node_content_by_id(_enid)
+                    if _content:
+                        facts_raw = _content.get("facts") or []
+                        entity_facts = " ".join(facts_raw) if isinstance(facts_raw, list) else (facts_raw or "")
+
+                for potential in gate3_survivors:
+                    potential_name = potential.get("name", "")
+                    potential_summary = potential.get("summary", "") or ""
+                    potential_facts = potential.get("facts", "") or ""
+                    # Enrich candidate with Qdrant content if not already present
+                    _pot_node_id = potential.get("node_id")
+                    if _pot_node_id and not potential_summary and not potential_facts:
+                        _pot_content = qdrant_service.get_node_content_by_id(_pot_node_id)
+                        if _pot_content:
+                            potential_summary = _pot_content.get("description", "") or ""
+                            facts_raw = _pot_content.get("facts") or []
+                            potential_facts = " ".join(facts_raw) if isinstance(facts_raw, list) else (facts_raw or "")
+
+                    is_same, confidence, rel_type = llm_service.detect_similarity(
                         name1=entity_name,
                         name2=potential_name,
-                        context1=entity_summary,
+                        context1=entity_context,
                         context2=potential_summary,
+                        facts1=entity_facts,
+                        facts2=potential_facts,
                     )
 
                     if is_same and confidence >= min_confidence:
-                        # Create bidirectional ALIAS_OF relationship
-                        result = graph_service.create_alias_relationship(
-                            name1=entity_name,
-                            name2=potential_name,
-                            confidence=confidence,
+                        rel_sentence = (
+                            f"{entity_name} {(rel_type or 'RELATED_TO').lower().replace('_', ' ')} {potential_name}."
+                        )
+                        _src_id = qdrant_service.find_node_id_by_name(entity_name) or ""
+                        _tgt_id = qdrant_service.find_node_id_by_name(potential_name) or ""
+                        graph_service.create_or_update_relationship(
+                            source_name=entity_name,
+                            source_label=node_label,
+                            target_name=potential_name,
+                            target_label=node_label,
+                            relationship_type=rel_type or "RELATED_TO",
+                            confidence=round(confidence * 10, 1),
+                            strength=5.0,
+                            relevance=5.0,
+                            natural_language=rel_sentence,
                             note_id=note_id,
+                            source_id=_src_id,
+                            target_id=_tgt_id,
                         )
                         logger.info(
-                            f"[Alias] {result['action'].upper()}: "
-                            f"'{entity_name}' <-> '{potential_name}' (confidence={confidence:.2f})"
+                            f"[Similarity] RELATIONSHIP CREATED: '{entity_name}' "
+                            f"-[{rel_type}]-> '{potential_name}' confidence={confidence:.2f}"
                         )
                     else:
                         logger.debug(
-                            f"[Alias] Rejected: '{entity_name}' <-> '{potential_name}' "
-                            f"(same={is_same}, confidence={confidence:.2f})"
+                            f"[Similarity] Rejected: '{entity_name}' <-> '{potential_name}' "
+                            f"(has_rel={is_same}, confidence={confidence:.2f})"
                         )
 
             except Exception as e:
                 logger.warning(
-                    f"[Alias] Failed to check aliases for '{entity_name}': {e}"
+                    f"[Similarity] Failed to check similarity for '{entity_name}': {e}"
                 )
                 continue
 
-    def _assign_to_communities(self, extraction: Extraction, content: str):
-        """
-        Assign extracted nodes to a topic-specific community.
-
-        Uses the LLM to name a specific topic from the note (e.g. "Cave Exploration &
-        Speleology" instead of "Personal Knowledge"), then embeds that topic and finds
-        an existing community with cosine-similarity >= 0.75 to merge into.  If none
-        match, a new community is created with the LLM-chosen name.
-        """
-        from app.services.llm import llm_service
-        from app.services.embedding import embedding_service
-
-        # Collect all node names from this extraction
-        node_names: list[str] = []
-        for entity in extraction.entities or []:
-            if entity.name and entity.name.strip():
-                node_names.append(entity.name.strip().title())
-        for concept in extraction.concepts or []:
-            if concept.name and concept.name.strip():
-                node_names.append(concept.name.strip().title())
-
-        if not node_names:
+    async def _queue_leiden_recompute_if_due(self, note_id: str) -> None:
+        rows = graph_service.execute_query(
+            """
+            MATCH (:Indexable {id: $note_id})-[*1]-(n:Indexable)
+            WHERE NOT n:Note AND NOT n:Community AND n.id IS NOT NULL
+            RETURN DISTINCT n.id AS node_id
+            """,
+            {"note_id": note_id},
+        )
+        node_ids = [row["node_id"] for row in rows if row.get("node_id")]
+        if not node_ids:
             return
 
-        # ── Step 1: Ask LLM for a specific topic name ──────────────────────────
-        snippet = content[:1500]
-        topic_prompt = (
-            "You are a knowledge organiser. Read this note and suggest a specific, "
-            "descriptive topic name (3-7 words) for its main theme.\n\n"
-            'GOOD: "Cave Exploration & Speleology", "Distributed Systems Latency", '
-            '"Personal Finance & Investing", "Medieval Architecture & History"\n'
-            'BAD:  "Personal Knowledge", "Academic Knowledge", "General", "Notes"\n\n'
-            f"Note:\n{snippet}\n\n"
-            "Reply with ONLY the topic name, nothing else."
-        )
-        raw_topic = (
-            (llm_service.reason(topic_prompt) or "").strip().strip('"').strip("'")
+        _, queue_size = await ingestion_tracker.queue_nodes_for_community_recompute(node_ids)
+        logger.info(
+            f"[Community] Queued {len(node_ids)} node IDs for Leiden recompute "
+            f"(queue size: {queue_size}) — IDs: {node_ids[:10]}{'...' if len(node_ids) > 10 else ''}"
         )
 
-        # Fallback to domain bucket when LLM returns something too generic
-        domain = llm_service.detect_domain(content)
-        _bad = {"knowledge", "notes", "general", "content", "information"}
-        if not raw_topic or len(raw_topic) < 4 or raw_topic.lower() in _bad:
-            raw_topic = f"{domain} Knowledge"
-
-        # ── Step 2: Embed the topic for similarity matching ────────────────────
-        topic_embedding = embedding_service.embed_query(raw_topic)
-        if not topic_embedding:
-            # Can still create community without embedding; summary step adds it later
-            community_name = raw_topic
-        else:
-            # ── Step 3: Find an existing community close enough to merge into ──
-            similar = graph_service.search_communities(
-                vector=topic_embedding, top_k=3, min_score=0.75
-            )
-            if similar:
-                community_name = similar[0]["name"]
-                logger.info(
-                    f"[Community] Merging {len(node_names)} nodes into existing "
-                    f"'{community_name}' (score={similar[0].get('score', 0):.2f}, "
-                    f"topic='{raw_topic}')"
-                )
-            else:
-                community_name = raw_topic
-                logger.info(
-                    f"[Community] Creating new community '{community_name}' "
-                    f"for {len(node_names)} nodes"
-                )
-
-        # ── Step 4: Add nodes and regenerate summary ───────────────────────────
-        try:
-            graph_service.create_or_update_community(
-                name=community_name,
-                domain=domain,
-                member_names=node_names,
-            )
-            logger.info(
-                f"[Community] Assigned {len(node_names)} nodes to '{community_name}'"
-            )
-            self._update_community_summary(community_name, domain)
-        except Exception as e:
-            logger.warning(f"[Community] Failed to assign to community: {e}")
-
-    def _update_community_summary(self, community_name: str, domain: str):
+    async def _update_neighborhoods(self, nodes, new_content: str):
         """
-        Generate a high-level summary for a community based on its member nodes.
-        """
-        from app.services.llm import llm_service
-
-        try:
-            # Get community members with their summaries
-            community_data = graph_service.get_community_summary(community_name)
-            if not community_data or not community_data.get("top_members"):
-                return
-
-            # Gather member summaries for context
-            member_contexts = []
-            for member in community_data.get("top_members", []):
-                if member and member.get("summary"):
-                    member_contexts.append(
-                        f"- {member.get('name')} ({member.get('label')}): {member.get('summary')}"
-                    )
-
-            if not member_contexts:
-                return
-
-            # Generate community-level summary using the summarize method
-            context_text = "\n".join(member_contexts[:10])  # Limit to top 10
-            summary_input = f"""This is a {domain} knowledge cluster containing:
-
-{context_text}
-
-Summarize the common themes and key insights that connect these items."""
-
-            summary = llm_service.summarize(summary_input)
-            if summary and summary.strip():
-                # Extract themes from member names
-                themes = [
-                    m.get("name")
-                    for m in community_data.get("top_members", [])[:5]
-                    if m.get("name")
-                ]
-
-                # Generate embedding for the community summary
-                from app.services.embedding import embedding_service
-
-                community_embedding = embedding_service.embed_query(
-                    f"Community: {community_name}. {summary.strip()}"
-                )
-
-                graph_service.update_community_summary(
-                    community_name,
-                    summary.strip(),
-                    themes,
-                    embedding=community_embedding,
-                )
-                logger.info(
-                    f"[Community] Updated summary and embedding for '{community_name}'"
-                )
-
-        except Exception as e:
-            logger.warning(
-                f"[Community] Failed to generate summary for {community_name}: {e}"
-            )
-
-    async def _update_neighborhoods(
-        self, concepts, entities, tasks, persona_traits, references, new_content: str
-    ):
-        """
-        Refreshes the summaries of concepts, entities, tasks, personas, and references affected by this note.
+        Refreshes the summaries of all nodes affected by this note.
         Parallelizes updates to reduce total latency.
-
-        LLM-NATIVE ISOLATION: Uses the `isolated_context` field from the LLM extraction
-        instead of trying to compute context windows in Python.
         """
         tasks_list = []
 
-        # Update Concepts - use LLM-provided isolated_context
-        for concept in concepts or []:
-            # Normalize to match storage (lowercase)
-            name = concept.name.strip().lower()
+        for node in nodes or []:
+            name = (node.name or "").lstrip("#").strip().lower()
             if not name:
                 continue
-            # Use isolated_context from LLM if available, fall back to full content
-            context = getattr(concept, "isolated_context", "") or new_content
-            tasks_list.append(self._update_node_summary("Concept", name, context))
-
-        # Update Entities - use LLM-provided isolated_context
-        for entity in entities or []:
-            name = entity.name.strip()
-            if not name:
-                continue
-            # Normalize entity names to match storage (lowercase, strip # prefix)
-            name = name.lstrip("#").strip().lower()
-            # Use isolated_context from LLM if available, fall back to full content
-            context = getattr(entity, "isolated_context", "") or new_content
-            tasks_list.append(self._update_node_summary("Entity", name, context))
-
-        # Update Tasks - use LLM-provided isolated_context
-        def normalize_task_name(name: str) -> str:
-            """Normalize task names for consistent lookup (must match storage normalization)"""
-            if not name:
-                return ""
-            # Remove # symbols and lowercase to match how tasks are stored
-            name = name.replace("#", "").strip().lower()
-            return name
-
-        for task in tasks or []:
-            # Prefer name for node label, fall back to description
-            raw_name = (task.name or task.description or "").strip()
-            if not raw_name:
-                continue
-            # Normalize to match how tasks are stored in Neo4j
-            name = normalize_task_name(raw_name)
-            # Use isolated_context from LLM if available, fall back to full content
-            context = getattr(task, "isolated_context", "") or new_content
-            tasks_list.append(
-                self._update_node_summary("Task", name, context, identifier_key="name")
-            )
-
-        # Update Personas - use LLM-provided isolated_context
-        for trait in persona_traits or []:
-            t_text = trait.trait.strip()
-            if not t_text:
-                continue
-            # Use isolated_context from LLM if available, fall back to full content
-            context = getattr(trait, "isolated_context", "") or new_content
-            tasks_list.append(
-                self._update_node_summary(
-                    "Persona", t_text, context, identifier_key="trait"
-                )
-            )
-
-        # Update References - use LLM-provided isolated_context
-        for reference in references or []:
-            ref_title = reference.title.strip()
-            if not ref_title:
-                continue
-            # Use isolated_context from LLM if available, fall back to full content
-            context = getattr(reference, "isolated_context", "") or new_content
-            tasks_list.append(
-                self._update_node_summary(
-                    "Reference", ref_title, context, identifier_key="title"
-                )
-            )
+            context = getattr(node, "isolated_context", "") or new_content
+            ntype = (getattr(node, "type", "") or "").lower().strip() or "thing"
+            tasks_list.append(self._update_node_summary("Indexable", name, context, node_type=ntype))
 
         if tasks_list:
-            # Use asyncio.gather for batch processing with Gemini's async API
+            logger.info(f"[Neighborhood] Updating {len(tasks_list)} node summaries in parallel…")
             await asyncio.gather(*tasks_list)
+            logger.info(f"[Neighborhood] {len(tasks_list)} node summaries update complete.")
 
     async def _update_node_summary(
         self,
@@ -969,6 +733,7 @@ Summarize the common themes and key insights that connect these items."""
         name: str,
         isolated_context: str,
         identifier_key: str = "name",
+        node_type: str = "",
     ):
         """
         Updates a node's summary by accumulating ALL isolated contexts.
@@ -989,223 +754,682 @@ Summarize the common themes and key insights that connect these items."""
         async with entity_lock_manager.get_lock(label, name):
             loop = asyncio.get_running_loop()
 
-            # 1. Fetch existing isolated_contexts list
+            # 1. Get node_id from Qdrant (name is authoritative there), not from Neo4j.
             def _get_existing():
-                return graph_service.execute_query(
-                    f"MATCH (n:{label} {{{identifier_key}: $name}}) RETURN n.isolated_contexts as isolated_contexts",
-                    {"name": name},
+                return qdrant_service.find_node_id_by_name(name)
+
+            node_id: str | None = await loop.run_in_executor(None, _get_existing)
+            existing_contexts: list[str] = []
+
+            existing_facts_set: set[str] = set()
+            existing_questions_set: set[str] = set()
+
+            if node_id:
+                # Fetch existing isolated_contexts, facts, and questions from Qdrant
+                def _get_qdrant_contexts():
+                    _content = qdrant_service.get_node_content_by_id(node_id)
+                    return _content or {}
+
+                _existing_content = await loop.run_in_executor(None, _get_qdrant_contexts)
+                existing_contexts = _existing_content.get("isolated_contexts", [])
+                existing_facts_set = set(_existing_content.get("facts", []))
+                existing_questions_set = set(_existing_content.get("potential_questions", []))
+                logger.info(
+                    f"  [NodeSummary] '{name}' EXISTING id={node_id} "
+                    f"— {len(existing_contexts)} prior context(s), "
+                    f"{len(existing_facts_set)} facts, {len(existing_questions_set)} questions fetched from Qdrant"
+                )
+            else:
+                # New node — mint an ID and ensure the structural node exists in Neo4j
+                node_id = f"node_{str(uuid.uuid4())}"
+                logger.info(
+                    f"  [NodeSummary] '{name}' NEW id={node_id} — minting and writing structural Neo4j node"
                 )
 
-            res = await loop.run_in_executor(None, _get_existing)
-            existing_contexts = res[0].get("isolated_contexts") if res else None
+                def _merge_node():
+                    graph_service.execute_query(
+                        f"MERGE (n:{label} {{id: $node_id}})",
+                        {"node_id": node_id},
+                    )
 
-            # Initialize as list if doesn't exist
-            if not existing_contexts:
-                existing_contexts = []
+                await loop.run_in_executor(None, _merge_node)
 
             # 2. Append new context to list
             existing_contexts.append(isolated_context)
+            logger.debug(
+                f"  [NodeSummary] '{name}' context count after append: {len(existing_contexts)}"
+            )
 
-            # 3. Generate summary from ALL contexts joined together
+            # 3. Generate description from ALL contexts joined together
             all_contexts_text = "\n\n".join(existing_contexts)
+            logger.info(
+                f"  [NodeSummary] '{name}' calling LLM to generate description from "
+                f"{len(existing_contexts)} context(s) ({len(all_contexts_text)} total chars)"
+            )
 
             summary_data = await llm_service.generate_entity_summary_async(
                 all_contexts_text,
                 name,
                 label,
             )
+            description = summary_data["description"]
+            logger.info(
+                f"  [NodeSummary] '{name}' description generated: {len(description or '')} chars"
+            )
+            logger.debug(
+                f"  [NodeSummary] '{name}' description preview: {(description or '')[:160]}..."
+            )
 
-            # [Improvement #4] Extract structured atomic facts for direct-match retrieval.
-            # Runs synchronously in a thread so it doesn't block the event loop.
+            # Fetch the actual LLM-assigned semantic type for this node.
+            # For existing nodes, read from Qdrant. For new nodes, use the type
+            # supplied by the caller (from extraction output), defaulting to "thing".
+            def _get_node_type():
+                _content = qdrant_service.get_node_content_by_id(node_id)
+                if _content and _content.get("type"):
+                    return _content["type"]
+                return (node_type or "thing").lower().strip() or "thing"
+
+            _node_type_val = await loop.run_in_executor(None, _get_node_type)
+
+            node_type = _node_type_val
+
+            # Extract atomic facts as proposition sentences
             def _extract_facts():
                 return llm_service.extract_atomic_facts(all_contexts_text, name, label)
 
-            facts_list = await loop.run_in_executor(None, _extract_facts)
+            facts_list: list[str] = await loop.run_in_executor(None, _extract_facts)
             import json as _json
 
             facts_json = _json.dumps(facts_list) if facts_list else "[]"
-            if facts_list:
+            logger.info(
+                f"  [NodeSummary] '{name}' extracted {len(facts_list)} atomic fact(s)"
+            )
+            for _fi, _fact in enumerate(facts_list or []):
+                logger.debug(f"    [NodeSummary] fact[{_fi}]: {_fact}")
+
+            # Generate potential questions
+            def _gen_questions():
+                return llm_service.generate_potential_questions(
+                    name=name,
+                    node_type=node_type,
+                    description=description,
+                    facts_list=facts_list or [],
+                )
+
+            potential_questions: list[str] = await loop.run_in_executor(
+                None, _gen_questions
+            )
+            logger.info(
+                f"  [NodeSummary] '{name}' generated {len(potential_questions)} potential question(s)"
+            )
+            for _qi, _q in enumerate(potential_questions or []):
+                logger.debug(f"    [NodeSummary] question[{_qi}]: {_q}")
+
+            # Merge new facts with existing ones — union, deduplicated by lowercased text.
+            # This ensures re-ingestion never loses facts from prior ingestions.
+            if existing_facts_set:
+                _existing_lower = {f.lower() for f in existing_facts_set}
+                _merged_facts = list(existing_facts_set)
+                for _f in facts_list:
+                    if _f.strip() and _f.strip().lower() not in _existing_lower:
+                        _merged_facts.append(_f.strip())
+                        _existing_lower.add(_f.strip().lower())
+                facts_list = _merged_facts
                 logger.info(
-                    f"  [Ingestion] Extracted {len(facts_list)} atomic facts for {label}: {name}"
+                    f"  [NodeSummary] '{name}' facts after merge: {len(facts_list)} total "
+                    f"({len(existing_facts_set)} prior + new)"
+                )
+
+            # Merge new questions with existing ones — same dedup strategy.
+            if existing_questions_set:
+                _existing_q_lower = {q.lower() for q in existing_questions_set}
+                _merged_questions = list(existing_questions_set)
+                for _q in potential_questions:
+                    if _q.strip() and _q.strip().lower() not in _existing_q_lower:
+                        _merged_questions.append(_q.strip())
+                        _existing_q_lower.add(_q.strip().lower())
+                potential_questions = _merged_questions
+                logger.info(
+                    f"  [NodeSummary] '{name}' questions after merge: {len(potential_questions)} total "
+                    f"({len(existing_questions_set)} prior + new)"
                 )
 
             logger.info(
-                f"  [Ingestion] Generated summary from {len(existing_contexts)} context(s) for {label}: {name}"
+                f"  [NodeSummary] '{name}' generating embeddings for description + "
+                f"{len(facts_list or [])} facts + {len(potential_questions)} questions + "
+                f"{len(existing_contexts)} contexts"
             )
 
-            # 4. Generate embedding for summary
+            # 4. Generate embeddings for Qdrant writes
             from app.services.embedding import embedding_service
 
-            def _generate_embedding():
-                # Include atomic facts so fact-specific queries ("Where is X from?")
-                # surface this node via vector search even when the summary is brief.
-                facts_str = ""
-                if facts_list:
-                    facts_str = " Facts: " + "; ".join(
-                        f"{f['property']}: {f['value']}" for f in facts_list
-                    )
-                text_to_embed = (
-                    f"{summary_data['title']}: {summary_data['summary']}{facts_str}"
+            def _generate_embeddings():
+                # Embed description for node_cores
+                desc_vector = embedding_service.embed_documents([description])[0]
+
+                # Embed each proposition fact sentence
+                fact_items = []
+                for fact_sentence in facts_list or []:
+                    vec = embedding_service.embed_documents([fact_sentence])[0]
+                    fact_items.append({"content": fact_sentence, "vector": vec})
+
+                # Embed each potential question
+                question_items = []
+                for q in potential_questions:
+                    vec = embedding_service.embed_documents([q])[0]
+                    question_items.append({"content": q, "vector": vec})
+
+                # Embed each isolated context
+                context_items = []
+                for ctx in existing_contexts:
+                    if ctx and ctx.strip():
+                        vec = embedding_service.embed_documents([ctx])[0]
+                        context_items.append({"content": ctx, "vector": vec})
+
+                return (
+                    desc_vector,
+                    fact_items,
+                    question_items,
+                    context_items,
                 )
-                # Use embed_documents (no instruction) for document indexing
-                # Only queries should have instruction prefix (for Qwen3)
-                return embedding_service.embed_documents([text_to_embed])[0]
 
-            new_embedding = await loop.run_in_executor(None, _generate_embedding)
+            (
+                desc_vector,
+                fact_items,
+                question_items,
+                context_items,
+            ) = await loop.run_in_executor(None, _generate_embeddings)
+            logger.debug(
+                f"  [NodeSummary] '{name}' embeddings generated: "
+                f"desc=1, facts={len(fact_items)}, questions={len(question_items)}, contexts={len(context_items)}"
+            )
 
-            # NOTE: isolated_context_embeddings removed after A/B testing
-            # Testing showed sub-par/on-par performance vs summaries, adds overhead
-            # Keeping only summary embeddings for vector search
-            # context_embeddings = []  # Removed
-
-            # 5. Save isolated_contexts list and summary (no context embeddings)
+            # 5. Ensure the Neo4j structural node exists with this ID and carry
+            # name + type so the graph endpoint never needs Qdrant for display labels.
             def _save_update():
                 graph_service.execute_query(
-                    f"MATCH (n:{label} {{{identifier_key}: $name}}) "
-                    f"SET n.isolated_contexts = $isolated_contexts, "
-                    f"n.isolated_context_count = $context_count, "
-                    f"n.summary = $summary, n.title = $title, n.embedding = $embedding, "
-                    f"n.facts = $facts, n:Indexable",
-                    {
-                        "name": name,
-                        "isolated_contexts": existing_contexts,
-                        "context_count": len(existing_contexts),
-                        "summary": summary_data["summary"],
-                        "title": summary_data["title"],
-                        "embedding": new_embedding,
-                        "facts": facts_json,
-                    },
+                    f"MERGE (n:{label} {{id: $node_id}}) SET n.name = $name, n.type = $type",
+                    {"node_id": node_id, "name": name, "type": node_type or "unknown"},
                 )
 
             await loop.run_in_executor(None, _save_update)
+            logger.debug(f"  [NodeSummary] '{name}' Neo4j structural MERGE done")
+
+            # 6. Write to Qdrant (description → node_cores; items → sub-collections)
+            def _write_qdrant():
+                qdrant_service.upsert_node_core(
+                    node_id=node_id,
+                    name=name,
+                    node_type=node_type,
+                    description=description,
+                    description_vector=desc_vector,
+                )
+                qdrant_service.upsert_node_items(
+                    collection_name=settings.QDRANT_COLLECTION_NODE_FACTS,
+                    node_id=node_id,
+                    items=fact_items,
+                )
+                qdrant_service.upsert_node_items(
+                    collection_name=settings.QDRANT_COLLECTION_NODE_QUESTIONS,
+                    node_id=node_id,
+                    items=question_items,
+                )
+                qdrant_service.upsert_node_items(
+                    collection_name=settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
+                    node_id=node_id,
+                    items=context_items,
+                )
+
+            await loop.run_in_executor(None, _write_qdrant)
             logger.info(
-                f"  Summary updated for {label}: {name} (Title: {summary_data['title']})"
+                f"  [NodeSummary] '{name}' Qdrant write complete — "
+                f"node_cores(1) + facts({len(fact_items)}) + "
+                f"questions({len(question_items)}) + contexts({len(context_items)})"
             )
 
-    def rebuild_semantic_communities(
-        self, min_community_size: int = 4, max_members_for_prompt: int = 15
-    ) -> int:
+            # 7. Write to Elasticsearch
+            def _write_es():
+                # Fetch relationship NL sentences from Qdrant (not Neo4j)
+                rel_qdrant = qdrant_service.get_relationships_for_node_ids([node_id])
+                rel_nl = " ".join(
+                    r.get("natural_language", "") for r in rel_qdrant if r.get("natural_language")
+                )
+                facts_text = " ".join(facts_list or [])
+                questions_text = " ".join(potential_questions)
+                contexts_text = " ".join(
+                    ctx for ctx in existing_contexts if ctx and ctx.strip()
+                )
+                elasticsearch_service.index_node(
+                    node_id=node_id,
+                    name=name,
+                    node_type=node_type,
+                    description=description,
+                    facts_text=facts_text,
+                    questions_text=questions_text,
+                    isolated_contexts_text=contexts_text,
+                    relationship_natural_language=rel_nl,
+                )
+
+            await loop.run_in_executor(None, _write_es)
+            logger.info(
+                f"  [NodeSummary] '{name}' Elasticsearch index complete"
+            )
+
+            logger.info(
+                f"  [NodeSummary] ✓ COMPLETE: '{name}' (type='{node_type}', id={node_id})"
+            )
+
+    @staticmethod
+    def _parse_name_summary(raw: str) -> tuple[str | None, str | None]:
+        """Parse ``NAME: ...\nSUMMARY: ...`` LLM output into (name, summary)."""
+        name: str | None = None
+        summary_lines: list[str] = []
+        in_summary = False
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if stripped.upper().startswith("NAME:") and not in_summary:
+                name = stripped.split(":", 1)[1].strip()
+            elif stripped.upper().startswith("SUMMARY:"):
+                in_summary = True
+                first = stripped.split(":", 1)[1].strip()
+                if first:
+                    summary_lines.append(first)
+            elif in_summary:
+                summary_lines.append(stripped)
+        summary = " ".join(s for s in summary_lines if s) or None
+        return name, summary
+
+    @staticmethod
+    def _format_member_context(rows: list[dict]) -> str:
+        """Format member node rows into a bulleted context string for LLM prompts."""
+        lines = [
+            f"- {row.get('name')} ({(row.get('labels') or ['Node'])[0]}): "
+            f"{row.get('description') or ''}"
+            for row in rows
+            if row.get("description")
+        ]
+        if not lines:
+            lines = [
+                f"- {row.get('name')} ({(row.get('labels') or ['Node'])[0]})"
+                for row in rows
+            ]
+        return "\n".join(lines)
+
+    def _build_community_summary(
+        self,
+        member_rows: list[dict],
+        community_level: int,
+    ) -> tuple[str | None, str | None]:
+        """Generate a community name and summary in a single LLM call.
+
+        All member descriptions are passed at once — no chunking.  The LLM context
+        window is large enough to handle even the biggest L2 communities (~220 nodes).
+        L1 and L0 summaries should use ``_build_rollup_summary`` instead, which rolls
+        up from child community summaries rather than raw node descriptions.
         """
-        Replace/augment domain-based communities with topology-derived Louvain clusters.
+        context = self._format_member_context(member_rows)
+        prompt = (
+            "These knowledge-graph nodes form a community discovered by graph clustering.\n\n"
+            f"Community level: {community_level}\n"
+            f"Members ({len(member_rows)} total):\n{context}\n\n"
+            "Give this community:\n"
+            "1. A short descriptive name (3-8 words)\n"
+            "2. A thorough summary covering what connects the members, key themes, "
+            "notable relationships, and any important patterns or distinctions. "
+            "Write as many sentences as needed — do not artificially constrain length.\n\n"
+            "Reply in EXACTLY this format:\n"
+            "NAME: <name>\n"
+            "SUMMARY: <summary>"
+        )
+        raw = llm_service.reason(prompt) or ""
+        return self._parse_name_summary(raw)
 
-        Each cluster is named and summarised by the LLM based on the actual content
-        of its members, producing descriptions like:
-          "Distributed Systems & African Power Grid Latency"
-        instead of the generic "Academic Knowledge".
+    def _build_rollup_summary(
+        self,
+        child_community_rows: list[dict],
+        community_level: int,
+    ) -> tuple[str | None, str | None]:
+        """Generate a community name and summary by rolling up from child community summaries.
 
-        Call this after a batch ingestion run (not per-note — it touches the whole graph).
-
-        Returns:
-            Number of semantic communities created/updated.
+        Used for L1 (rolls up L2 descriptions) and L0 (rolls up L1 descriptions).
+        All child summaries are passed in a single LLM call — no chunking.
         """
-        from app.services.llm import llm_service
+        if not child_community_rows:
+            return None, None
+        context = "\n".join(
+            f"- {row['name']}: {row['summary']}"
+            for row in child_community_rows
+            if row.get("summary")
+        )
+        if not context:
+            return None, None
+        prompt = (
+            "You are summarizing a high-level knowledge-graph community.\n\n"
+            f"Community level: {community_level} (higher level = more specific; "
+            "lower level = broader and more abstract)\n\n"
+            f"The following are summaries of {len(child_community_rows)} sub-communities "
+            "that together make up this parent community:\n\n"
+            f"{context}\n\n"
+            "Synthesize a unified description for this parent community:\n"
+            "1. A short descriptive name (3-8 words) capturing the overarching theme\n"
+            "2. A thorough summary covering the overarching themes, what connects all "
+            "sub-communities, major patterns, and the big-picture significance. "
+            "Write as many sentences as needed.\n\n"
+            "Reply in EXACTLY this format:\n"
+            "NAME: <name>\n"
+            "SUMMARY: <summary>"
+        )
+        raw = llm_service.reason(prompt) or ""
+        return self._parse_name_summary(raw)
+
+    def rebuild_leiden_communities(self) -> int:
+        """Run a full 3-level Leiden recomputation and rebuild community nodes.
+
+        Cooperative cancellation: checks ``ingestion_tracker.cancel_recompute`` between every
+        cluster summary.  When set, the run exits early (returning the count built so far) so a
+        pending ingestion can proceed.  The tracker resets the flag and reschedules the full run
+        after the next 2-minute idle window.
+        """
+        import igraph as ig
+        import leidenalg
+
         from app.services.embedding import embedding_service
-
-        logger.info("[Community] Starting Louvain semantic community rebuild...")
-
-        try:
-            raw_communities = graph_service.compute_louvain_communities(
-                min_community_size=min_community_size
-            )
-        except ImportError as exc:
-            logger.warning(f"[Community] Louvain skipped — missing dependency: {exc}")
-            return 0
-        except Exception as exc:
-            logger.error(f"[Community] Louvain detection failed: {exc}")
-            return 0
+        from app.services.ingestion_tracker import ingestion_tracker as _tracker
 
         logger.info(
-            f"[Community] Louvain found {len(raw_communities)} structural communities "
-            f"(min size {min_community_size})"
+            f"\n{'='*70}\n"
+            f"[Community] Starting full Leiden community recompute\n"
+            f"{'='*70}"
         )
 
-        created = 0
-        for cid, member_names in raw_communities.items():
-            try:
-                # Fetch summaries for a representative sample of members
-                sample_names = member_names[:max_members_for_prompt]
-                rows = graph_service.execute_query(
-                    """
-                    MATCH (n:Indexable)
-                    WHERE n.name IN $names AND n.summary IS NOT NULL
-                    RETURN n.name AS name, n.summary AS summary,
-                           labels(n) AS labels
-                    LIMIT $limit
-                    """,
-                    {"names": sample_names, "limit": max_members_for_prompt},
-                )
+        nodes = graph_service.get_indexable_nodes_for_communities()
+        if not nodes:
+            logger.warning("[Community] No indexable nodes found — aborting Leiden recompute.")
+            return 0
 
-                if not rows:
-                    continue
+        logger.info(f"[Community] {len(nodes)} indexable nodes fetched from Neo4j")
 
-                context = "\n".join(
-                    f"- {r['name']} "
-                    f"({r['labels'][0] if r.get('labels') else 'Node'}): "
-                    f"{(r.get('summary') or '')[:200]}"
-                    for r in rows
-                )[:2500]
+        # Enrich structural node rows with content from Qdrant (description, facts)
+        _node_ids_for_leiden = [n["node_id"] for n in nodes if n.get("node_id")]
+        if _node_ids_for_leiden:
+            _qdrant_content_map = qdrant_service.get_nodes_content_by_ids(_node_ids_for_leiden)
+            for n in nodes:
+                _nid = n.get("node_id")
+                if _nid and _nid in _qdrant_content_map:
+                    _c = _qdrant_content_map[_nid]
+                    n["description"] = _c.get("description", "")
+                    n["facts"] = _c.get("facts", [])
+            _enriched = sum(1 for n in nodes if n.get("description"))
+            logger.info(
+                f"[Community] Qdrant content enrichment: {_enriched}/{len(nodes)} nodes "
+                f"enriched with description"
+            )
 
-                if not context.strip():
-                    continue
+        edges = graph_service.get_weighted_relationships_for_communities()
+        logger.info(
+            f"[Community] {len(edges)} weighted edges fetched from Neo4j for igraph"
+        )
+        old_community_ids = graph_service.clear_all_communities()
+        logger.info(
+            f"[Community] Cleared {len(old_community_ids)} old community nodes "
+            f"(Neo4j + Qdrant + ES)"
+        )
+        for old_community_id in old_community_ids:
+            qdrant_service.delete_node(old_community_id)
+            elasticsearch_service.delete_node(old_community_id)
 
-                # Ask the LLM to name and summarise this cluster
-                prompt = (
-                    "These knowledge-graph nodes form a densely connected cluster.\n\n"
-                    f"{context}\n\n"
-                    "Give this cluster:\n"
-                    "1. A short descriptive name (5-8 words, e.g. "
-                    '"Distributed Systems & Latency in African Power Grids")\n'
-                    "2. A single sentence summarising the common theme\n\n"
-                    "Reply in EXACTLY this format:\n"
-                    "NAME: <name>\n"
-                    "SUMMARY: <summary>"
-                )
+        node_ids = [node["node_id"] for node in nodes]
+        node_lookup = {node["node_id"]: node for node in nodes}
+        node_index = {node_id: idx for idx, node_id in enumerate(node_ids)}
 
-                raw = llm_service.reason(prompt) or ""
-                name: str | None = None
-                summary: str | None = None
-                for line in raw.splitlines():
-                    line = line.strip()
-                    if line.upper().startswith("NAME:"):
-                        name = line.split(":", 1)[1].strip()
-                    elif line.upper().startswith("SUMMARY:"):
-                        summary = line.split(":", 1)[1].strip()
+        graph = ig.Graph()
+        graph.add_vertices(len(node_ids))
+        graph.vs["name"] = node_ids
 
-                if not name:
-                    name = f"Semantic Cluster {cid}"
-                if not summary:
-                    summary = (
-                        f"Structural cluster of {len(member_names)} related nodes."
-                    )
-
-                # Generate embedding for the new community summary
-                community_embedding = embedding_service.embed_query(
-                    f"Community: {name}. {summary}"
-                )
-                themes = [r["name"] for r in rows[:5]]
-
-                graph_service.create_or_update_community(
-                    name=name,
-                    domain="Semantic",
-                    member_names=member_names,
-                    summary=summary,
-                    themes=themes,
-                )
-                graph_service.update_community_summary(
-                    name, summary, themes, embedding=community_embedding
-                )
-                logger.info(
-                    f"[Community] Created '{name}' "
-                    f"({len(member_names)} nodes, cluster {cid})"
-                )
-                created += 1
-
-            except Exception as exc:
-                logger.warning(f"[Community] Failed to process cluster {cid}: {exc}")
+        edge_list = []
+        weights = []
+        for edge in edges:
+            source_node_id = edge.get("source_node_id")
+            target_node_id = edge.get("target_node_id")
+            if source_node_id not in node_index or target_node_id not in node_index:
                 continue
+            edge_list.append((node_index[source_node_id], node_index[target_node_id]))
+            weights.append(float(edge.get("weight") or 1.0))
+
+        if edge_list:
+            graph.add_edges(edge_list)
+            if weights:
+                graph.es["weight"] = weights
 
         logger.info(
-            f"[Community] Semantic community rebuild complete: {created} communities."
+            f"[Community] igraph built: {graph.vcount()} vertices, {graph.ecount()} edges "
+            f"({len(edge_list)} weighted edges added)"
+        )
+
+        # Process L2 first (most specific), then L1, then L0.
+        # L1 summaries roll up from L2 child community summaries.
+        # L0 summaries roll up from L1 child community summaries.
+        # This guarantees every community has a real LLM description, not a placeholder.
+        resolutions = [
+            (2, 0.01),    # Mid — 50-100 communities, specific topics
+            (1, 0.001),   # Broad — 10-20 communities, major topic clusters
+            (0, 0.0001),  # Very broad — 3-5 massive communities, highest level themes
+        ]
+        logger.info(f"[Community] Running CPMVertexPartition at {len(resolutions)} resolution levels (L2→L1→L0)")
+
+        level_assignments: dict[str, dict[int, str]] = {}  # node_id → {level → community_id}
+        # Track summaries and names as we build L2 → L1 → L0 so higher levels can roll up
+        community_summaries: dict[str, str] = {}   # community_id → summary text
+        community_names: dict[str, str] = {}       # community_id → display name
+        created = 0
+
+        for community_level, resolution in resolutions:
+            if graph.ecount() > 0:
+                partition = leidenalg.find_partition(
+                    graph,
+                    leidenalg.CPMVertexPartition,
+                    weights=weights,
+                    resolution_parameter=resolution,
+                )
+                membership = partition.membership
+                cluster_map: dict[int, list[str]] = {}
+                for idx, cluster_id in enumerate(membership):
+                    cluster_map.setdefault(cluster_id, []).append(node_ids[idx])
+                clusters = list(cluster_map.values())
+            else:
+                clusters = [[node_id] for node_id in node_ids]
+
+            logger.info(
+                f"[Community] Leiden level {community_level} (resolution={resolution}) produced "
+                f"{len(clusters)} clusters | sizes: min={min(len(c) for c in clusters)}, "
+                f"max={max(len(c) for c in clusters)}, "
+                f"avg={sum(len(c) for c in clusters)/len(clusters):.1f}"
+            )
+
+            # Determine which child level to roll up from for L0/L1
+            child_level = community_level + 1  # L1→L2, L0→L1
+
+            for cluster_index, member_node_ids in enumerate(clusters):
+                # Yield to a pending ingestion if one has arrived.
+                if _tracker.cancel_recompute.is_set():
+                    logger.info(
+                        f"[Community] Recompute cancelled at L{community_level} "
+                        f"cluster {cluster_index + 1}/{len(clusters)} — "
+                        "ingestion arrived; will restart after next idle window."
+                    )
+                    return created
+
+                member_rows = [
+                    node_lookup[node_id]
+                    for node_id in member_node_ids
+                    if node_id in node_lookup
+                ]
+                if not member_rows:
+                    continue
+
+                logger.info(
+                    f"[Community] Summarizing L{community_level} cluster "
+                    f"{cluster_index + 1}/{len(clusters)} ({len(member_rows)} members)"
+                )
+                try:
+                    if community_level == 2:
+                        # L2: summarize directly from member node descriptions
+                        name, summary = self._build_community_summary(member_rows, community_level)
+                    else:
+                        # L1/L0: roll up from child community summaries
+                        child_community_ids = {
+                            level_assignments[nid].get(child_level)
+                            for nid in member_node_ids
+                            if nid in level_assignments and level_assignments[nid].get(child_level)
+                        }
+                        child_rows = [
+                            {"name": community_names.get(cid, cid), "summary": community_summaries[cid]}
+                            for cid in child_community_ids
+                            if cid in community_summaries
+                        ]
+                        if child_rows:
+                            logger.info(
+                                f"[Community] L{community_level} cluster {cluster_index + 1}: "
+                                f"rolling up from {len(child_rows)} child L{child_level} summaries"
+                            )
+                            name, summary = self._build_rollup_summary(child_rows, community_level)
+                        else:
+                            # Fallback: no child summaries available (e.g. first run edge case)
+                            logger.warning(
+                                f"[Community] L{community_level} cluster {cluster_index + 1}: "
+                                "no child summaries found — falling back to member node descriptions"
+                            )
+                            name, summary = self._build_community_summary(member_rows, community_level)
+                except Exception as _summ_err:
+                    logger.warning(
+                        f"[Community] Skipping L{community_level} cluster "
+                        f"{cluster_index + 1} — summary failed: {_summ_err}"
+                    )
+                    name, summary = None, None
+
+                if not name:
+                    name = f"Community L{community_level}-{cluster_index + 1}"
+                if not summary:
+                    summary = f"Community at level {community_level} containing {len(member_node_ids)} related nodes."
+
+                themes = [row.get("name") for row in member_rows[:5] if row.get("name")]
+                # Communities only get a description per plan — no potential_questions.
+                community_id = f"community_l{community_level}_{uuid.uuid4().hex}"
+                updated_at = datetime.utcnow().isoformat()
+
+                graph_service.create_leiden_community(
+                    community_id=community_id,
+                    community_level=community_level,
+                    name=name,
+                    summary=summary,
+                    member_node_ids=member_node_ids,
+                )
+                logger.debug(
+                    f"  [Community] Neo4j community node created: '{name}' id={community_id}"
+                )
+
+                elasticsearch_service.index_node(
+                    node_id=community_id,
+                    name=name,
+                    node_type="community",
+                    description=summary,
+                    community_level=community_level,
+                )
+                logger.debug(
+                    f"  [Community] ES indexed community: '{name}'"
+                )
+
+                # Write community membership NL sentences to Qdrant node_relationships
+                # flagged is_community_rel=True so they are bulk-deleted on next recompute.
+                try:
+                    _nl_texts = [
+                        f"{node_lookup.get(nid, {}).get('name') or nid} is a member of the '{name}' community."
+                        for nid in member_node_ids
+                        if nid in node_lookup
+                    ]
+                    _nl_vectors = embedding_service.embed_documents(_nl_texts) if _nl_texts else []
+                    _nl_written = 0
+                    for nid, nl_text, nl_vec in zip(
+                        [n for n in member_node_ids if n in node_lookup],
+                        _nl_texts,
+                        _nl_vectors,
+                    ):
+                        qdrant_service.upsert_node_relationship(
+                            relationship_id=f"community_rel_{community_id}_{nid}",
+                            natural_language=nl_text,
+                            nl_vector=nl_vec,
+                            source_node_id=nid,
+                            target_node_id=community_id,
+                            is_community_rel=True,
+                        )
+                        _nl_written += 1
+                    logger.debug(
+                        f"  [Community] Qdrant membership NL sentences written: {_nl_written} "
+                        f"for community '{name}'"
+                    )
+                except Exception as _rel_err:
+                    logger.warning(f"[Community] Membership NL write failed for {community_id}: {_rel_err}")
+
+                logger.info(
+                    f"  [Community] ✓ Created L{community_level} community '{name}' "
+                    f"(id={community_id}, {len(member_node_ids)} members)"
+                )
+                graph_service.set_node_community_membership(
+                    member_node_ids, community_id, community_level
+                )
+                for node_id in member_node_ids:
+                    level_assignments.setdefault(node_id, {})[community_level] = community_id
+
+                # Record summary + name so higher-level passes can roll up from them
+                community_summaries[community_id] = summary
+                community_names[community_id] = name
+
+                created += 1
+
+        from app.services.embedding import embedding_service
+
+        # Refresh ES relationship_natural_language for nodes whose membership changed.
+        # Community fields are no longer stored on regular nodes — only the NL sentence
+        # written above carries that signal for retrieval.
+        for node_id in level_assignments:
+            payload = graph_service.get_node_storage_payload(node_id)
+            if not payload:
+                continue
+            description = payload.get("description") or ""
+            if not description:
+                continue
+            relationship_nl = payload.get("relationship_natural_language") or []
+            elasticsearch_service.update_node_community(
+                node_id=node_id,
+                description=description,
+                relationship_natural_language=" ".join(
+                    sentence for sentence in relationship_nl if sentence
+                ),
+            )
+
+        # ── Compute & store 3D positions for the new layout ──────────────────
+        try:
+            from app.utils.graph_layout import compute_spring_layout_3d
+
+            # After Leiden has created communities, rerun spring layout so
+            # community nodes are pulled into the correct positions by their members.
+            spring_node_ids, spring_edges = graph_service.get_all_node_ids_and_edges()
+            positions = compute_spring_layout_3d(spring_node_ids, spring_edges)
+            graph_service.store_node_positions(positions)
+            logger.info(
+                f"[Community] Spring layout recomputed after Leiden: "
+                f"{len(positions)} nodes, {len(spring_edges)} edges"
+            )
+        except Exception as _layout_err:
+            logger.warning(f"[Community] 3D layout computation failed (non-fatal): {_layout_err}")
+
+        logger.info(
+            f"\n{'='*70}\n"
+            f"[Community] Leiden recompute COMPLETE: {created} community nodes rebuilt\n"
+            f"  Nodes in graph: {len(node_ids)}\n"
+            f"  Edges in graph: {len(edge_list)}\n"
+            f"  Levels: {list(resolutions.keys())}\n"
+            f"{'='*70}"
         )
         return created
 

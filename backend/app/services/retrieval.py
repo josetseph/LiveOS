@@ -1,11 +1,15 @@
 import os
+import asyncio
 import logging
 import time
+import re
 from datetime import datetime
 from typing import List
 from app.core.config import settings
 from app.core.log import get_logger
 from app.services.graph import graph_service
+from app.services.qdrant_service import qdrant_service
+from app.services.elasticsearch_service import elasticsearch_service
 
 # Suppress noisy tokenizer warnings
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
@@ -166,15 +170,15 @@ class RetrievalService:
             if original:
                 logger.debug(f"NODE NAME: {original.get('name', 'N/A')}")
                 logger.debug(f"NODE LABELS: {original.get('labels', [])}")
-                logger.debug(f"NODE TYPE: {original.get('type', 'N/A')}")
+                logger.debug(f"NODE TYPE: {original.get('entity_type', 'N/A')}")
 
                 # Full summary - not truncated!
-                summary = original.get("summary") or original.get("description", "")
+                summary = original.get("summary") or original.get("description") or ""
                 logger.debug(f"FULL SUMMARY ({len(summary)} chars):")
                 logger.debug(summary if summary else "(empty)")
 
                 # Isolated context if available
-                isolated = original.get("isolated_context", "")
+                isolated = original.get("isolated_context") or ""
                 if isolated:
                     logger.debug(f"ISOLATED CONTEXT ({len(isolated)} chars):")
                     logger.debug(isolated)
@@ -216,15 +220,9 @@ class RetrievalService:
             if not node_name:
                 return ""
 
-            label = (
-                node.get("labels", ["Entity"])[0]
-                if isinstance(node.get("labels"), list)
-                else "Entity"
-            )
-
-            # Fetch 1-hop relationships
+            # All nodes are :Indexable — no label filter needed
             related_nodes = graph_service.get_related_nodes(
-                node_name=node_name, node_label=label, max_depth=1, min_confidence=0.5
+                node_name=node_name, node_label=None, max_depth=1, min_confidence=0.5
             )
 
             if not related_nodes:
@@ -235,15 +233,19 @@ class RetrievalService:
             relationships = []
             for related in related_nodes[:max_relationships]:
                 rel_name = related.get("name", "Unknown")
+                nl_path = related.get("natural_language_path", [])
                 rel_path = related.get("relationship_path", [])
                 context_path = related.get("context_path", [])
 
-                if context_path and context_path[0]:
+                if nl_path and nl_path[0]:
+                    # Use stored natural-language sentence (e.g. "Joseph is the mother of Jack.")
+                    rel_str = nl_path[0]
+                elif context_path and context_path[0]:
                     context = context_path[0]
                     rel_str = f'"{rel_name}" ({context})'
                 elif rel_path:
-                    rel_natural = rel_path[0].replace("_", " ").title()
-                    rel_str = f'"{rel_name}" ({rel_natural})'
+                    rel_natural = rel_path[0].replace("_", " ").lower()
+                    rel_str = f'{node_name} {rel_natural} {rel_name}.'
                 else:
                     rel_str = f'"{rel_name}"'
 
@@ -260,6 +262,158 @@ class RetrievalService:
             )
             return ""
 
+    async def _expand_relevant_neighbors(
+        self,
+        relevant_docs: list[dict],
+        question: str,
+        surfaced_names: set[str],
+    ) -> list[dict]:
+        """
+        Expand the retrieval frontier from already-relevant nodes.
+
+        For each relevant node, fetch its 1-hop neighbours not yet surfaced.
+        Ask the LLM (in natural language format) to select which of those
+        relationships provide additional evidence for the question.
+        Returns the selected neighbour nodes as standard doc dicts.
+        """
+        from app.services.llm import llm_service
+
+        relationship_entries: list[dict] = []
+
+        for doc in relevant_docs:
+            node = doc.get("original_obj") or {}
+            node_name = node.get("name", "")
+            if not node_name:
+                continue
+            # All nodes are :Indexable — no label filter needed
+            try:
+                related = graph_service.get_related_nodes(
+                    node_name=node_name,
+                    node_label=None,
+                    max_depth=1,
+                    min_confidence=0.5,
+                )
+            except Exception as e:
+                logger.debug(
+                    f"  [GraphExpand] get_related_nodes failed for {node_name}: {e}"
+                )
+                continue
+
+            for r in related:
+                neighbor_name = r.get("name", "")
+                if not neighbor_name or neighbor_name in surfaced_names:
+                    continue
+                nl_path = r.get("natural_language_path") or []
+                nl_sentence = nl_path[0] if nl_path and nl_path[0] else None
+                rel_path = r.get("relationship_path") or []
+                rel_type = rel_path[0] if rel_path else "connected_to"
+                ctx_path = r.get("context_path") or []
+                context = ctx_path[0] if ctx_path else None
+                relationship_entries.append(
+                    {
+                        "source": node_name,
+                        "rel_type": rel_type,
+                        "nl_sentence": nl_sentence,
+                        "neighbor": r,
+                        "context": context,
+                    }
+                )
+
+        if not relationship_entries:
+            logger.info("  [GraphExpand] No new 1-hop neighbors to evaluate.")
+            return []
+
+        logger.info(
+            f"  [GraphExpand] Evaluating {len(relationship_entries)} 1-hop relationship(s):"
+        )
+        for _i, _e in enumerate(relationship_entries):
+            _nl = _e.get("nl_sentence") or f'{_e["source"]} --[{_e["rel_type"]}]--> {_e["neighbor"].get("name", "?")}'  
+            logger.info(f"    [{_i}] {_nl}")
+
+        # Enrich neighbor nodes with content from Qdrant before LLM filtering
+        _neighbor_ids = [
+            e["neighbor"].get("node_id")
+            for e in relationship_entries
+            if e["neighbor"].get("node_id")
+        ]
+        if _neighbor_ids:
+            try:
+                _qdrant_neighbor_content = qdrant_service.get_nodes_content_by_ids(_neighbor_ids)
+                for entry in relationship_entries:
+                    _nid = entry["neighbor"].get("node_id")
+                    if _nid and _nid in _qdrant_neighbor_content:
+                        _c = _qdrant_neighbor_content[_nid]
+                        entry["neighbor"]["description"] = _c.get("description", "")
+                        entry["neighbor"]["summary"] = _c.get("description", "")
+                        entry["neighbor"]["facts"] = _c.get("facts", [])
+            except Exception as _e:
+                logger.debug(f"  [GraphExpand] Qdrant neighbor enrichment failed: {_e}")
+
+        selected_indices = await llm_service.select_relevant_relationships(
+            relationship_entries, question
+        )
+        logger.info(
+            f"  [GraphExpand] LLM selected {len(selected_indices or [])}/{len(relationship_entries)} "
+            f"neighbor relationships"
+        )
+        if not selected_indices:
+            logger.info("  [GraphExpand] No relevant neighbors selected by LLM.")
+            return []
+
+        selected_neighbor_names: list[str] = []
+        result: list[dict] = []
+        seen_neighbors: set[str] = set()
+        for idx in selected_indices:
+            entry = relationship_entries[idx]
+            neighbor = entry["neighbor"]
+            neighbor_name = neighbor.get("name", "")
+            if not neighbor_name or neighbor_name in seen_neighbors:
+                continue
+            seen_neighbors.add(neighbor_name)
+            selected_neighbor_names.append(neighbor_name)
+            summary = neighbor.get("summary") or neighbor.get("description", "")
+            node_text = self._get_node_text(neighbor)
+            result.append(
+                {
+                    "text": node_text if node_text else neighbor_name,
+                    "type": "graph_expansion",
+                    "original_obj": {
+                        "name": neighbor_name,
+                        "summary": summary,
+                        "entity_type": neighbor.get("entity_type", ""),
+                    },
+                    "linked_notes": [],
+                }
+            )
+
+        # Preserve note provenance for expansion docs so references and retrieval
+        # metrics can credit these neighbours as evidence.
+        if result and selected_neighbor_names:
+            try:
+                evidence_rows = graph_service.get_linked_evidence(
+                    selected_neighbor_names,
+                    limit_per_node=2,
+                )
+                node_to_notes: dict[str, list[dict]] = {}
+                for row in evidence_rows:
+                    node_name = (row.get("node_name") or "").lower()
+                    evidence = row.get("evidence", [])
+                    if node_name and evidence:
+                        node_to_notes[node_name] = evidence
+
+                for doc in result:
+                    name = ((doc.get("original_obj") or {}).get("name") or "").lower()
+                    if name and name in node_to_notes:
+                        doc["linked_notes"] = node_to_notes[name]
+            except Exception as e:
+                logger.debug(f"  [GraphExpand] get_linked_evidence failed: {e}")
+
+        if result:
+            logger.info(
+                f"  [GraphExpand] Added {len(result)} neighbour node(s) via relationship expansion"
+            )
+        return result
+
     def _get_node_text(self, node: dict) -> str:
         """
         Extract text content from a node, including atomic facts so the LLM
@@ -274,7 +428,13 @@ class RetrievalService:
         """
         import json as _json
 
-        summary = node.get("summary") or node.get("description", "")
+        summary = (
+            node.get("summary")
+            or node.get("description")
+            or node.get("definition")
+            or node.get("isolated_context")
+            or node.get("content", "")
+        )
         facts_raw = node.get("facts")
         if facts_raw:
             try:
@@ -282,10 +442,11 @@ class RetrievalService:
                     _json.loads(facts_raw) if isinstance(facts_raw, str) else facts_raw
                 )
                 if isinstance(facts, list) and facts:
+                    # Facts are proposition sentences (list[str])
                     facts_text = "; ".join(
-                        f"{f['property']}: {f['value']}"
+                        f if isinstance(f, str) else f"{f.get('property', '')}: {f.get('value', '')}"
                         for f in facts
-                        if isinstance(f, dict) and f.get("property") and f.get("value")
+                        if f
                     )
                     if facts_text:
                         summary = (
@@ -295,7 +456,119 @@ class RetrievalService:
                 pass
         return summary
 
-    async def hybrid_search(self, query: str, top_k: int = 20) -> List[dict]:
+    async def _search_qdrant_multi_collection(
+        self, query_vector: list[float]
+    ) -> list[dict]:
+        """Search all Qdrant collections and normalize into node-like results.
+
+        Per plan: no result limiting — returns ALL hits above the similarity
+        threshold.  A large ceiling (500 per collection) is passed to the
+        Qdrant client solely because its API requires a numeric limit; the
+        score_threshold is the only real filter.
+
+        Sub-collection hits (node_facts, node_questions, etc.) carry a
+        ``parent_node_id`` and optionally a ``name`` field added at upsert
+        time.  When ``name`` is present it is used directly; otherwise the
+        hit is skipped so the caller's dedup logic stays consistent.
+        """
+        hits = qdrant_service.search_all_collections(
+            query_vector=query_vector,
+            limit=500,  # large ceiling; score_threshold is the real filter
+            min_score=settings.VECTOR_SIMILARITY_THRESHOLD,
+        )
+        if not hits:
+            logger.info("  [Qdrant] No hits above similarity threshold.")
+            return []
+        logger.info(
+            f"  [Qdrant] Raw hits from search_all_collections: {len(hits)} "
+            f"(threshold={settings.VECTOR_SIMILARITY_THRESHOLD})"
+        )
+        merged: dict[str, dict] = {}
+        for hit in hits:
+            payload = hit.get("payload", {})
+            score = float(hit.get("score", 0.0))
+            collection = hit.get("collection", "")
+            name = (payload.get("name") or "").strip()
+            if not name:
+                continue
+
+            key = name.lower()
+            current = merged.get(key)
+            if current and current.get("score", 0.0) >= score:
+                continue
+
+            is_relationship_hit = "relationships" in collection
+            merged[key] = {
+                "id": payload.get("node_id") or payload.get("parent_node_id") or payload.get("source_node_id"),
+                "name": name,
+                "entity_type": "" if is_relationship_hit else (payload.get("type") or ""),
+                "summary": payload.get("natural_language")
+                if is_relationship_hit
+                else (
+                    payload.get("description")
+                    or payload.get("content")
+                    or payload.get("natural_language", "")
+                ),
+                "score": score,
+                "_source": "qdrant",
+            }
+
+        result = list(merged.values())
+        logger.info(
+            f"  [Qdrant] {len(result)} unique nodes after dedup (from {len(hits)} raw hits)"
+        )
+        return result
+
+    async def _search_elasticsearch_by_keyword(
+        self, query: str
+    ) -> list[dict]:
+        """Search Elasticsearch BM25 index and normalize into node-like results."""
+        hits = elasticsearch_service.search_nodes(query=query, limit=100)
+        if not hits:
+            logger.info("  [ES] No BM25 keyword hits.")
+            return []
+        logger.info(f"  [ES] {len(hits)} raw BM25 hits from Elasticsearch")
+
+        merged: dict[str, dict] = {}
+        for hit in hits:
+            payload = hit.get("payload", {})
+            score = float(hit.get("score", 0.0))
+            name = (payload.get("name") or "").strip()
+            if not name:
+                continue
+
+            key = name.lower()
+            current = merged.get(key)
+            if current and current.get("score", 0.0) >= score:
+                continue
+
+            merged[key] = {
+                "id": payload.get("node_id"),
+                "name": name,
+                "entity_type": payload.get("type") or "",
+                "summary": payload.get("description") or "",
+                "score": score,
+                "_source": "elasticsearch",
+            }
+
+        return list(merged.values())
+
+    def _merge_search_results(
+        self, primary: list[dict], secondary: list[dict], seen_names: set[str]
+    ) -> list[dict]:
+        """Merge and dedupe search results by node name while preserving primary precedence."""
+        merged = list(primary)
+        for node in secondary:
+            name = node.get("name")
+            if not name:
+                continue
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            merged.append(node)
+        return merged
+
+    async def hybrid_search(self, query: str, top_k: int = 50) -> List[dict]:
         """
         Vector-First Retrieval Pipeline:
 
@@ -314,13 +587,18 @@ class RetrievalService:
         """
         from app.services.embedding import embedding_service
 
-        logger.info(f"  [Retrieval] Hybrid Search for: '{query}'")
+        logger.info(
+            f"\n{'─'*60}\n"
+            f"  [HybridSearch] query='{query}' top_k={top_k}\n"
+            f"{'─'*60}"
+        )
         t_start = time.perf_counter()
         t_phase_start = time.perf_counter()
 
         # Query Analysis with LLM structured outputs
         from app.services.llm import llm_service
 
+        logger.info("  [HybridSearch] Calling LLM query analysis...")
         query_analysis = llm_service.analyze_query(query)
 
         # Extract expected entity types for filtering/boosting
@@ -453,6 +731,22 @@ class RetrievalService:
                     )
                     entity_nodes.extend(variant_nodes)
 
+                # Enrich entity_nodes with content from Qdrant (Neo4j no longer
+                # stores description/facts on knowledge nodes).
+                _enrich_ids = [n.get("node_id") for n in entity_nodes if n.get("node_id")]
+                if _enrich_ids:
+                    try:
+                        _qdrant_content = qdrant_service.get_nodes_content_by_ids(_enrich_ids)
+                        for _n in entity_nodes:
+                            _nid = _n.get("node_id")
+                            if _nid and _nid in _qdrant_content:
+                                _c = _qdrant_content[_nid]
+                                _n["description"] = _c.get("description", "")
+                                _n["summary"] = _c.get("description", "")
+                                _n["facts"] = _c.get("facts", [])
+                    except Exception as _e:
+                        logger.debug(f"  [Entity] Qdrant content enrichment failed: {_e}")
+
                 if entity_nodes:
                     logger.info(
                         f"  [Entity] Found {len(entity_nodes)} nodes by name: "
@@ -467,13 +761,16 @@ class RetrievalService:
         # This catches entities the user didn't name explicitly
         t_vector_start = time.perf_counter()
         try:
-            # IMPROVEMENT: Reduced top_k (20→12) and increased min_score (0.60→0.70)
-            # to reduce noise from qwen3-embedding:0.6b weak matches
-
-            # Search using summary embeddings for semantic coverage
-            vector_results = graph_service.search_knowledge_graph(
-                full_vector, top_k=12, min_score=0.7
+            # Qdrant is the vector source of truth.
+            vector_results = await self._search_qdrant_multi_collection(
+                full_vector
             )
+            if vector_results:
+                logger.info(
+                    f"  [Vector] Using Qdrant multi-collection search with {len(vector_results)} hits"
+                )
+            else:
+                logger.info("  [Vector] Qdrant returned no hits")
 
             for vnode in vector_results:
                 if vnode["name"] not in node_names_found:
@@ -519,78 +816,23 @@ class RetrievalService:
                     f"  [Vector] Found {len(vector_nodes)} semantically similar nodes: "
                     f"{[n['name'] for n in vector_nodes[:10]]}"
                 )
+
+            # Add keyword results from Elasticsearch and merge with vector candidates.
+            keyword_nodes = await self._search_elasticsearch_by_keyword(query)
+            if keyword_nodes:
+                vector_nodes = self._merge_search_results(
+                    vector_nodes,
+                    keyword_nodes,
+                    node_names_found,
+                )
+                logger.info(
+                    f"  [Keyword] Added {len(keyword_nodes)} Elasticsearch matches"
+                )
         except Exception as e:
             logger.warning(f"  [Vector] Vector search failed: {e}")
 
         t_vector = time.perf_counter() - t_vector_start
         logger.info(f"  [⏱️ Timing] Vector search: {t_vector:.2f}s")
-
-        # Follow IS_SAME_AS and IS_VARIANT_OF links to include canonical/related entities.
-        all_primary_nodes = entity_nodes + vector_nodes
-        alias_resolved_nodes = []
-
-        if all_primary_nodes:
-            logger.info(
-                f"  [Alias] Checking {len(all_primary_nodes)} nodes for IS_SAME_AS / IS_VARIANT_OF links"
-            )
-
-            for node in all_primary_nodes:
-                node_name = node["name"]
-
-                # Follow both IS_SAME_AS (certain identity) and IS_VARIANT_OF (probable identity)
-                alias_query = """
-                MATCH (alias:Entity {name: $name})-[r:IS_SAME_AS|IS_VARIANT_OF]->(canonical:Entity)
-                RETURN canonical.name as canonical_name,
-                       canonical.summary as summary,
-                       canonical.type as entity_type,
-                       canonical.embedding as embedding,
-                       r.confidence as alias_confidence,
-                       type(r) as rel_type,
-                       labels(canonical) as labels
-                """
-
-                alias_results = graph_service.execute_query(
-                    alias_query, {"name": node_name}
-                )
-
-                if alias_results:
-                    # Keep the original (alias) node so its own 1-hop neighbors are expanded too
-                    alias_resolved_nodes.append(node)
-
-                    canonical_node_names = {n["name"] for n in alias_resolved_nodes}
-                    for row in alias_results:
-                        canonical_name = row["canonical_name"]
-                        alias_confidence = row.get("alias_confidence", 1.0)
-                        rel_type = row.get("rel_type", "IS_SAME_AS")
-
-                        logger.info(
-                            f"  [Alias] '{node_name}' -{rel_type}-> '{canonical_name}' "
-                            f"(confidence: {alias_confidence:.2f})"
-                        )
-
-                        if canonical_name not in canonical_node_names:
-                            canonical_node = {
-                                "name": canonical_name,
-                                "summary": row.get("summary"),
-                                "entity_type": row.get("entity_type"),
-                                "embedding": row.get("embedding"),
-                                "labels": row.get("labels", ["Entity"]),
-                                "_source": f"{rel_type.lower()}_of_{node_name}",
-                                "_alias_confidence": alias_confidence,
-                            }
-                            alias_resolved_nodes.append(canonical_node)
-                            canonical_node_names.add(canonical_name)
-                else:
-                    # No alias links — keep original node as-is
-                    alias_resolved_nodes.append(node)
-
-            added = len(alias_resolved_nodes) - len(all_primary_nodes)
-            logger.info(
-                f"  [Alias] After alias resolution: {len(alias_resolved_nodes)} nodes "
-                f"({added} added via IS_SAME_AS / IS_VARIANT_OF)"
-            )
-
-            all_primary_nodes = alias_resolved_nodes
 
         # Combine all found nodes
         all_found_nodes = entity_nodes + vector_nodes
@@ -665,13 +907,15 @@ class RetrievalService:
                 continue
 
             entity_type = node.get("entity_type", "") or ""
+            if entity_type.lower() in ("indexable", "node"):
+                entity_type = ""
             _article = (
                 "an" if entity_type and entity_type[0].lower() in "aeiou" else "a"
             )
-            type_clause = f", {_article} {entity_type}" if entity_type else ""
+            type_clause = f" is {_article} {entity_type}." if entity_type else "."
             rel_context = self._get_node_relationships(node)
 
-            text = f'{node["name"]}{type_clause}, has context "{summary}"{rel_context}'
+            text = f'{node["name"]}{type_clause} {summary}{rel_context}'
 
             # Attach linked notes for reference traceability (case-insensitive lookup)
             linked_notes = node_to_notes.get(node["name"].lower(), [])
@@ -681,45 +925,38 @@ class RetrievalService:
                     "text": text,
                     "type": "entity_match",
                     "original_obj": node,
-                    "is_recent": False,
-                    "priority": "primary",  # Entity matches are highest priority
-                    "vector_score": 1.0,  # Give entity matches high score
                     "linked_notes": linked_notes,
                 }
             )
 
         # B. Vector Nodes (semantically similar to query)
         for node in vector_nodes:
-            vector_score = node.get("score", 0.0)
-
-            # Filter weak semantic matches to reduce noise
-            if vector_score < 0.7:
-                continue
-
             summary = self._get_node_text(node)
             if not summary:
                 continue
 
             entity_type = node.get("entity_type", "") or ""
+            if entity_type.lower() in ("indexable", "node"):
+                entity_type = ""
             _article = (
                 "an" if entity_type and entity_type[0].lower() in "aeiou" else "a"
             )
-            type_clause = f", {_article} {entity_type}" if entity_type else ""
+            type_clause = f" is {_article} {entity_type}." if entity_type else "."
             rel_context = self._get_node_relationships(node)
 
-            text = f'{node["name"]}{type_clause}, has context "{summary}"{rel_context}'
+            text = f'{node["name"]}{type_clause} {summary}{rel_context}'
 
             # Attach linked notes for reference traceability (case-insensitive lookup)
             linked_notes = node_to_notes.get(node["name"].lower(), [])
 
+            # Community nodes that arrive via vector search should be tagged correctly
+            _result_type = "community_summary" if entity_type.lower() == "community" else "vector_match"
+
             candidates.append(
                 {
                     "text": text,
-                    "type": "vector_match",
+                    "type": _result_type,
                     "original_obj": node,
-                    "is_recent": False,
-                    "priority": "primary",  # Vector matches are primary
-                    "vector_score": vector_score,
                     "linked_notes": linked_notes,
                 }
             )
@@ -768,8 +1005,6 @@ class RetrievalService:
                     "text": text,
                     "type": "community_summary",
                     "original_obj": community,
-                    "is_recent": False,
-                    "priority": "tertiary",  # Community summaries for context
                     "linked_notes": linked_notes,
                 }
             )
@@ -787,242 +1022,10 @@ class RetrievalService:
 
         t_ranking_start = time.perf_counter()
 
-        # ============ ENTITY TYPE SCORING ============
-        # If we know the expected entity types (e.g., "Person" for nationality questions),
-        # boost candidates that match and penalize those that don't
-        # Uses LLM-based synonym expansion + embedding similarity for fuzzy matching
-
-        # Cache for type synonyms (avoid repeated LLM calls)
-        type_synonym_cache = {}
-
-        def get_type_synonyms(entity_type: str) -> list[str]:
-            """Get synonyms for a type using LLM or embedding similarity"""
-            if entity_type.lower() in type_synonym_cache:
-                return type_synonym_cache[entity_type.lower()]
-
-            # Use LLM to expand synonyms
-            synonyms = llm_service.expand_type_synonyms(entity_type)
-            type_synonym_cache[entity_type.lower()] = synonyms
-            return synonyms
-
-        def get_type_score(candidate) -> float:
-            """Score based on entity type match. 1.0 = match, 0.5 = unknown, 0.1 = mismatch
-
-            Uses:
-            1. Direct string match
-            2. LLM-generated synonyms
-            3. Embedding similarity between type names
-            """
-            if not expected_entity_types:
-                return 0.5  # No type filtering
-
-            node = candidate.get("original_obj", {})
-            entity_type = node.get("entity_type", None)
-
-            if not entity_type:
-                return 0.3  # Unknown type - slight penalty
-
-            # Normalize types for comparison
-            entity_type_lower = entity_type.lower()
-            expected_lower = [t.lower() for t in expected_entity_types]
-
-            # 1. Direct match
-            if entity_type_lower in expected_lower:
-                return 1.0
-
-            # 2. LLM-based synonym matching
-            for exp_type in expected_lower:
-                synonyms = get_type_synonyms(exp_type)
-                if entity_type_lower in synonyms:
-                    return 0.9  # Synonym match
-
-            # 3. Embedding similarity fallback (for fuzzy matches)
-            # Check if entity_type is semantically close to any expected type
-            try:
-                entity_type_embedding = embedding_service.embed_query(entity_type_lower)
-                max_similarity = 0.0
-
-                for exp_type in expected_lower:
-                    exp_embedding = embedding_service.embed_query(exp_type)
-                    # Cosine similarity
-                    from app.services.embedding import compute_cosine_similarity
-
-                    similarity = compute_cosine_similarity(
-                        entity_type_embedding, exp_embedding
-                    )
-                    max_similarity = max(max_similarity, similarity)
-
-                # If embedding similarity is high, consider it a match
-                if max_similarity > 0.7:
-                    return 0.85  # Semantic match
-                elif max_similarity > 0.5:
-                    return 0.6  # Weak match
-            except Exception as e:
-                logger.debug(f"Embedding similarity failed for type scoring: {e}")
-
-            return 0.1  # Type mismatch (heavy penalty)
-
-        def get_attribute_relevance(candidate, query_vector: list[float]) -> float:
-            """
-            Score based on semantic similarity between the candidate's summary
-            and the query. Uses embedding-based cosine similarity for general-purpose
-            attribute relevance without hardcoded keywords.
-
-            Also performs CONTEXT-BASED DISAMBIGUATION:
-            - If multiple entities share the same name, use query context to pick the right one
-            - Example: "Michael Jordan" (basketball) vs "Michael Jordan" (professor)
-            """
-            node = candidate.get("original_obj", {})
-            summary = self._get_node_text(node)
-
-            if not summary or len(summary.strip()) < 10:
-                return 0.3  # No meaningful content
-
-            # Use the vector_score if already computed from Neo4j vector search
-            # This is the cosine similarity between query and node's stored embedding
-            existing_score = candidate.get("vector_score", 0.0)
-            if existing_score > 0:
-                # Context disambiguation: Boost if query keywords appear in summary
-                query_keywords = set(query.lower().split()) - {
-                    "what",
-                    "where",
-                    "when",
-                    "who",
-                    "how",
-                    "the",
-                    "is",
-                    "was",
-                    "are",
-                    "were",
-                }
-                summary_lower = summary.lower()
-                keyword_matches = sum(1 for kw in query_keywords if kw in summary_lower)
-                keyword_boost = min(
-                    keyword_matches / max(len(query_keywords), 1) * 0.2, 0.2
-                )
-
-                return min(existing_score + keyword_boost, 1.0)
-
-            # Fallback: compute similarity if not available
-            # This handles entity_match candidates that don't have vector scores
-            try:
-                # Reconstruct the exact text used at ingestion time:
-                # f"{title}: {summary} Facts: ..." (see _update_node_summary)
-                # so the vector sits in the same embedding space as stored nodes.
-                node_title = node.get("title") or ""
-                embed_text = f"{node_title}: {summary}" if node_title else summary
-                summary_vector = embedding_service.embed_documents([embed_text])[0]
-                # Cosine similarity
-                dot_product = sum(a * b for a, b in zip(query_vector, summary_vector))
-                norm_q = sum(a * a for a in query_vector) ** 0.5
-                norm_s = sum(a * a for a in summary_vector) ** 0.5
-                if norm_q > 0 and norm_s > 0:
-                    base_similarity = dot_product / (norm_q * norm_s)
-
-                    # Context disambiguation boost
-                    query_keywords = set(query.lower().split()) - {
-                        "what",
-                        "where",
-                        "when",
-                        "who",
-                        "how",
-                        "the",
-                        "is",
-                        "was",
-                        "are",
-                        "were",
-                    }
-                    summary_lower = summary.lower()
-                    keyword_matches = sum(
-                        1 for kw in query_keywords if kw in summary_lower
-                    )
-                    keyword_boost = min(
-                        keyword_matches / max(len(query_keywords), 1) * 0.2, 0.2
-                    )
-
-                    return min(base_similarity + keyword_boost, 1.0)
-            except Exception as e:
-                logger.warning(f"Failed to compute semantic similarity: {e}")
-
-            return 0.5  # Neutral if computation fails
-
-        # Score all candidates
-        for cand in candidates:
-            # Get vector score first (used by semantic scoring)
-            cand["vector_score"] = cand.get("vector_score", 0.0)
-
-            # Calculate type score and semantic relevance for each candidate
-            cand["type_score"] = get_type_score(cand)
-            cand["semantic_score"] = get_attribute_relevance(cand, full_vector)
-
-            # Combined score: type match is now primary (entity type precision matters most),
-            # semantic similarity is secondary, vector score is a small tiebreaker.
-            # Weights: type (45%), semantic (40%), vector (15%)
-            cand["combined_score"] = (
-                cand["type_score"] * 0.45
-                + cand["semantic_score"] * 0.40
-                + cand["vector_score"] * 0.15  # Direct vector score contribution
-            )
-
-        # NOTE: Domain boosting removed for nodes (only Notes have domain property)
-        # Entity/Concept/Task nodes don't have domain, so boosting was broken
-        # If domain filtering needed, implement at Note level or propagate domain to nodes during ingestion
-
-        # Sort by combined score, then by priority
-        def sort_key(c):
-            priority_order = {"primary": 0, "secondary": 1, "tertiary": 2}
-            priority_score = priority_order.get(c.get("priority", "tertiary"), 2)
-            combined_score = c.get("combined_score", 0.5)
-            # Lower is better: -combined_score puts high matches first
-            return (-combined_score, priority_score)
-
-        candidates.sort(key=sort_key)
-
-        # Log expected types for debugging (type scoring still affects ranking)
-        if expected_entity_types:
-            logger.debug(
-                f"  [Type Scoring] Expected types: {expected_entity_types}, "
-                f"Attribute: {question_attribute}"
-            )
-
-        # R3.1: DISABLED - Neural reranking (too slow, hurts quality)
-        # Reranker added 237% latency (31s→104s) and reduced accuracy by 4%
-        # Use pure symbolic scoring instead (combined_score already includes domain boost)
-        for cand in candidates:
-            # Use combined_score (with domain boost) as final score
-            cand["final_score"] = cand.get("combined_score", 0.5)
-            cand["rerank_score"] = 0.0  # Keep field for compatibility
-
-        # Take top_k candidates (already sorted by combined_score with domain boost)
-        combined_results = candidates[:top_k]
-
-        # [Improvement #2] Guarantee every entity-match candidate survives the top_k cut.
-        # Explicitly-named entities from the query are high-value anchors — they must not
-        # be dropped by scoring rank if there are many high-scoring vector results.
-        entity_match_names_in_results = {
-            c.get("original_obj", {}).get("name")
-            for c in combined_results
-            if c.get("type") == "entity_match"
-        }
-        for cand in candidates[top_k:]:
-            if cand.get("type") == "entity_match":
-                node_name = cand.get("original_obj", {}).get("name")
-                if node_name and node_name not in entity_match_names_in_results:
-                    combined_results.append(cand)
-                    entity_match_names_in_results.add(node_name)
-                    logger.info(
-                        f"  [Priority] Force-included entity match outside top_k: {node_name}"
-                    )
-
-        # Add boost details for logging
-        for cand in combined_results:
-            cand["boosts"] = {
-                "source": cand.get("type", "unknown"),
-                "domain": cand.get("domain_boost", 1.0),
-            }
+        combined_results = candidates
 
         t_ranking = time.perf_counter() - t_ranking_start
-        logger.info(f"  [⏱️ Timing] Total ranking: {t_ranking:.4f}s")
+        logger.info(f"  [⏱️ Timing] Total ranking (skipped per plan): {t_ranking:.4f}s")
 
         # Log what we're sending to LLM
         logger.info(
@@ -1035,12 +1038,7 @@ class RetrievalService:
         for i, doc in enumerate(combined_results[:10]):
             name = doc.get("original_obj", {}).get("name", "N/A")
             dtype = doc.get("type", "unknown")
-            score = doc.get("combined_score", 0)
-            semantic_score = doc.get("semantic_score", 0)
-            type_score = doc.get("type_score", 0)
-            logger.info(
-                f"    {i+1}. [{dtype}] {name} (combined: {score:.2f}, semantic: {semantic_score:.2f}, type: {type_score:.2f})"
-            )
+            logger.info(f"    {i+1}. [{dtype}] {name}")
 
         # Detailed logging to file (full summaries, not truncated)
         self._log_retrieval_details(
@@ -1063,151 +1061,643 @@ class RetrievalService:
     async def retrieve_with_self_correction(
         self,
         query: str,
-        top_k: int = 20,
+        top_k: int = 50,
         max_hops: int = 10,
         filter_docs: bool = True,
-    ) -> List[dict]:
-        """
-        Agentic retrieval loop with self-correction.
+    ) -> tuple[str | None, list[dict]]:
+        return await self.retrieve_with_pipeline(query, top_k=top_k)
 
-        Each hop:
-          1. Runs hybrid_search for the current query / bridge entity.
-          2. Merges results (deduplicating by node name).
-          3. Asks the LLM whether the accumulated context is sufficient to
-             answer *query*, or whether a specific bridge entity is missing.
-          4. If missing → targeted search for that entity → repeat.
-          5. Returns accumulated results once the LLM says sufficient, or
-             after max_hops hops.
+    async def _classify_query_scope(self, query: str) -> str:
+        """Classify query as `community` or `specific` using the LLM."""
+        from app.services.llm import llm_service
 
-        filter_docs: if True (default), applies a single batch LLM call after
-          all hops to filter the accumulated docs down to the most relevant
-          ones before returning.  O(1) extra LLM call instead of O(n).
+        logger.info(f"  [Classify] Classifying query scope for: '{query[:80]}'")
+        prompt = (
+            "Classify the query as COMMUNITY or SPECIFIC.\n"
+            "COMMUNITY = broad overview questions asking for themes, summaries, what I've been learning, or high-level understanding.\n"
+            "SPECIFIC = targeted factual/detail questions.\n"
+            "Reply with one word only: COMMUNITY or SPECIFIC.\n\n"
+            f"QUERY: {query}\n\nCLASSIFICATION:"
+        )
+        try:
+            raw = await llm_service.generate(prompt, temperature=0.0, max_tokens=5)
+            tag = (raw or "").strip().upper()
+            logger.debug(f"  [Classify] Raw LLM response: '{raw.strip() if raw else ''}' → tag='{tag}'")
+            if tag.startswith("COMMUNITY"):
+                logger.info("  [Classify] → COMMUNITY")
+                return "community"
+        except Exception as e:
+            logger.debug(f"[Retrieval] query scope classification failed: {e}")
+        logger.info("  [Classify] → SPECIFIC")
+        return "specific"
 
-        The bridge-entity prompt is intentionally brief (context is truncated
-        at ~3000 chars) to avoid slow LLM calls on large context windows.
+    async def _generate_step_back_query(self, query: str) -> str:
+        """Generate a broader step-back variant of the query."""
+        from app.services.llm import llm_service
+
+        prompt = (
+            "Rewrite this question into a broader step-back question that would retrieve useful background context.\n"
+            "Rules: 1 line only, keep key entities, 6-20 words, no quotes.\n\n"
+            f"QUESTION: {query}\n\nSTEP_BACK:"
+        )
+        try:
+            raw = await llm_service.generate(prompt, temperature=0.1, max_tokens=40)
+            rewritten = (raw or "").split("\n")[0].strip().strip('"').strip("'")
+            return rewritten or query
+        except Exception:
+            return query
+
+    async def _generate_rewritten_query(self, query: str) -> str:
+        """Reformulate the query to be more specific and detailed for retrieval."""
+        from app.services.llm import llm_service
+
+        prompt = (
+            "Rewrite this question to be more specific and detailed, making it easier to retrieve exact information.\n"
+            "Rules: 1 line only, keep all key entities and intent, 6-25 words, no quotes.\n\n"
+            f"QUESTION: {query}\n\nREWRITTEN:"
+        )
+        try:
+            raw = await llm_service.generate(prompt, temperature=0.1, max_tokens=50)
+            rewritten = (raw or "").split("\n")[0].strip().strip('"').strip("'")
+            return rewritten or query
+        except Exception:
+            return query
+
+    async def _build_query_variants(self, query: str) -> tuple[list[str], list[str]]:
+        """Build original + rewritten + step-back + sub-question variants.
+
+        Returns (variants, sub_questions) where sub_questions is the raw list
+        of decomposed sub-questions (strings only, no duplicates of original).
         """
         from app.services.llm import llm_service
 
-        seen_names: set[str] = set()
-        accumulated: List[dict] = []
-        searched_for: set[str] = {query.lower()}
+        logger.info(f"  [Expand] Building query variants for: '{query[:80]}'")
+        variants: list[str] = [query]
 
-        def _merge(new_results: List[dict]) -> None:
-            for cand in new_results:
-                name = (cand.get("original_obj") or {}).get("name") or cand.get(
-                    "name", ""
-                )
-                if name and name not in seen_names:
-                    accumulated.append(cand)
-                    seen_names.add(name)
+        # 1. Query Rewriting: reformulate to be more specific and detailed
+        rewritten = await self._generate_rewritten_query(query)
+        if rewritten and rewritten.lower() != query.lower():
+            variants.append(rewritten)
+            logger.debug(f"  [Expand] Rewritten query: '{rewritten}'")
 
-        def _build_context_snippet(results: List[dict], max_chars: int = 3000) -> str:
-            lines = []
-            total = 0
-            for r in results[:20]:
-                obj = r.get("original_obj") or {}
-                name = obj.get("name") or r.get("name", "?")
-                summary = obj.get("summary") or r.get("text", "")
-                etype = obj.get("entity_type") or obj.get("type", "")
-                line = f"- [{etype}] {name}: {summary}"[:200]
-                if total + len(line) > max_chars:
-                    break
-                lines.append(line)
-                total += len(line)
-            return "\n".join(lines)
+        # 2. Step-back: broader question for background context
+        step_back = await self._generate_step_back_query(query)
+        if step_back and step_back.lower() != query.lower():
+            variants.append(step_back)
+            logger.debug(f"  [Expand] Step-back query: '{step_back}'")
 
-        def _check_sufficiency(context: str) -> tuple[bool, str | None]:
-            """
-            Ask the LLM whether the context is sufficient to answer *query*.
+        try:
+            sub_questions = await llm_service.identify_information_needs(query)
+            sub_questions = await llm_service.rewrite_back_references(sub_questions)
+        except Exception:
+            sub_questions = []
 
-            Expected reply (strict format):
-              SUFFICIENT: yes
-              MISSING: <entity or concept name>   ← omit or leave blank if sufficient
-            """
-            prompt = (
-                f"You are an intelligent retrieval assistant.\n\n"
-                f"QUESTION: {query}\n\n"
-                f"AVAILABLE CONTEXT (knowledge graph excerpts):\n{context}\n\n"
-                f"Determine if the context above is sufficient to answer the question.\n"
-                f"Reply in EXACTLY this format (two lines only):\n"
-                f"SUFFICIENT: yes\n"
-                f"or\n"
-                f"SUFFICIENT: no\n"
-                f"MISSING: <name of one key entity or concept that is absent from the context>\n\n"
-                f"Reply:"
-            )
-            try:
-                raw = llm_service.reason(prompt) or ""
-            except Exception as e:
-                logger.warning(f"  [SelfCorrect] LLM check failed: {e}")
-                return True, None  # fail-open: don't loop forever
-
-            sufficient = True
-            missing_entity: str | None = None
-
-            for line in raw.splitlines():
-                line = line.strip()
-                if line.lower().startswith("sufficient:"):
-                    val = line.split(":", 1)[1].strip().lower()
-                    sufficient = val.startswith("y")
-                elif line.lower().startswith("missing:"):
-                    missing_entity = line.split(":", 1)[1].strip()
-                    if not missing_entity:
-                        missing_entity = None
-
-            return sufficient, missing_entity
-
-        # ── Hop 0: initial retrieval ──────────────────────────────────────────
-        logger.info(f"  [SelfCorrect] Hop 0 — searching for: '{query}'")
-        hop0 = await self.hybrid_search(query, top_k=top_k)
-        _merge(hop0)
-
-        for hop in range(1, max_hops + 1):
-            context_snippet = _build_context_snippet(accumulated)
-            sufficient, missing = _check_sufficiency(context_snippet)
-
-            logger.info(
-                f"  [SelfCorrect] Hop {hop} check — sufficient={sufficient}, "
-                f"missing='{missing}'"
-            )
-
-            if sufficient or not missing:
-                break
-
-            if missing.lower() in searched_for:
-                logger.info(
-                    f"  [SelfCorrect] Already searched for '{missing}', stopping."
-                )
-                break
-
-            searched_for.add(missing.lower())
-            logger.info(f"  [SelfCorrect] Hop {hop} — bridge search for: '{missing}'")
-            bridge_results = await self.hybrid_search(missing, top_k=top_k // 2)
-            _merge(bridge_results)
+        for sq in sub_questions:
+            candidate = (sq or "").strip()
+            if not candidate:
+                continue
+            if candidate.lower() not in {v.lower() for v in variants}:
+                variants.append(candidate)
 
         logger.info(
-            f"  [SelfCorrect] Done after {hop} hops — "
-            f"{len(accumulated)} unique nodes accumulated."
+            f"  [Expand] {len(variants)} total variant(s), {len(sub_questions)} sub-question(s)"
         )
-        # Return top_k by combined_score (best score first)
-        accumulated.sort(key=lambda c: c.get("combined_score", 0.0), reverse=True)
-        candidates = accumulated[:top_k]
+        return variants, sub_questions
 
-        # Batch context filter: single LLM call selects the most relevant docs.
-        # Reduces synthesis noise without the O(n) cost of per-doc verification.
-        keep_k = max(4, top_k // 2)
-        if filter_docs and len(candidates) > keep_k:
-            logger.info(
-                f"  [SelfCorrect] Filtering {len(candidates)} docs → keep={keep_k}"
-            )
-            candidates = await llm_service.select_relevant_docs(
-                candidates, query, keep=keep_k
-            )
-            logger.info(
-                f"  [SelfCorrect] After filter: {len(candidates)} docs"
+    async def _apply_reranker_logging(
+        self, query: str, candidates: list[dict]
+    ) -> list[dict]:
+        """Score candidates with jina-reranker-v3 (logging/ranking only, no filtering).
+
+        When RERANKER_ENABLED is True, runs the local model and maps relevance
+        scores back onto each candidate as ``rerank_score``.  Falls back to a
+        keyword-overlap heuristic when the model is disabled or unavailable.
+        """
+        if not candidates:
+            return []
+
+        # Build candidate texts for the reranker.
+        texts: list[str] = []
+        for candidate in candidates:
+            text = (candidate.get("text") or "").strip()
+            if not text:
+                text = self._get_node_text(candidate.get("original_obj") or {})
+            texts.append(text)
+
+        use_model = settings.RERANKER_ENABLED
+        model_scores: dict[int, float] = {}
+
+        if use_model:
+            from app.services.reranker import reranker_service
+
+            results = await reranker_service.rerank(query, texts)
+            if results:
+                for r in results:
+                    model_scores[r["index"]] = r["relevance_score"]
+                logger.info(
+                    f"  [Reranker] jina-reranker-v3 scored {len(model_scores)} "
+                    f"candidates (top score: {max(model_scores.values()):.4f})"
+                )
+            else:
+                logger.warning(
+                    "  [Reranker] Model returned no scores, falling back to heuristic"
+                )
+                use_model = False
+
+        # Keyword-overlap fallback (also used to blend when model succeeds).
+        query_tokens = {
+            token
+            for token in re.findall(r"[a-z0-9][a-z0-9'_-]*", query.lower())
+            if len(token) > 2 and token not in ENTITY_STOPWORDS
+        }
+
+        for idx, candidate in enumerate(candidates):
+            if use_model and idx in model_scores:
+                rerank_score = model_scores[idx]
+            else:
+                text_lower = texts[idx].lower()
+                overlap = 0.0
+                if query_tokens:
+                    overlap = sum(
+                        1 for token in query_tokens if token in text_lower
+                    ) / len(query_tokens)
+                rerank_score = overlap
+            candidate["rerank_score"] = rerank_score
+            candidate["jina_rank"] = idx + 1
+            _name = (candidate.get("original_obj") or {}).get("name", "?")[:60]
+            _preview = texts[idx][:120].replace("\n", " ")
+            logger.debug(
+                f"  [Reranker] [{idx + 1}] {_name} rerank={rerank_score:.4f} | text: {_preview!r}"
             )
 
+        candidates.sort(key=lambda c: c.get("rerank_score", 0.0), reverse=True)
+        logger.info(
+            f"  [Reranker] Ranked {len(candidates)} candidates before LLM filtering"
+        )
         return candidates
+
+    async def _direct_synthesize(
+        self,
+        question: str,
+        docs: list[dict],
+    ) -> str | None:
+        """Generate an answer from docs (single attempt)."""
+        from app.services.llm import llm_service
+
+        if not docs:
+            return None
+
+        answer_type = await llm_service.identify_answer_type(question)
+        synthesized = await llm_service.synthesize(docs, question, answer_type=answer_type)
+        if synthesized and "FINAL:" in synthesized:
+            return synthesized.split("FINAL:", 1)[1].strip().split("\n")[0].strip()
+        return (synthesized or "").strip().split("\n")[0].strip() or None
+
+    async def retrieve_with_pipeline(
+        self,
+        query: str,
+        top_k: int = 50,
+    ) -> tuple[str | None, list[dict]]:
+        """
+        Sequential sub-question retrieval pipeline.
+
+        Architecture:
+          1. LLM classifies scope → community fast-path or sequential sub-Q loop.
+          2. LLM decomposes query into ordered sub-questions (dependencies first).
+          3. For each sub-question:
+               a. Fill placeholders with prior direct answers.
+               b. hybrid_search(resolved_q) — all results, no artificial limit.
+               c. LLM selects relevant docs with per-doc reasoning (logged).
+               d. Graph expansion (_expand_relevant_neighbors) from selected docs.
+               e. LLM selects relevant from expanded set (logged).
+               f. Dual answer: full contextual answer + short direct answer + reasoning.
+               g. Full trace logged at INFO level.
+          4. Final synthesis from original question + all sub-Q full+direct answers.
+          5. Fallback to direct synthesis if synthesis fails.
+        """
+        import re as _re_sq
+
+        from app.services.llm import llm_service
+
+        _t_pipeline_start = time.perf_counter()
+        logger.info(
+            f"\n{'='*70}\n"
+            f"[Pipeline] START retrieve_with_pipeline\n"
+            f"  query='{query}'\n"
+            f"{'='*70}"
+        )
+
+        # ── Community fast path ───────────────────────────────────────────────
+        query_scope = await self._classify_query_scope(query)
+        logger.info(f"  [Pipeline] Query scope: {query_scope}")
+
+        if query_scope == "community":
+            from app.services.embedding import embedding_service
+
+            query_vector = embedding_service.embed_query(query)
+            communities = graph_service.search_communities(
+                query_vector,
+                top_k=top_k,
+                min_score=settings.VECTOR_SIMILARITY_THRESHOLD,
+            )
+            docs = [
+                {
+                    "text": f"Community '{c.get('name', 'Unknown')}': {c.get('summary', '')}",
+                    "type": "community_summary",
+                    "original_obj": c,
+                    "priority": "primary",
+                    "linked_notes": [],
+                }
+                for c in communities
+                if c.get("summary")
+            ]
+            answer = await self._direct_synthesize(query, docs)
+            logger.info(
+                f"  [Pipeline] Community fast-path: {len(docs)} communities — "
+                f"answer={'yes' if answer else 'no'}"
+            )
+            return answer, docs
+
+        # ── Decompose into ordered sub-questions ─────────────────────────────
+        sub_questions = await llm_service.identify_information_needs(query)
+        logger.info(
+            f"  [Pipeline] Decomposed into {len(sub_questions)} sub-question(s):\n"
+            + "\n".join(f"    [{i+1}] {q}" for i, q in enumerate(sub_questions))
+        )
+
+        def _fill_placeholders(text: str, prior_answers: list[str]) -> str:
+            """Replace [anything] placeholders with the most recent concrete direct answer."""
+            if "[" not in text or not prior_answers:
+                return text
+            return _re_sq.sub(r"\[[^\]]+\]", prior_answers[-1], text)
+
+        sub_results: list[dict] = []
+        prior_direct_answers: list[str] = []
+        all_docs: list[dict] = []
+
+        for sq_idx, sq in enumerate(sub_questions):
+            resolved_sq = _fill_placeholders(sq, prior_direct_answers)
+            step_num = sq_idx + 1
+
+            logger.info(
+                f"\n{'─'*60}\n"
+                f"  [SubQ {step_num}/{len(sub_questions)}] '{resolved_sq}'\n"
+                f"{'─'*60}"
+            )
+
+            # ── a. Retrieve: full search, no top_k gating ─────────────────
+            raw_docs = await self.hybrid_search(resolved_sq)
+            logger.info(
+                f"  [SubQ {step_num}] hybrid_search returned {len(raw_docs)} candidates"
+            )
+
+            # ── b. LLM selects relevant docs with reasoning ───────────────
+            selected_docs, selection_reasons = (
+                await llm_service.select_relevant_docs_with_reasoning(raw_docs, resolved_sq)
+            )
+            logger.info(
+                f"  [SubQ {step_num}] LLM selected {len(selected_docs)}/{len(raw_docs)} docs"
+            )
+            if selection_reasons:
+                logger.info(f"  [SubQ {step_num}] Selection reasoning:")
+                for doc_idx, reason in selection_reasons.items():
+                    name = (raw_docs[doc_idx].get("original_obj") or {}).get("name", "?")
+                    logger.info(f"    doc[{doc_idx}] '{name}': {reason}")
+
+            # ── c. Graph expansion from selected docs ─────────────────────
+            surfaced_names: set[str] = {
+                (d.get("original_obj") or {}).get("name", "")
+                for d in selected_docs
+                if (d.get("original_obj") or {}).get("name")
+            }
+            expanded: list[dict] = []
+            if selected_docs:
+                try:
+                    expanded = await self._expand_relevant_neighbors(
+                        selected_docs, resolved_sq, surfaced_names
+                    )
+                    logger.info(
+                        f"  [SubQ {step_num}] Graph expansion produced {len(expanded)} neighbors"
+                    )
+                except Exception as _exp_err:
+                    logger.warning(
+                        f"  [SubQ {step_num}] Graph expansion failed: {_exp_err}"
+                    )
+
+            # ── d. LLM selects relevant from expanded set ─────────────────
+            expanded_selected: list[dict] = []
+            if expanded:
+                expanded_selected, expansion_reasons = (
+                    await llm_service.select_relevant_docs_with_reasoning(expanded, resolved_sq)
+                )
+                logger.info(
+                    f"  [SubQ {step_num}] LLM selected {len(expanded_selected)}/{len(expanded)} "
+                    f"expanded neighbors"
+                )
+                if expansion_reasons:
+                    logger.info(f"  [SubQ {step_num}] Expansion selection reasoning:")
+                    for doc_idx, reason in expansion_reasons.items():
+                        name = (expanded[doc_idx].get("original_obj") or {}).get("name", "?")
+                        logger.info(f"    neighbor[{doc_idx}] '{name}': {reason}")
+
+            # ── e. Build context pool for this sub-question ───────────────
+            context_docs = selected_docs + expanded_selected
+            logger.info(
+                f"  [SubQ {step_num}] Context pool: {len(context_docs)} docs "
+                f"({len(selected_docs)} retrieved + {len(expanded_selected)} expanded)"
+            )
+
+            # Accumulate all surfaced docs for final return value
+            seen_all = {
+                (d.get("original_obj") or {}).get("name", "")
+                for d in all_docs
+            }
+            for d in context_docs:
+                n = (d.get("original_obj") or {}).get("name", "")
+                if n not in seen_all:
+                    all_docs.append(d)
+                    seen_all.add(n)
+
+            # ── f. Dual answer: full + direct + reasoning ─────────────────
+            full_answer, direct_answer, answer_reasoning = (
+                await llm_service.answer_sub_question_dual(resolved_sq, context_docs)
+            )
+
+            logger.info(
+                f"\n  [SubQ {step_num}] ═══ ANSWER TRACE ═══\n"
+                f"    Question:      {resolved_sq}\n"
+                f"    Reasoning:     {answer_reasoning}\n"
+                f"    Full answer:   {full_answer or 'INSUFFICIENT'}\n"
+                f"    Direct answer: {direct_answer or 'INSUFFICIENT'}\n"
+                f"    Context docs:  {[((d.get('original_obj') or {}).get('name', '?')) for d in context_docs[:8]]}"
+            )
+
+            sub_results.append({
+                "question": sq,
+                "resolved_question": resolved_sq,
+                "raw_doc_count": len(raw_docs),
+                "selected_doc_count": len(selected_docs),
+                "selection_reasons": selection_reasons,
+                "expansion_count": len(expanded),
+                "expanded_selected_count": len(expanded_selected),
+                "full_answer": full_answer,
+                "direct_answer": direct_answer,
+                "answer_reasoning": answer_reasoning,
+            })
+
+            if direct_answer:
+                prior_direct_answers.append(direct_answer)
+
+        # ── Final synthesis ───────────────────────────────────────────────────
+        logger.info(
+            f"\n{'─'*60}\n"
+            f"  [Pipeline] Final synthesis from {len(sub_results)} sub-question result(s)\n"
+            f"{'─'*60}"
+        )
+        answer = await llm_service.final_synthesis_from_sub_results(query, sub_results)
+        if answer:
+            logger.info(f"  [Pipeline] Synthesis answer: '{answer[:120]}'")
+
+        # ── Fallback: direct synthesis from all accumulated docs ──────────────
+        if not answer and all_docs:
+            logger.info(
+                "  [Pipeline] Synthesis produced no answer — trying direct synthesis "
+                f"from {len(all_docs)} accumulated docs"
+            )
+            answer = await self._direct_synthesize(query, all_docs)
+            if answer:
+                logger.info(f"  [Pipeline] Direct synthesis answer: '{answer[:120]}'")
+
+        # ── Self / web fallbacks ──────────────────────────────────────────────
+        if not answer and settings.FALLBACK_MODE == "self":
+            logger.info("  [Pipeline] Fallback=self — querying LLM with no retrieved context.")
+            self_prompt = (
+                "Answer the following question using only your own knowledge. "
+                "Do not reference any documents or context.\n\n"
+                f"Question: {query}\n\nAnswer:"
+            )
+            try:
+                raw_self = await llm_service.generate(self_prompt, temperature=0.3, max_tokens=300)
+                answer = (raw_self or "").strip().split("\n")[0].strip() or None
+            except Exception as self_err:
+                logger.warning(f"  [Fallback] Self-RAG failed: {self_err}")
+        elif not answer and settings.FALLBACK_MODE == "web":
+            from app.services.tavily_service import web_search
+
+            logger.info("  [Pipeline] Fallback=web — trying Tavily web search...")
+            web_docs = await web_search(query)
+            if web_docs:
+                all_docs = all_docs + web_docs
+                answer = await self._direct_synthesize(query, all_docs)
+
+        _t_total = time.perf_counter() - _t_pipeline_start
+        _doc_types = ", ".join(
+            f"{t}={sum(1 for d in all_docs if d.get('type') == t)}"
+            for t in sorted({d.get('type', '?') for d in all_docs})
+        )
+        logger.info(
+            f"\n{'='*70}\n"
+            f"[Pipeline] COMPLETE in {_t_total:.2f}s\n"
+            f"  sub_questions={len(sub_results)}\n"
+            f"  answer={'yes (' + str(len(answer)) + ' chars)' if answer else 'NO ANSWER'}\n"
+            f"  docs_returned={len(all_docs)}\n"
+            f"  doc_types={{ {_doc_types} }}\n"
+            f"{'='*70}"
+        )
+        if answer:
+            logger.info(f"  [Pipeline] Answer: '{(answer[:200] + '...') if len(answer) > 200 else answer}'")
+
+        return answer, all_docs
+
+    async def retrieve_with_structured_subquestions(
+        self,
+        query: str,
+        top_k: int = 50,
+    ) -> tuple[str | None, list[dict]]:
+        """
+        Structured sub-question retrieval.
+
+        Algorithm:
+          1. Decompose query into sub-questions.
+          2. For each sub-question: hybrid_search → answer attempt.
+             If INSUFFICIENT, the model emits NEED: <query> which triggers a
+             targeted follow-up search; this repeats up to 5 times per sub-question.
+          3. Final synthesis from all Q/A pairs.
+          Returns (final_answer, all_accumulated_docs).
+        """
+        import re as _re
+
+        from app.services.llm import llm_service
+
+        all_docs: list[dict] = []
+        seen_names: set[str] = set()
+
+        def _add_docs(new_docs: list[dict]) -> None:
+            for d in new_docs:
+                name = (d.get("original_obj") or {}).get("name") or d.get("name", "")
+                if name and name not in seen_names:
+                    all_docs.append(d)
+                    seen_names.add(name)
+
+        _META_QUERY_RE = _re.compile(
+            r"\b(previous\s+answer|previous\s+question|from\s+the\s+previous|in\s+the\s+previous)\b",
+            _re.IGNORECASE,
+        )
+
+        def _fill_placeholders(text: str, prior_answers: list[str]) -> str:
+            """Replace [anything] CoT placeholders with the most recent concrete answer."""
+            if "[" not in text or not prior_answers:
+                return text
+            last = prior_answers[-1]
+            return _re.sub(r"\[[^\]]+\]", last, text)
+
+        async def _answer_question(question: str) -> str | None:
+            """
+            Try to produce a one-sentence answer for `question`.
+            Per attempt:
+              1. LLM filters retrieved docs to relevant subset.
+              2. Graph-expand from relevant nodes: 1-hop neighbours not yet
+                 surfaced are fetched; LLM selects which are relevant.
+              3. Answer generated from expanded context (no redundant filter).
+            If INSUFFICIENT, emit NEED: follow-up search and repeat.
+            """
+            logger.info(f"  [StructSubQ] searching: '{question}'")
+            if _META_QUERY_RE.search(question):
+                logger.info(f"  [StructSubQ] skipped meta-query: '{question[:80]}'")
+                return None, None
+
+            docs = await self.hybrid_search(question, top_k=top_k)
+            _add_docs(docs)
+
+            filter_redirects = 0
+            insufficient_attempts = 0
+
+            while filter_redirects < 3 and insufficient_attempts < 5:
+                # Step 1: Filter to relevant docs
+                relevant = await llm_service.select_relevant_docs(docs, question)
+
+                if not relevant:
+                    # Filter found nothing — generate a redirect query that
+                    # targets the specific missing information instead of
+                    # falling back to noisy unfiltered context.
+                    redirect = await llm_service.generate_redirect_query(docs, question)
+                    filter_redirects += 1
+                    logger.info(
+                        f"  [StructSubQ] filter-fail #{filter_redirects}, "
+                        f"redirect: '{redirect}'"
+                    )
+                    if redirect:
+                        new_docs = await self.hybrid_search(redirect, top_k=top_k)
+                        _add_docs(new_docs)
+                        docs = docs + [d for d in new_docs if d not in docs]
+                    continue  # retry filter with expanded doc set
+
+                # Step 2: Graph-expand — LLM selects useful 1-hop neighbours
+                surfaced = {
+                    (d.get("original_obj") or {}).get("name") or d.get("name", "")
+                    for d in docs
+                    if (d.get("original_obj") or {}).get("name") or d.get("name", "")
+                }
+                neighbor_docs = await self._expand_relevant_neighbors(
+                    relevant, question, surfaced
+                )
+                if neighbor_docs:
+                    _add_docs(neighbor_docs)
+
+                # Step 3: Re-filter once after graph expansion to trim noise.
+                expanded_context = relevant + neighbor_docs
+                final_context = await llm_service.select_relevant_docs(
+                    expanded_context, question
+                )
+                if not final_context:
+                    final_context = expanded_context
+
+                # Step 4: Answer with pre-filtered + expanded context
+                attempt_num = filter_redirects + insufficient_attempts + 1
+                answer, follow_up = await llm_service.answer_sub_question(
+                    question, final_context, skip_filter=True
+                )
+                if answer:
+                    logger.info(
+                        f"  [StructSubQ] answered (attempt {attempt_num}): '{answer[:80]}'"
+                    )
+                    return answer, None  # (concrete_answer, failure_summary)
+
+                insufficient_attempts += 1
+                if not follow_up:
+                    break
+                logger.info(f"  [StructSubQ] attempt {attempt_num} NEED: '{follow_up}'")
+                follow_up_docs = await self.hybrid_search(follow_up, top_k=top_k)
+                _add_docs(follow_up_docs)
+                # Accumulate — next attempt sees everything found so far
+                docs = docs + [d for d in follow_up_docs if d not in docs]
+
+            # All attempts exhausted — produce a one-sentence failure summary so
+            # synthesis has informative context rather than a bare "Not found".
+            # This is NOT used for CoT placeholder filling — only for final synthesis.
+            failure_summary = await llm_service.summarize_search_failure(question, docs)
+            logger.info(
+                f"  [StructSubQ] failure summary for '{question[:60]}': "
+                f"'{failure_summary[:80]}'"
+            )
+            return None, failure_summary  # (concrete_answer, failure_summary)
+
+        # Decompose query into sub-questions (single pass)
+        decomp = llm_service.decompose_query(query)
+        sub_questions = [sq["text"] for sq in decomp.get("sub_questions", [])]
+        logger.info(
+            f"  [StructSubQ] Decomposed into {len(sub_questions)} sub-questions: {sub_questions}"
+        )
+
+        # Single-hop fall-through: no decomposition needed
+        if not sub_questions or not decomp.get("requires_decomposition", False):
+            logger.info("  [StructSubQ] Single-hop — direct search")
+            answer, fail_ctx = await _answer_question(query)
+            result = answer or fail_ctx
+            logger.info(f"  [StructSubQ] Single-hop answer: '{result}'")
+            return result, all_docs
+
+        # Answer each sub-question sequentially, injecting prior answers
+        # into subsequent search queries (CoRAG-style chain-of-thought).
+        # prior_values only carries CONCRETE answers (answer is not None) so that
+        # failure summaries do not pollute [placeholder] substitution.
+        sub_answers: list[dict] = []
+        for sq in sub_questions:
+            prior_values = [
+                sa["answer"]
+                for sa in sub_answers
+                if sa.get("concrete") and sa["answer"] != "Not found in knowledge base"
+            ]
+            search_query = _fill_placeholders(sq, prior_values)
+            if prior_values:
+                prior = "; ".join(
+                    f"{sa['question']} → {sa['answer']}"
+                    for sa in sub_answers
+                    if sa.get("concrete")
+                    and sa["answer"] != "Not found in knowledge base"
+                )
+                search_query = f"{search_query} (Prior findings: {prior})"
+
+            answer, fail_ctx = await _answer_question(search_query)
+            sub_answers.append(
+                {
+                    "question": sq,
+                    "answer": answer or fail_ctx or "Not found in knowledge base",
+                    # concrete=True only for real answers, not failure summaries;
+                    # this prevents failure summaries being used as CoT values.
+                    "concrete": answer is not None,
+                }
+            )
+
+        logger.info(f"  [StructSubQ] {len(sub_answers)} sub-answers collected")
+
+        # Final synthesis
+        final_answer, _ = await llm_service.final_synthesis_from_sub_answers(
+            query, sub_answers
+        )
+        if final_answer:
+            logger.info(f"  [StructSubQ] Final answer: '{final_answer}'")
+        return final_answer, all_docs
 
 
 retrieval_service = RetrievalService()

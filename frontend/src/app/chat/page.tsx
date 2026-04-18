@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
-import { Send, User, Loader2, Sparkles, Database, Network, Cpu, X, FileText, ExternalLink, Trash2 } from "lucide-react";
+import { Send, User, Loader2, Sparkles, Database, Network, Cpu, X, FileText, ExternalLink, Trash2, ThumbsUp, ThumbsDown } from "lucide-react";
 import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
@@ -37,6 +37,7 @@ export default function ChatPage() {
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [greeting, setGreeting] = useState("Hello!");
+  const [feedbackGiven, setFeedbackGiven] = useState<Record<string, "up" | "down">>({});
 
   useEffect(() => {
     const hour = new Date().getHours();
@@ -145,6 +146,25 @@ export default function ChatPage() {
     if (window.confirm("Clear all chat messages? This cannot be undone.")) {
       setMessages([]);
       sessionStorage.removeItem("chat-messages");
+    }
+  };
+
+  const handleFeedback = async (assistantMessage: Message, rating: "up" | "down") => {
+    const msgIndex = messages.findIndex((m) => m.id === assistantMessage.id);
+    const userMsg = messages.slice(0, msgIndex).reverse().find((m) => m.role === "user");
+    if (!userMsg) return;
+
+    setFeedbackGiven((prev) => ({ ...prev, [assistantMessage.id]: rating }));
+
+    try {
+      await api.submitFeedback({
+        query: userMsg.content,
+        response: assistantMessage.content,
+        relevance: rating === "up" ? 5 : 1,
+        quality: rating === "up" ? 5 : 1,
+      });
+    } catch (error) {
+      console.error("Feedback error:", error);
     }
   };
 
@@ -362,6 +382,35 @@ export default function ChatPage() {
                         </>
                       ) : (
                         <p className="whitespace-pre-wrap">{message.content}</p>
+                      )}
+                      {message.role === "assistant" && !isLoading && (
+                        <div className="mt-3 flex items-center gap-2 border-t border-white/10 pt-2">
+                          {feedbackGiven[message.id] ? (
+                            <span className="text-xs text-white/40">
+                              {feedbackGiven[message.id] === "up" ? "👍 Thanks!" : "👎 Noted"}
+                            </span>
+                          ) : (
+                            <>
+                              <span className="text-xs text-white/40">Helpful?</span>
+                              <button
+                                onClick={() => handleFeedback(message, "up")}
+                                className="flex h-6 w-6 items-center justify-center rounded-md text-white/40 transition-all hover:bg-white/10 hover:text-green-400"
+                                title="Good response"
+                                aria-label="Mark as helpful"
+                              >
+                                <ThumbsUp className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleFeedback(message, "down")}
+                                className="flex h-6 w-6 items-center justify-center rounded-md text-white/40 transition-all hover:bg-white/10 hover:text-red-400"
+                                title="Poor response"
+                                aria-label="Mark as unhelpful"
+                              >
+                                <ThumbsDown className="h-3.5 w-3.5" />
+                              </button>
+                            </>
+                          )}
+                        </div>
                       )}
                     </div>
                     {message.role === "user" && (

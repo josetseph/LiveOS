@@ -228,6 +228,23 @@ def fuzzy_match(
     return jaccard >= threshold
 
 
+async def fetch_note_title_map(base_url: str) -> dict[str, str]:
+    """Pre-fetch all notes and return {note_id: title} for retrieval metric matching."""
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            response = await client.get(f"{base_url}/api/v1/notes")
+            response.raise_for_status()
+            notes = response.json()
+            return {
+                n["id"]: (n.get("title") or "")
+                for n in notes
+                if n.get("id")
+            }
+        except Exception as e:
+            print(f"Warning: could not fetch note title map: {e}")
+            return {}
+
+
 async def query_liveos(question: str, base_url: str = "http://localhost:8000") -> dict:
     """Send a question to LiveOS chat endpoint."""
     async with httpx.AsyncClient(timeout=1800.0) as client:
@@ -244,13 +261,20 @@ async def query_liveos(question: str, base_url: str = "http://localhost:8000") -
 
 def extract_contexts_from_response(
     response: dict,
+    note_title_map: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
-    """Extract context texts, titles, and note IDs from chat response."""
+    """Extract context texts, titles, and note IDs from chat response.
+
+    ``note_title_map`` is a pre-fetched {note_id: title} dict used to resolve
+    titles for linked_notes entries that only carry an ``id`` field (the common
+    case — note titles live in Postgres, not in the retrieval pipeline dicts).
+    """
     # API uses 'context' key which contains structured doc objects
     context_items = response.get("context", [])
     contexts = []
     titles = []
     note_ids = []
+    _title_map = note_title_map or {}
 
     for item in context_items:
         # Extract text content (this is what gets sent to LLM)
@@ -258,11 +282,12 @@ def extract_contexts_from_response(
         if text:
             contexts.append(text)
 
-        # Extract note IDs and titles from linked_notes
+        # Extract note IDs and titles from linked_notes.
+        # Evidence dicts only carry {"id": uuid} — resolve title from map.
         linked_notes = item.get("linked_notes", [])
         for note in linked_notes:
             note_id = note.get("id", "")
-            title = note.get("title", "")
+            title = note.get("title", "") or _title_map.get(note_id, "")
             if note_id and note_id not in note_ids:  # Deduplicate
                 note_ids.append(note_id)
             if title and title not in titles:  # Deduplicate
@@ -270,7 +295,7 @@ def extract_contexts_from_response(
 
         # Also check for direct note_id on the doc (for recent notes)
         direct_note_id = item.get("note_id")
-        direct_title = item.get("title")
+        direct_title = item.get("title") or _title_map.get(direct_note_id or "", "")
         if direct_note_id and direct_note_id not in note_ids:
             note_ids.append(direct_note_id)
         if direct_title and direct_title not in titles:
@@ -283,6 +308,7 @@ async def evaluate_single(
     test_case: dict,
     base_url: str,
     verbose: bool = False,
+    note_title_map: dict[str, str] | None = None,
 ) -> EvaluationResult:
     """Evaluate a single test case."""
     question = test_case["question"]
@@ -316,7 +342,7 @@ async def evaluate_single(
         result.error = "Empty answer returned from API"
         return result
 
-    contexts, titles, note_ids = extract_contexts_from_response(response)
+    contexts, titles, note_ids = extract_contexts_from_response(response, note_title_map)
     result.retrieved_contexts = contexts
     result.retrieved_note_titles = titles
     result.retrieved_note_ids = note_ids
@@ -397,9 +423,14 @@ async def run_evaluation(
     print(f"\n🧪 Evaluating {len(test_cases)} test cases from {manifest['dataset']}")
     print(f"   Endpoint: {base_url}")
 
+    # Pre-fetch note titles once so retrieval precision/recall can resolve
+    # note IDs returned by the pipeline back to human-readable titles.
+    note_title_map = await fetch_note_title_map(base_url)
+    print(f"   Note title map: {len(note_title_map)} notes loaded")
+
     results = []
     for test_case in tqdm(test_cases, desc="Evaluating"):
-        result = await evaluate_single(test_case, base_url, verbose)
+        result = await evaluate_single(test_case, base_url, verbose, note_title_map)
         results.append(result)
         await asyncio.sleep(0.5)
 
@@ -541,7 +572,7 @@ def main():
 
     if not manifest_path.exists():
         print(f"❌ Manifest not found: {manifest_path}")
-        print(f"   Run prepare_{args.dataset}_local.py first to create the dataset")
+        print(f"   Run prepare_dataset.py --dataset {args.dataset} first to ingest notes")
         return
 
     # Run evaluation

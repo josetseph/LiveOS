@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # ── LLM Provider ──────────────────────────────────────────────────────────
     # "ollama", "lm_studio", "openai", "gemini", "anthropic"
-    LLM_PROVIDER: str = "ollama"
+    LLM_PROVIDER: str = "gemini"
     LLM_FALLBACK_PROVIDER: str | None = None  # Optional fallback if primary fails
 
     # Local / OpenAI-compatible LLM (Ollama, LM Studio, or any v1 endpoint)
@@ -43,11 +43,35 @@ class Settings(BaseSettings):
     )
     EMBEDDING_DIMENSIONS: int = 1024
 
+    # ── Retrieval / Pipeline Controls ────────────────────────────────────────
+    VECTOR_SIMILARITY_THRESHOLD: float = 0.5
+    COMMUNITY_RECOMPUTE_BATCH_SIZE: int = 100
+    RERANKER_ENABLED: bool = False
+    MAX_POTENTIAL_QUESTIONS: int = 10
+    FALLBACK_MODE: str = "none"  # "none" | "web" | "self"
+    TAVILY_API_KEY: str | None = None
+
+    # ── Qdrant ───────────────────────────────────────────────────────────────
+    QDRANT_HOST: str = "127.0.0.1"
+    QDRANT_PORT: int = 6333
+    QDRANT_API_KEY: str | None = None
+    QDRANT_COLLECTION_NODE_CORES: str = "node_cores"
+    QDRANT_COLLECTION_NODE_FACTS: str = "node_facts"
+    QDRANT_COLLECTION_NODE_QUESTIONS: str = "node_questions"
+    QDRANT_COLLECTION_NODE_RELATIONSHIPS: str = "node_relationships"
+    QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS: str = "node_isolated_contexts"
+
+    # ── Elasticsearch ────────────────────────────────────────────────────────
+    ELASTICSEARCH_HOST: str = "127.0.0.1"
+    ELASTICSEARCH_PORT: int = 9200
+    ELASTICSEARCH_INDEX_NAME: str = "liveos_nodes"
+
     # ── Vision / Audio Models ─────────────────────────────────────────────────
     MODEL_FLORENCE_HF: str = "microsoft/Florence-2-large"
     MODEL_FLORENCE_LOCAL: str = "florence-2-large"
     MODEL_WHISPER_HF: str = "openai/whisper-large-v3-turbo"
     MODEL_WHISPER_LOCAL: str = "whisper-large-v3-turbo"
+    MODEL_RERANKER_LOCAL: str = "jina-reranker-v3"
 
     # Model storage path (relative to backend root)
     MODELS_PATH: str = "models"

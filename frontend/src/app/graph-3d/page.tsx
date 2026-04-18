@@ -1,391 +1,550 @@
 "use client";
 
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, type ReactNode, Component } from "react";
 import dynamic from "next/dynamic";
-import { Loader2, X, Network, Maximize2, Minimize2 } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
-import SpriteText from "three-spritetext";
+import { api } from "@/lib/api";
+import type { KnowledgeNode } from "@/components/graph3d/types";
+import { nodeColor } from "@/components/graph3d/nodeColors";
+import * as THREE from "three";
 
-// Dynamically import ForceGraph3D as it relies on window/browser APIs
-const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), {
-  ssr: false,
-});
+// ForceGraph3D relies on browser APIs — must be dynamically imported (no SSR)
+const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), { ssr: false });
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+// ── Error boundary ────────────────────────────────────────────────────────────
 
-interface Node {
-  id: number;
-  name: string;
-  group: string;
-  summary?: string;
-  description?: string;
-  trait?: string;
-  status?: string;
-  entity_type?: string;
-  created_at?: string;
-  x?: number;
-  y?: number;
-  z?: number;
+class ErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: string | null }
+> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(e: Error) {
+    return { error: e.message };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{
+          position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+          alignItems: "center", justifyContent: "center", background: "#000",
+          gap: "1rem", color: "#f87171",
+        }}>
+          <p style={{ fontSize: "0.9rem", maxWidth: "32rem", textAlign: "center", color: "#94a3b8" }}>
+            {this.state.error}
+          </p>
+          <button
+            onClick={() => this.setState({ error: null })}
+            style={{
+              padding: "0.4rem 1rem", background: "rgba(168,85,247,0.2)",
+              border: "1px solid rgba(168,85,247,0.5)", borderRadius: "0.4rem",
+              color: "#c084fc", cursor: "pointer", fontSize: "0.8rem",
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
-interface Link {
-  source: number | Node;
-  target: number | Node;
-  type: string;
-  created_at?: string;
+// ── Node detail modal ─────────────────────────────────────────────────────────
+
+function NodeDetailModal({ node, onClose }: { node: KnowledgeNode; onClose: () => void }) {
+  const color = nodeColor(node.node_type);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [detail, setDetail] = useState<KnowledgeNode | null>(null);
+  const [fetching, setFetching] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFetching(true);
+    api.getNodeDetail(node.node_id)
+      .then((d) => { if (!cancelled) setDetail({ ...node, ...d }); })
+      .catch(() => { if (!cancelled) setDetail(node); })
+      .finally(() => { if (!cancelled) setFetching(false); });
+    return () => { cancelled = true; };
+  }, [node.node_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const display = detail ?? node;
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 999,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: "rgba(0,0,0,0.78)", backdropFilter: "blur(6px)",
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div style={{ position: "relative", maxWidth: 400, width: "100%", margin: "0 1.5rem" }}>
+        <button
+          onClick={onClose}
+          style={{
+            position: "absolute", top: -44, right: 0,
+            background: "none", border: "none", color: "#fff",
+            cursor: "pointer", padding: 4, lineHeight: 1,
+          }}
+          aria-label="Close"
+        >
+          <svg width={28} height={28} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
+        </button>
+
+        <div style={{ width: "100%" }}>
+          <div
+            ref={cardRef}
+            style={{
+              borderRadius: 16, background: "#0a0e1a",
+              border: `1px solid ${color}55`, padding: "20px 22px",
+              boxShadow: `0 0 40px ${color}22, rgba(0,0,0,0.29) 0px 21px 46px`,
+              cursor: "default",
+            }}
+          >
+            <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.12em", color, fontWeight: 700, marginBottom: 8, fontFamily: "system-ui, sans-serif" }}>
+              {display.node_type}
+            </div>
+            <h2 style={{ margin: "0 0 12px", fontSize: 20, fontWeight: 800, color: "#f8fafc", lineHeight: 1.25, fontFamily: "system-ui, sans-serif" }}>
+              {display.name}
+            </h2>
+            {fetching && (
+              <div style={{ fontSize: 12, color: "#475569", fontFamily: "system-ui, sans-serif", marginBottom: 8 }}>
+                Loading details…
+              </div>
+            )}
+            {display.description && (
+              <p style={{ margin: "0 0 12px", fontSize: 13, color: "#94a3b8", lineHeight: 1.6, fontFamily: "system-ui, sans-serif" }}>
+                {display.description}
+              </p>
+            )}
+            {display.facts && display.facts.length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.1em", color: "#475569", fontWeight: 700, marginBottom: 6, fontFamily: "system-ui, sans-serif" }}>Facts</div>
+                <ul style={{ margin: 0, paddingLeft: 16 }}>
+                  {display.facts.slice(0, 5).map((f, i) => (
+                    <li key={i} style={{ fontSize: 12, color: "#cbd5e1", marginBottom: 4, lineHeight: 1.5, fontFamily: "system-ui, sans-serif" }}>{f}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {display.domain && (
+              <div style={{ fontSize: 11, color: "#7dd3fc", fontFamily: "system-ui, sans-serif" }}>{display.domain}</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-interface GraphData {
-  nodes: Node[];
-  links: Link[];
+// ── HUD ───────────────────────────────────────────────────────────────────────
+
+function HUD({ nodeCount, edgeCount }: { nodeCount: number; edgeCount: number }) {
+  return (
+    <>
+      <div style={{
+        position: "absolute", top: "1.5rem", left: "1.5rem", zIndex: 40,
+        background: "rgba(10,10,20,0.75)", border: "1px solid rgba(255,255,255,0.1)",
+        borderRadius: 12, padding: "0.5rem 1rem",
+        color: "#94a3b8", fontSize: "0.75rem", letterSpacing: "0.04em",
+        backdropFilter: "blur(8px)", userSelect: "none", pointerEvents: "none",
+        fontFamily: "system-ui, sans-serif",
+      }}>
+        <span style={{ color: "#e879f9", fontWeight: 700 }}>{nodeCount.toLocaleString()}</span>
+        <span style={{ margin: "0 0.4em" }}>nodes</span>
+        <span style={{ color: "#475569" }}>·</span>
+        <span style={{ color: "#22d3ee", fontWeight: 700, marginLeft: "0.4em" }}>{edgeCount.toLocaleString()}</span>
+        <span style={{ marginLeft: "0.4em" }}>edges</span>
+      </div>
+      <div style={{
+        position: "absolute", bottom: "1.5rem", left: "50%",
+        transform: "translateX(-50%)", zIndex: 40,
+        background: "rgba(10,10,20,0.7)", border: "1px solid rgba(255,255,255,0.1)",
+        borderRadius: "999px", padding: "0.45rem 1.2rem",
+        color: "#94a3b8", fontSize: "0.75rem", letterSpacing: "0.04em",
+        backdropFilter: "blur(8px)", userSelect: "none", pointerEvents: "none",
+        whiteSpace: "nowrap", fontFamily: "system-ui, sans-serif",
+      }}>
+        Drag to look &nbsp;·&nbsp; Right drag to pan &nbsp;·&nbsp; Scroll to fly &nbsp;·&nbsp; Click node for details
+      </div>
+    </>
+  );
 }
+
+// ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Graph3DPage() {
-  const [data, setData] = useState<GraphData>({ nodes: [], links: [] });
+  const [graphData, setGraphData] = useState<{ nodes: object[]; links: object[] }>({ nodes: [], links: [] });
   const [loading, setLoading] = useState(true);
-  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [selectedNode, setSelectedNode] = useState<KnowledgeNode | null>(null);
+  const [proximityLabels, setProximityLabels] = useState<
+    Array<{ id: string; name: string; nodeType: string; sx: number; sy: number; opacity: number }>
+  >([]);
+
+  // Mirror nodes into a ref so the rAF label loop never has a stale closure
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const nodesRef = useRef<any[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
 
+  // FPS camera rig — all refs so event handlers never stale-close over state
+  const pendingDrag = useRef<{ button: number; x: number; y: number } | null>(null);
+  const dragging = useRef(false);
+  const rightDrag = useRef(false);
+  const last = useRef({ x: 0, y: 0 });
+  const keysRef = useRef<Set<string>>(new Set());
+  const wasdRafRef = useRef<number>(0);
+  const rigCleanup = useRef<(() => void) | null>(null);
+
+  useEffect(() => { nodesRef.current = graphData.nodes as any[]; }, [graphData.nodes]); // eslint-disable-line @typescript-eslint/no-explicit-any
+
+  // Build a stable id→node_type map so linkColor can resolve string IDs too
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const nodeTypeMapRef = useRef<Map<string, string>>(new Map());
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/v1/graph/export`);
-        const graphData = await response.json();
-        setData(graphData);
-      } catch (error) {
-        console.error("Failed to fetch graph data", error);
-      } finally {
-        setLoading(false);
+    const m = new Map<string, string>();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const n of graphData.nodes as any[]) {
+      if (n.id != null) m.set(String(n.id), n.node_type ?? "");
+    }
+    nodeTypeMapRef.current = m;
+  }, [graphData.nodes]);
+
+  // ── Proximity labels — show node names when camera is nearby ──────────────
+  useEffect(() => {
+    if (!graphData.nodes.length) return;
+
+    const PROXIMITY_RADIUS = 400; // world units
+    const MAX_LABELS = 12;
+    let rafId = 0;
+    let lastUpdate = 0;
+
+    const loop = () => {
+      rafId = requestAnimationFrame(loop);
+      const now = Date.now();
+      if (now - lastUpdate < 120) return; // ~8 fps is enough for labels
+      lastUpdate = now;
+
+      const fg = graphRef.current;
+      if (!fg) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const camera = (fg as any).camera?.();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const renderer = (fg as any).renderer?.();
+      if (!camera || !renderer) return;
+
+      const { width, height } = renderer.domElement as HTMLCanvasElement;
+      const camPos = camera.position as THREE.Vector3;
+
+      // Find nodes within radius, sorted by distance
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const nearby: Array<{ node: any; dist: number }> = [];
+      for (const node of nodesRef.current) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const n = node as any;
+        const nx = n.fx ?? n.x ?? 0;
+        const ny = n.fy ?? n.y ?? 0;
+        const nz = n.fz ?? n.z ?? 0;
+        const dx = camPos.x - nx;
+        const dy = camPos.y - ny;
+        const dz = camPos.z - nz;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist < PROXIMITY_RADIUS) nearby.push({ node, dist });
       }
+
+      if (!nearby.length) { setProximityLabels([]); return; }
+
+      nearby.sort((a, b) => a.dist - b.dist);
+      const top = nearby.slice(0, MAX_LABELS);
+
+      const labels: typeof proximityLabels = [];
+      for (const { node, dist } of top) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const n = node as any;
+        const nx = n.fx ?? n.x ?? 0;
+        const ny = n.fy ?? n.y ?? 0;
+        const nz = n.fz ?? n.z ?? 0;
+
+        const vec = new THREE.Vector3(nx, ny, nz);
+        vec.project(camera);
+        if (vec.z >= 1) continue; // behind clip plane
+
+        const sx = (vec.x + 1) / 2 * width;
+        const sy = (1 - vec.y) / 2 * height;
+        const opacity = Math.max(0.4, 1 - dist / PROXIMITY_RADIUS);
+
+        labels.push({ id: n.node_id ?? String(n.id), name: n.name ?? "?", nodeType: n.node_type ?? "", sx, sy, opacity });
+      }
+      setProximityLabels(labels);
     };
-    fetchData();
-  }, []);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const handleNodeClick = useCallback((node: any) => {
-    setSelectedNode(node);
-  }, []);
+    rafId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafId);
+  }, [graphData.nodes.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleClosePanel = useCallback(() => {
-    setSelectedNode(null);
-  }, []);
-
-  const toggleFullscreen = useCallback(() => {
-    if (!document.fullscreenElement) {
-      containerRef.current?.requestFullscreen();
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen();
-      setIsFullscreen(false);
-    }
-  }, []);
-
+  // Fetch and adapt data: nodes need `id` field, edges become `links`
   useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-    };
-
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    api.getGraph3DFull()
+      .then(({ nodes, edges }) => {
+        const nodeIdSet = new Set(nodes.map((n) => n.node_id));
+        setGraphData({
+          nodes: nodes.map((n) => ({ ...n, id: n.node_id, fx: n.x, fy: n.y, fz: n.z })),
+          // Drop edges where either endpoint is missing from the node list
+          links: edges
+            .filter((e) => nodeIdSet.has(e.source) && nodeIdSet.has(e.target))
+            .map((e) => ({ source: e.source, target: e.target, type: e.type })),
+        });
+      })
+      .catch(console.error)
+      .finally(() => setLoading(false));
   }, []);
 
-  // Node color based on group type
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const getNodeColor = (node: any) => {
-    // Reference nodes (papers, books, citations)
-    if (node.group === "Reference") return "#ffd700";
-    
-    // Community nodes (clusters)
-    if (node.group === "Community") return "#ffffff";
-    
-    // Domain-aware coloring for Notes
-    if (node.group === "Note") {
-      if (node.domain === "Academic") return "#10b981"; // emerald
-      if (node.domain === "Professional") return "#a855f7"; // purple
-      if (node.domain === "Creative") return "#ec4899"; // pink/rose
-      if (node.domain === "Dreams") return "#4338ca"; // indigo
-      return "#3b82f6"; // blue for Personal (default)
+  // Install FPS camera controls once ForceGraph3D is mounted.
+  // Poll every 100 ms until graphRef.current exposes camera() + renderer(),
+  // then disable built-in OrbitControls and take over with our own listeners.
+  useEffect(() => {
+    if (!graphData.nodes.length) return;
+
+    const install = () => {
+      if (!graphRef.current) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const fg = graphRef.current as any;
+      const camera = fg.camera?.();
+      const renderer = fg.renderer?.();
+      if (!camera || !renderer) return false;
+
+      const controls = fg.controls?.();
+      if (controls) controls.enabled = false;
+
+      const canvas = renderer.domElement as HTMLCanvasElement;
+      const DRAG_THRESHOLD = 5;
+
+      const onDown = (e: MouseEvent) => {
+        pendingDrag.current = { button: e.button, x: e.clientX, y: e.clientY };
+      };
+
+      const onMove = (e: MouseEvent) => {
+        if (pendingDrag.current && !dragging.current) {
+          const dx = e.clientX - pendingDrag.current.x;
+          const dy = e.clientY - pendingDrag.current.y;
+          if (Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
+            dragging.current = true;
+            rightDrag.current = pendingDrag.current.button === 2;
+            last.current = { x: pendingDrag.current.x, y: pendingDrag.current.y };
+            pendingDrag.current = null;
+          }
+          return;
+        }
+        if (!dragging.current) return;
+
+        const dx = e.clientX - last.current.x;
+        const dy = e.clientY - last.current.y;
+        last.current = { x: e.clientX, y: e.clientY };
+
+        if (rightDrag.current) {
+          // Scale pan speed with camera distance so it feels consistent at any zoom level
+          const panSpeed = camera.position.length() * 0.001;
+          camera.translateX(-dx * panSpeed);
+          camera.translateY(dy * panSpeed);
+        } else {
+          camera.rotation.order = "YXZ";
+          camera.rotation.y -= dx * 0.003;
+          camera.rotation.x -= dy * 0.003;
+          camera.rotation.x = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, camera.rotation.x));
+        }
+      };
+
+      const onUp = () => {
+        dragging.current = false;
+        pendingDrag.current = null;
+      };
+
+      const onWheel = (e: WheelEvent) => {
+        e.preventDefault();
+        camera.translateZ(e.deltaY * 0.35);
+      };
+
+      const onContextMenu = (e: Event) => e.preventDefault();
+
+      // WASD fly controls — don't capture when a form element has focus
+      const onKeyDown = (e: KeyboardEvent) => {
+        const tag = (document.activeElement as HTMLElement)?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        if ((document.activeElement as HTMLElement)?.isContentEditable) return;
+        keysRef.current.add(e.key.toLowerCase());
+      };
+      const onKeyUp = (e: KeyboardEvent) => { keysRef.current.delete(e.key.toLowerCase()); };
+
+      // Smooth WASD loop — speed adapts to camera distance (same feel at any zoom)
+      let lastWasdTime = performance.now();
+      const wasdLoop = () => {
+        wasdRafRef.current = requestAnimationFrame(wasdLoop);
+        const now = performance.now();
+        const dt = Math.min(now - lastWasdTime, 50);
+        lastWasdTime = now;
+        const keys = keysRef.current;
+        if (!keys.size) return;
+        const speed = (camera.position.length() * 0.002 * dt) / 16.67;
+        if (keys.has("w")) camera.translateZ(-speed);
+        if (keys.has("s")) camera.translateZ(speed);
+        if (keys.has("a")) camera.translateX(-speed);
+        if (keys.has("d")) camera.translateX(speed);
+      };
+      wasdRafRef.current = requestAnimationFrame(wasdLoop);
+
+      window.addEventListener("mousedown", onDown);
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      window.addEventListener("wheel", onWheel, { passive: false });
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      canvas.addEventListener("contextmenu", onContextMenu);
+
+      rigCleanup.current = () => {
+        window.removeEventListener("mousedown", onDown);
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("wheel", onWheel);
+        window.removeEventListener("keydown", onKeyDown);
+        window.removeEventListener("keyup", onKeyUp);
+        cancelAnimationFrame(wasdRafRef.current);
+        canvas.removeEventListener("contextmenu", onContextMenu);
+      };
+
+      return true;
+    };
+
+    if (!install()) {
+      const id = setInterval(() => { if (install()) clearInterval(id); }, 100);
+      return () => {
+        clearInterval(id);
+        rigCleanup.current?.();
+        rigCleanup.current = null;
+      };
     }
-    
-    // Original colors for other node types
-    if (node.group === "Concept") return "#00c6ff";
-    if (node.group === "Entity") return "#7000ff";
-    if (node.group === "Persona") return "#a78bfa";
-    if (node.group === "Task") return "#ff0055";
-    return "#ffffff";
-  };
+
+    return () => {
+      rigCleanup.current?.();
+      rigCleanup.current = null;
+    };
+  }, [graphData.nodes.length]);
+
+  const handleNodeClick = useCallback(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (node: any) => {
+      if (dragging.current) return;
+      const n: KnowledgeNode = {
+        node_id: node.node_id ?? String(node.id ?? ""),
+        name: node.name ?? "",
+        node_type: node.node_type ?? "unknown",
+        description: node.description ?? "",
+        facts: node.facts ?? [],
+        domain: node.domain,
+        status: node.status,
+        community_id: node.community_id,
+        x: node.x ?? 0,
+        y: node.y ?? 0,
+        z: node.z ?? 0,
+      };
+      setSelectedNode(n);
+    },
+    [],
+  );
 
   if (loading) {
     return (
-      <div className="flex h-screen w-full items-center justify-center bg-black">
-        <Loader2 className="h-8 w-8 animate-spin text-purple-400" />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: "#000", color: "#94a3b8", fontFamily: "system-ui, sans-serif", fontSize: "0.9rem" }}>
+        Loading graph…
       </div>
     );
   }
 
   return (
-    <div ref={containerRef} className="relative h-screen w-full overflow-hidden bg-black">
+    <div style={{ position: "relative", width: "100%", height: "100vh", background: "#000" }}>
+      <ErrorBoundary>
+        <ForceGraph3D
+          ref={graphRef}
+          graphData={graphData}
+          nodeId="id"
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          nodeColor={(node: any) => nodeColor(node.node_type ?? "")}
+          nodeRelSize={4}
+          nodeOpacity={1.0}
+          nodeResolution={16}
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          linkColor={(link: any) => {
+            const src = link.source;
+            const type = typeof src === "object" && src !== null
+              ? (src.node_type ?? "")
+              : nodeTypeMapRef.current.get(String(src)) ?? "";
+            return nodeColor(type);
+          }}
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          linkDirectionalParticleColor={(link: any) => {
+            const src = link.source;
+            const type = typeof src === "object" && src !== null
+              ? (src.node_type ?? "")
+              : nodeTypeMapRef.current.get(String(src)) ?? "";
+            return nodeColor(type);
+          }}
+          linkWidth={1.2}
+          linkOpacity={0.5}
+          linkCurvature={0.1}
+          linkDirectionalParticles={2}
+          linkDirectionalParticleWidth={3}
+          linkDirectionalParticleSpeed={0.006}
+          backgroundColor="#000000"
+          showNavInfo={false}
+          enableNodeDrag={false}
+          enableNavigationControls={false}
+          cooldownTicks={0}
+          warmupTicks={0}
+          onEngineStop={() => {
+            // Fit camera to the graph after physics is disabled.
+            // zoomToFit works on the Three.js camera directly, so it is
+            // compatible with the FPS rig that takes over afterwards.
+            graphRef.current?.zoomToFit(400, 600);
+          }}
+          onNodeClick={handleNodeClick}
+        />
+      </ErrorBoundary>
 
-      {/* Top Controls */}
-      <div className="absolute top-6 left-6 z-20 flex items-center gap-4">
-        <div className="rounded-2xl border border-white/10 bg-black/80 px-6 py-3 shadow-2xl backdrop-blur-xl">
-          <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-linear-to-br from-purple-500/20 to-purple-500/5 p-2">
-              <Network className="h-5 w-5 text-pink-400" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold text-white">3D Knowledge Graph</h1>
-              <p className="text-xs text-zinc-500">
-                {data.nodes.length} nodes · {data.links.length} connections
-              </p>
-            </div>
-          </div>
-        </div>
+      <HUD nodeCount={graphData.nodes.length} edgeCount={graphData.links.length} />
 
-        <button
-          onClick={toggleFullscreen}
-          className="rounded-xl border border-white/10 bg-black/80 p-3 backdrop-blur-xl transition-all hover:bg-white/5 hover:scale-105"
-        >
-          {isFullscreen ? (
-            <Minimize2 className="h-5 w-5 text-purple-400" />
-          ) : (
-            <Maximize2 className="h-5 w-5 text-purple-400" />
-          )}
-        </button>
-      </div>
-
-      {/* Legend */}
-      <div className="absolute bottom-6 left-6 z-20 max-w-xs rounded-2xl border border-white/10 bg-black/80 p-5 shadow-2xl backdrop-blur-xl transition-all duration-300 hover:scale-[1.02]">
-        <div className="mb-4 flex items-center gap-2.5 border-b border-white/10 pb-3">
-          <div className="rounded-lg bg-linear-to-br from-purple-500/20 to-purple-500/5 p-2">
-            <Network className="h-5 w-5 text-pink-400" />
-          </div>
-          <div>
-            <h3 className="text-sm font-bold text-white">Neural Graph</h3>
-            <p className="text-[10px] font-medium text-zinc-500">Knowledge Visualization</p>
-          </div>
-        </div>
-        <div className="space-y-2.5">
-          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
-            <div className="relative">
-              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#00c6ff] shadow-[0_0_12px_#00c6ff]"></span>
-              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#00c6ff] opacity-30"></span>
-            </div>
-            <span className="font-semibold">Concept / Theme</span>
-          </div>
-          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
-            <div className="relative">
-              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#7000ff] shadow-[0_0_12px_#7000ff]"></span>
-              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#7000ff] opacity-30"></span>
-            </div>
-            <span className="font-semibold">Entity (Person/Place)</span>
-          </div>
-          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
-            <div className="relative">
-              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#a78bfa] shadow-[0_0_12px_#a78bfa]"></span>
-              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#a78bfa] opacity-30"></span>
-            </div>
-            <span className="font-semibold">Persona / Trait</span>
-          </div>
-          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
-            <div className="relative">
-              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#ff0055] shadow-[0_0_12px_#ff0055]"></span>
-              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#ff0055] opacity-30"></span>
-            </div>
-            <span className="font-semibold">Task / Goal</span>
-          </div>
-          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
-            <div className="relative">
-              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-white shadow-[0_0_12px_rgba(255,255,255,0.6)]"></span>
-              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-white opacity-20"></span>
-            </div>
-            <span className="font-semibold">Note / Memory</span>
-          </div>
-          <div className="group flex cursor-default items-center gap-3 rounded-lg border border-transparent p-2 text-sm text-zinc-300 transition-all hover:border-white/10 hover:bg-white/5">
-            <div className="relative">
-              <span className="block h-3.5 w-3.5 shrink-0 rounded-full bg-[#ffd700] shadow-[0_0_12px_#ffd700]"></span>
-              <span className="absolute inset-0 h-3.5 w-3.5 animate-ping rounded-full bg-[#ffd700] opacity-30"></span>
-            </div>
-            <span className="font-semibold">Reference / Citation</span>
-          </div>
-        </div>
-        <div className="mt-3 space-y-1.5 border-t border-white/10 pt-3">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Domain Colors</p>
-          <div className="flex flex-wrap gap-2">
-            <div className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-400">
-              Academic
-            </div>
-            <div className="rounded-md border border-blue-500/20 bg-blue-500/10 px-2 py-1 text-[10px] font-semibold text-blue-400">
-              Personal
-            </div>
-            <div className="rounded-md border border-purple-500/20 bg-purple-500/10 px-2 py-1 text-[10px] font-semibold text-purple-400">
-              Professional
-            </div>
-            <div className="rounded-md border border-pink-500/20 bg-pink-500/10 px-2 py-1 text-[10px] font-semibold text-pink-400">
-              Creative
-            </div>
-            <div className="rounded-md border border-indigo-600/20 bg-indigo-600/10 px-2 py-1 text-[10px] font-semibold text-indigo-400">
-              Dreams
-            </div>
-          </div>
-        </div>
-        <div className="mt-3 flex items-center justify-center gap-2 border-t border-white/10 pt-3 text-[10px] text-zinc-600">
-          <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"></div>
-          <span className="font-mono font-semibold">LIVE GRAPH</span>
-        </div>
-      </div>
-
-      {/* Node Details Panel */}
-      <AnimatePresence>
-        {selectedNode && (
-          <motion.div
-            initial={{ opacity: 0, x: 400 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 400 }}
-            className="absolute top-6 right-6 z-20 w-96 rounded-2xl border border-white/10 bg-black/90 shadow-2xl backdrop-blur-xl"
+      {/* Proximity labels — appear when camera flies close to a node */}
+      <div style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
+        {proximityLabels.map((lbl) => (
+          <div
+            key={lbl.id}
+            style={{
+              position: "absolute",
+              left: lbl.sx,
+              top: lbl.sy,
+              transform: "translate(-50%, calc(-100% - 10px))",
+              color: nodeColor(lbl.nodeType),
+              fontSize: "0.72rem",
+              fontFamily: "system-ui, sans-serif",
+              fontWeight: 600,
+              opacity: lbl.opacity,
+              textShadow: "0 0 8px #000, 0 0 16px #000, 0 1px 3px #000",
+              whiteSpace: "nowrap",
+              letterSpacing: "0.03em",
+              pointerEvents: "none",
+              userSelect: "none",
+            }}
           >
-            <div className="p-6">
-              <div className="mb-4 flex items-start justify-between">
-                <div className="flex items-center gap-3">
-                  <span
-                    className="block h-4 w-4 rounded-full shadow-lg"
-                    style={{
-                      backgroundColor: getNodeColor(selectedNode),
-                      boxShadow: `0 0 12px ${getNodeColor(selectedNode)}`,
-                    }}
-                  ></span>
-                  <div>
-                    <h2 className="text-lg font-bold text-white">{selectedNode.name}</h2>
-                    <p className="text-xs text-zinc-500">{selectedNode.group}</p>
-                  </div>
-                </div>
-                <button
-                  onClick={handleClosePanel}
-                  className="rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-white/5 hover:text-white"
-                  title="Close panel"
-                >
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
+            {lbl.name}
+          </div>
+        ))}
+      </div>
 
-              <div className="space-y-3">
-                {selectedNode.summary && (
-                  <div>
-                    <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-1">
-                      Summary
-                    </p>
-                    <p className="text-sm text-zinc-300 leading-relaxed">{selectedNode.summary}</p>
-                  </div>
-                )}
-
-                {selectedNode.description && (
-                  <div>
-                    <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-1">
-                      Description
-                    </p>
-                    <p className="text-sm text-zinc-300 leading-relaxed">
-                      {selectedNode.description}
-                    </p>
-                  </div>
-                )}
-
-                {selectedNode.trait && (
-                  <div>
-                    <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-1">
-                      Trait
-                    </p>
-                    <p className="text-sm text-zinc-300 leading-relaxed">{selectedNode.trait}</p>
-                  </div>
-                )}
-
-                {selectedNode.status && (
-                  <div>
-                    <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-1">
-                      Status
-                    </p>
-                    <p className="text-sm text-zinc-300">{selectedNode.status}</p>
-                  </div>
-                )}
-
-                {selectedNode.entity_type && (
-                  <div>
-                    <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-1">
-                      Type
-                    </p>
-                    <p className="text-sm text-zinc-300">{selectedNode.entity_type}</p>
-                  </div>
-                )}
-
-                {selectedNode.created_at && (
-                  <div>
-                    <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-1">
-                      Created
-                    </p>
-                    <p className="text-sm text-zinc-300">
-                      {new Date(selectedNode.created_at).toLocaleDateString()}
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* 3D Force Graph */}
-      <ForceGraph3D
-        ref={graphRef}
-        graphData={data}
-        nodeLabel="name"
-        nodeAutoColorBy="group"
-        nodeColor={getNodeColor}
-        nodeRelSize={2}
-        nodeResolution={20}
-        nodeOpacity={0.9}
-        cooldownTicks={500}
-        warmupTicks={500}
-        d3AlphaDecay={0.05}
-        d3VelocityDecay={0.4}
-        d3AlphaMin={0}
-        enableNavigationControls={true}
-        enablePointerInteraction={true}
-        linkColor={() => "rgba(255, 255, 255, 0.2)"}
-        linkWidth={0.3}
-        linkOpacity={0.3}
-        linkDirectionalParticles={1}
-        linkDirectionalParticleWidth={1}
-        linkDirectionalParticleSpeed={0.008}
-        linkCurvature={0.5}
-        linkDirectionalArrowLength={3}
-        linkDirectionalArrowRelPos={1}
-        linkThreeObjectExtend={true}
-        onNodeClick={handleNodeClick}
-        enableNodeDrag={false}
-        showNavInfo={true}
-        backgroundColor="#000000"
-        nodeThreeObject={(node: any) => {
-          // Only show labels for important nodes (those with many connections)
-          const connections = data.links.filter((l: any) => 
-            (typeof l.source === 'object' ? l.source.id : l.source) === node.id ||
-            (typeof l.target === 'object' ? l.target.id : l.target) === node.id
-          ).length;
-          
-          if (connections < 3) return undefined; // No label for nodes with few connections
-          
-          const sprite = new SpriteText(node.name, 6);
-          // @ts-expect-error - depthWrite exists but not in types
-          sprite.material.depthWrite = false;
-          sprite.color = getNodeColor(node);
-          sprite.textHeight = 1.5;
-          // @ts-expect-error - position exists but not in types
-          sprite.position.set(0, -4, 0);
-          return sprite;
-        }}
-        nodeThreeObjectExtend={true}
-      />
+      {selectedNode && (
+        <NodeDetailModal node={selectedNode} onClose={() => setSelectedNode(null)} />
+      )}
     </div>
   );
 }

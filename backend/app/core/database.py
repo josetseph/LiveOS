@@ -22,8 +22,9 @@ engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     future=True,
-    pool_pre_ping=True,
-    poolclass=NullPool,  # Use NullPool for Transaction Poolers to avoid conflicts
+    poolclass=NullPool,  # No pool — each request gets its own connection, closed immediately.
+    # This eliminates QueuePool exhaustion when many concurrent requests + background
+    # tasks compete for connections. Appropriate for a single-process dev/benchmark server.
     connect_args={"statement_cache_size": 0},
 )
 logger.info("Async database engine created successfully")

@@ -3,7 +3,7 @@ Data validation and standardization utilities for ingestion pipeline.
 Prevents common data quality issues by normalizing extracted data.
 """
 
-from app.schemas.extraction import Extraction, ExternalReference
+from app.schemas.extraction import Extraction
 import hashlib
 
 
@@ -136,55 +136,6 @@ def generate_unique_task_name(description: str, task_id: str = None) -> str:
     return f"{truncated}_{suffix}"
 
 
-def validate_reference_summary(ref: ExternalReference) -> ExternalReference:
-    """
-    Ensures reference has a non-empty summary/title.
-    Prevents empty reference nodes in graph.
-
-    Args:
-        ref: ExternalReference object
-
-    Returns:
-        Validated reference with guaranteed title
-    """
-    if not ref.title or not ref.title.strip():
-        # Generate title from content if available
-        if ref.content and ref.content.strip():
-            ref.title = f"Reference: {ref.content[:50].strip()}"
-        elif ref.source and ref.source.strip():
-            ref.title = f"{ref.type} by {ref.source}"
-        else:
-            ref.title = f"Untitled {ref.type}"
-
-    # Note: 'name' field is added in graph query, not in schema
-    return ref
-
-
 def standardize_extraction(extraction: Extraction) -> Extraction:
-    """
-    Main validation function - standardizes all extracted data.
-
-    Prevents these issues:
-    1. Task status fragmentation (21+ variants → 4 standard)
-    2. Redundant task naming (name=description)
-    3. Empty reference summaries
-
-    Args:
-        extraction: Raw extraction from LLM
-
-    Returns:
-        Standardized extraction ready for graph storage
-    """
-
-    # Standardize task statuses
-    if extraction.tasks:
-        for task in extraction.tasks:
-            task.status = standardize_task_status(task.status)
-
-    # Validate references
-    if extraction.references:
-        extraction.references = [
-            validate_reference_summary(ref) for ref in extraction.references
-        ]
-
+    """No-op — unified Node schema requires no post-processing."""
     return extraction

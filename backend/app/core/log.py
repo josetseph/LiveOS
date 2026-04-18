@@ -31,8 +31,7 @@ COMPONENT_LOG_FILES = {
     "RetrievalService": "retrieval.log",
     "GraphService": "graph.log",
     "LLMService": "llm.log",
-    "AliasScript": "alias_detection.log",
-    "AliasDetector": "alias_detection.log",
+    "SimilarityScript": "similarity_detection.log",
     "uvicorn.access": "api.log",
     "uvicorn.error": "api.log",
     "MultimediaService": "multimedia.log",
@@ -44,6 +43,12 @@ COMPONENT_LOG_FILES = {
     "Neo4jVerification": "tests.log",
     "RelationshipTest": "tests.log",
     "SummaryVerification": "tests.log",
+    # Storage / search infrastructure
+    "QdrantService": "qdrant.log",
+    "ElasticsearchService": "elasticsearch.log",
+    # Retrieval sub-services
+    "RerankerService": "reranker.log",
+    "TavilyService": "retrieval.log",
 }
 
 

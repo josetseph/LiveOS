@@ -34,16 +34,22 @@ export const api = {
         return response.data;
     },
 
-    async getNotes(search?: string, processed?: boolean) {
+    async getNotes(search?: string, processed?: boolean, failed?: boolean) {
         const params: any = {};
         if (search) params.search = search;
         if (processed !== undefined) params.processed = processed;
+        if (failed !== undefined) params.failed = failed;
         const response = await axios.get(`${API_BASE_URL}/notes`, { params });
         return response.data;
     },
 
     async getNote(id: string) {
         const response = await axios.get(`${API_BASE_URL}/notes/${id}`);
+        return response.data;
+    },
+
+    async getNoteStatus(id: string): Promise<{ id: string; processed: boolean; failed: boolean; status: string }> {
+        const response = await axios.get(`${API_BASE_URL}/notes/${id}/status`);
         return response.data;
     },
 
@@ -70,8 +76,115 @@ export const api = {
         return response.data;
     },
 
+    async submitFeedback(payload: {
+        query: string;
+        response: string;
+        relevance: number;
+        quality: number;
+        comments?: string;
+        node_ids_used?: string[];
+    }) {
+        const res = await axios.post(`${API_BASE_URL}/feedback`, payload);
+        return res.data;
+    },
+
     async getHealth() {
         const response = await axios.get("http://localhost:8000/health");
         return response.data;
-    }
+    },
+
+    // ── 3D Exploration graph ──────────────────────────────────────────────────
+
+    async getGraph3DOverview(): Promise<{
+        communities: Array<{
+            community_id: string;
+            name: string;
+            summary: string;
+            community_level: number;
+            member_count: number;
+            themes: string[];
+            x: number;
+            y: number;
+            z: number;
+        }>;
+        orphan_nodes: Array<{
+            node_id: string;
+            name: string;
+            node_type: string;
+            description: string;
+            facts: string[];
+            x: number;
+            y: number;
+            z: number;
+        }>;
+        orphan_edges: Array<{
+            source: string;
+            target: string;
+            type: string;
+        }>;
+    }> {
+        const response = await axios.get(`${API_BASE_URL}/graph/3d/overview`);
+        return response.data;
+    },
+
+    async getGraph3DCommunity(communityId: string): Promise<{
+        nodes: Array<{
+            node_id: string;
+            name: string;
+            node_type: string;
+            description: string;
+            facts: string[];
+            domain?: string;
+            status?: string;
+            community_id: string;
+            x: number;
+            y: number;
+            z: number;
+        }>;
+        edges: Array<{
+            source: string;
+            target: string;
+            type: string;
+            natural_language: string;
+        }>;
+    }> {
+        const response = await axios.get(`${API_BASE_URL}/graph/3d/community/${communityId}`);
+        return response.data;
+    },
+
+    async getGraph3DFull(): Promise<{
+        nodes: Array<{
+            node_id: string;
+            name: string;
+            node_type: string;
+            description: string;
+            facts: string[];
+            community_id?: string;
+            x: number;
+            y: number;
+            z: number;
+        }>;
+        edges: Array<{
+            source: string;
+            target: string;
+            type: string;
+        }>;
+    }> {
+        const response = await axios.get(`${API_BASE_URL}/graph/3d/full`);
+        return response.data;
+    },
+
+    async getNodeDetail(nodeId: string): Promise<{
+        node_id: string;
+        name: string;
+        node_type: string;
+        description: string;
+        facts: string[];
+        domain?: string;
+        status?: string;
+        community_id?: string;
+    }> {
+        const response = await axios.get(`${API_BASE_URL}/graph/3d/node/${nodeId}`);
+        return response.data;
+    },
 };

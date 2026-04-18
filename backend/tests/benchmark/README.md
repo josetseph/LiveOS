@@ -173,3 +173,20 @@ python tests/benchmark/evaluate_ragas.py --dataset musique --no-save
 4. **Compare timing** - Your graph traversal vs. embedding all documents
 5. **Highlight multi-hop success** - Cases where 3-4 hop paths were correctly found
 6. **Compare RAGAS metrics** - Faithfulness and Context Recall are key for RAG systems
+
+
+
+
+
+
+# From backend/ with venv active:
+
+# Step 1 — ingest notes (990 for hotpotqa, 526 for musique)
+python tests/benchmark/prepare_dataset.py --dataset hotpotqa
+python tests/benchmark/prepare_dataset.py --dataset hotpotqa --resume   # if interrupted
+python tests/benchmark/prepare_dataset.py --dataset hotpotqa --retry-failed # if some failed
+python tests/benchmark/prepare_dataset.py --dataset hotpotqa --limit 10 # quick test
+
+# Step 2 — run evaluation
+python tests/benchmark/evaluate.py --dataset hotpotqa --verbose
+python tests/benchmark/evaluate.py --dataset hotpotqa --limit 10 --verbose

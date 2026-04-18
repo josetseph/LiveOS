@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   neo4j:
-    image: neo4j:2025.01-community
+    image: neo4j:latest
     container_name: liveos_brain
     restart: unless-stopped
     ports:
@@ -13,7 +11,9 @@ services:
       - NEO4J_PLUGINS=["apoc", "graph-data-science"]
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*,gds.*
       - NEO4J_dbms_memory_heap_initial__size=512m
-      - NEO4J_dbms_memory_heap_max__size=2G
+      - NEO4J_dbms_memory_heap_max__size=2g
+      - NEO4J_dbms_memory_pagecache_size=512m
+      - NEO4J_server_memory_off__heap_max__size=1g
     volumes:
       - ./data/neo4j/data:/data
       - ./data/neo4j/logs:/logs
@@ -47,7 +47,7 @@ services:
 
   # 3. Local MinIO (Replaces R2)
   minio:
-    image: minio/minio
+    image: minio/minio:latest
     container_name: liveos_storage
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -64,3 +64,29 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # 4. Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: liveos_vectors
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+
+  # 5. Elasticsearch BM25 Search
+  elasticsearch:
+    image: elasticsearch:9.3.2
+    container_name: liveos_search
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx1g
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - ./data/elasticsearch:/usr/share/elasticsearch/data

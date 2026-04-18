@@ -19,6 +19,16 @@ until curl -f http://minio:9000/minio/health/live > /dev/null 2>&1; do
   sleep 1
 done
 
+echo "⏳ Waiting for Qdrant..."
+until curl -f http://qdrant:6333/health > /dev/null 2>&1; do
+  sleep 1
+done
+
+echo "⏳ Waiting for Elasticsearch..."
+until curl -f http://elasticsearch:9200 > /dev/null 2>&1; do
+  sleep 1
+done
+
 echo "✅ All services ready!"
 
 # Run initialization script

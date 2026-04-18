@@ -1,7 +1,10 @@
 import uuid
 from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks
+from fastapi import Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, delete
 
 # Setup logging before any other imports
 from app.core.log import setup_logging, get_logger
@@ -68,18 +71,22 @@ async def health_check():
     return {"status": "healthy", "neo4j": "unknown"}
 
 
-from app.schemas.extraction import NoteInput
-from app.workflows.ingestion import ingestion_workflow
+from app.schemas.extraction import NoteInput  # noqa: E402
+from app.core.database import get_db  # noqa: E402
+from app.models.note import Note  # noqa: E402
+from app.workflows.ingestion import ingestion_workflow  # noqa: E402
 
 
-from pydantic import BaseModel
+from pydantic import BaseModel  # noqa: E402
 
 
 class ChatInput(BaseModel):
     query: str
 
 
-from app.workflows.chat import chat_workflow
+from app.workflows.chat import chat_workflow  # noqa: E402
+from app.schemas.feedback import FeedbackCreate, FeedbackResponse  # noqa: E402
+from app.services.feedback import feedback_service  # noqa: E402
 
 
 @app.post("/api/v1/chat")
@@ -90,72 +97,81 @@ async def chat(input: ChatInput):
     return await chat_workflow.chat(input.query)
 
 
-from app.services.graph import graph_service
+@app.post("/api/v1/feedback", response_model=FeedbackResponse)
+async def submit_feedback(
+    feedback_input: FeedbackCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Persist user feedback for retrieval-quality analysis and future ingestion.
+    """
+    return await feedback_service.create_feedback(db, feedback_input)
+
+
+from app.services.graph import graph_service  # noqa: E402
 
 
 @app.get("/api/v1/graph/summary")
 async def get_graph_summary():
     """
-    Fetch top themes (Concepts) and Entities for the sidebar.
+    Fetch top themes and nodes for the sidebar.
     """
-    # Simple Cypher to get top concepts
     query = """
-    MATCH (c:Concept)
-    RETURN c.name as name, c.description as description
+    MATCH (n:Indexable)
+    WHERE n.type <> 'note' AND n.description IS NOT NULL
+    RETURN n.name as name, n.type as type, n.description as description
     LIMIT 10
     """
     with graph_service.driver.session() as session:
         result = session.run(query)
-        concepts = [record.data() for record in result]
+        nodes = [record.data() for record in result]
 
-    return {"themes": concepts}
+    return {"themes": nodes}
 
 
 @app.get("/api/v1/graph/visualization")
 async def get_graph_visualization():
     """
     Fetch nodes and edges for 2D Force Graph.
-    Now INCLUDES Notes to ensure the graph is populated.
     """
 
-    # Let's use a cleaner query that gets everything.
     query = """
-    MATCH (n)-[r]->(m)
+    MATCH (n:Indexable)-[r]->(m:Indexable)
     RETURN elementId(n) as source_id, 
-           COALESCE(n.name, n.summary, n.content, n.trait, n.description, n.title) as source_name, 
-           labels(n)[0] as source_label,
+           COALESCE(n.name, n.description, n.title) as source_name, 
+           n.type as source_label,
            n.id as source_uuid,
-           n.summary as source_summary,
+           n.description as source_summary,
            n.domain as source_domain,
            n.description as source_description,
            n.status as source_status,
            n.created_at as source_created_at,
-           n.title as source_title,
+           n.name as source_title,
            elementId(m) as target_id, 
-           COALESCE(m.name, m.summary, m.trait, m.description, m.title) as target_name, 
-           labels(m)[0] as target_label,
+           COALESCE(m.name, m.description, m.title) as target_name, 
+           m.type as target_label,
            m.id as target_uuid,
-           m.summary as target_summary,
+           m.description as target_summary,
            m.domain as target_domain,
            m.description as target_description,
            m.status as target_status,
            m.created_at as target_created_at,
-           m.title as target_title,
+           m.name as target_title,
            type(r) as type
     
     UNION
-    MATCH (n:Note)
+    MATCH (n:Indexable)
     WHERE NOT (n)--()
     RETURN elementId(n) as source_id, 
-           COALESCE(n.name, n.summary, n.content, n.trait, n.description, n.title) as source_name, 
-           labels(n)[0] as source_label,
+           COALESCE(n.name, n.description, n.title) as source_name, 
+           n.type as source_label,
            n.id as source_uuid,
-           n.summary as source_summary,
+           n.description as source_summary,
            n.domain as source_domain,
            n.description as source_description,
            n.status as source_status,
            n.created_at as source_created_at,
-           n.title as source_title,
+           n.name as source_title,
            NULL as target_id, 
            NULL as target_name, 
            NULL as target_label,
@@ -235,20 +251,55 @@ async def get_graph_visualization():
 async def export_graph_for_3d():
     """
     Export full graph data for 3D visualization.
-    Returns all nodes (Concepts, Entities, Tasks, Personas, References, Notes)
-    and their relationships in 3d-force-graph format.
+    Returns all Indexable nodes and their relationships in 3d-force-graph format.
     """
     graph_data = graph_service.get_full_graph()
     return graph_data
 
 
-# --- Notes API ---
+@app.get("/api/v1/graph/3d/overview")
+async def graph_3d_overview():
+    """
+    Return all community nodes with pre-computed 3D positions.
+    Used by the exploration view to render the LOD overview (community spheres only).
+    Individual member nodes are fetched lazily via /community/{id}.
+    """
+    return graph_service.get_3d_overview()
 
-from app.core.database import get_db
-from app.models.note import Note
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
-from fastapi import Depends
+
+@app.get("/api/v1/graph/3d/community/{community_id}")
+async def graph_3d_community(community_id: str):
+    """
+    Return member nodes and intra-community edges for one community.
+    Called by the frontend when the camera flies into a community's radius.
+    """
+    return graph_service.get_community_members(community_id)
+
+
+@app.get("/api/v1/graph/3d/full")
+async def graph_3d_full():
+    """
+    Return ALL nodes and ALL edges for the flat spring-layout 3D graph.
+    Every Indexable + Community node with pre-computed positions is included.
+    Used by the new flat renderer that shows everything at once.
+    """
+    return graph_service.get_full_3d_graph()
+
+
+@app.get("/api/v1/graph/3d/node/{node_id}")
+async def graph_3d_node_detail(node_id: str):
+    """
+    Return full detail for a single Indexable node (description, facts, domain, status).
+    Called on-demand when the user clicks a card in the 3D graph.
+    """
+    detail = graph_service.get_node_detail(node_id)
+    if detail is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Node not found")
+    return detail
+
+
+# --- Notes API ---
 
 
 class NoteResponse(BaseModel):
@@ -258,6 +309,7 @@ class NoteResponse(BaseModel):
     title: str | None = None
     summary: str | None = None
     processed: bool = False
+    failed: bool = False
 
     class Config:
         from_attributes = True
@@ -290,7 +342,7 @@ async def create_note(
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             c_at = dt
-        except:
+        except Exception:
             # Fallback to dateparser for other formats
             try:
                 import dateparser
@@ -301,7 +353,7 @@ async def create_note(
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     c_at = dt
-            except:
+            except Exception:
                 pass
 
     new_note = Note(
@@ -378,7 +430,7 @@ async def ingest_note(
             dt = dateparser.parse(note_data.created_at)
             if dt:
                 c_at = dt
-        except:
+        except Exception:
             pass
 
     # Create note with processed=False initially
@@ -410,11 +462,12 @@ async def ingest_note(
 async def get_notes(
     search: str | None = None,
     processed: bool | None = None,
+    failed: bool | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """
     Get all notes sorted by creation date (newest first).
-    Optionally filter by processed status (ingested vs non-ingested).
+    Optionally filter by processed/failed status.
     """
     base_query = select(Note)
 
@@ -426,6 +479,9 @@ async def get_notes(
 
     if processed is not None:
         filters.append(Note.processed == processed)
+
+    if failed is not None:
+        filters.append(Note.failed == failed)
 
     if filters:
         base_query = base_query.where(*filters)
@@ -447,6 +503,36 @@ async def get_note(note_id: str, db: AsyncSession = Depends(get_db)):
     if not note:
         return {"error": "Note not found"}
     return note
+
+
+@app.get("/api/v1/notes/{note_id}/status")
+async def get_note_ingestion_status(note_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Return the ingestion status of a note without fetching its full content.
+    Useful for polling after triggering background ingestion.
+
+    Returns:
+      - processed: true once ingestion completes successfully
+      - failed: true if the ingestion pipeline encountered a permanent error
+      - status: "completed" | "failed" | "processing"
+    """
+    result = await db.execute(
+        select(Note.id, Note.processed, Note.failed).where(Note.id == note_id)
+    )
+    row = result.one_or_none()
+
+    if row is None:
+        return {"error": "Note not found"}, 404
+
+    note_id, processed, failed = row
+    if processed:
+        status = "completed"
+    elif failed:
+        status = "failed"
+    else:
+        status = "processing"
+
+    return {"id": note_id, "processed": processed, "failed": failed, "status": status}
 
 
 @app.put("/api/v1/notes/{note_id}")
@@ -480,7 +566,7 @@ async def update_note(
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             existing_note.created_at = dt
-        except:
+        except Exception:
             # Fallback to dateparser for other formats
             try:
                 import dateparser
@@ -491,7 +577,7 @@ async def update_note(
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     existing_note.created_at = dt
-            except:
+            except Exception:
                 pass
 
     existing_note.updated_at = datetime.now(timezone.utc)
@@ -514,10 +600,28 @@ async def delete_note(note_id: str, db: AsyncSession = Depends(get_db)):
     # 2. Delete from Bio/Graph (Neo4j)
     # We can do this synchronously here as it's fast enough, or background it.
     query = """
-    MATCH (n:Note {id: $id})
+    MATCH (n:Indexable {id: $id, type: 'note'})
     DETACH DELETE n
     """
     with graph_service.driver.session() as session:
         session.run(query, {"id": note_id})
 
     return {"status": "deleted", "id": note_id}
+
+
+# --- Admin ---
+
+
+@app.post("/api/v1/admin/rebuild-communities")
+async def rebuild_communities(background_tasks: BackgroundTasks):
+    """
+    Trigger a full Leiden community detection pass in the background.
+
+    Useful when community detection was cancelled or never ran after ingestion.
+    The job runs asynchronously; poll the server logs for progress.
+    """
+    background_tasks.add_task(ingestion_workflow.rebuild_leiden_communities)
+    return {
+        "status": "started",
+        "message": "Leiden community recompute triggered. Check server logs for progress.",
+    }

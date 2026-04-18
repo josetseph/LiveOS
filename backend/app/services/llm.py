@@ -86,14 +86,15 @@ class LLMService:
             logger.info(f"Initializing Gemini (Model: {settings.GEMINI_MODEL})")
 
             # Use native Google Gen AI SDK for better rate limits
-            # Timeout: 1800 seconds for complex extractions
+            # Timeout: 120 seconds per call — long enough for complex extractions, short
+            # enough to fail fast rather than appear frozen when the API hangs.
             self.gemini_client = genai.Client(
                 api_key=settings.GEMINI_API_KEY,
-                http_options=types.HttpOptions(timeout=1800000),
+                http_options=types.HttpOptions(timeout=120000),
             )
 
             # Create a minimal wrapper for backward compatibility with methods that use chat_client
-            # This allows verify_alias and other legacy methods to work
+            # This allows detect_similarity and other legacy methods to work
             class GeminiChatWrapper:
                 def __init__(self, native_client):
                     self.native_client = native_client
@@ -386,7 +387,7 @@ class LLMService:
                 logger.warning(
                     f"[Ollama] Empty entities (or capture failed). Full JSON: {cleaned_json[:2000]}"
                 )
-        except:
+        except Exception:
             logger.warning(f"[Ollama] Could not pre-parse JSON: {cleaned_json[:500]}")
 
         try:
@@ -495,41 +496,81 @@ class LLMService:
             "[LM Studio] Extraction failed with no response formats to try"
         )
 
+    @staticmethod
+    def _inline_schema_refs(schema: dict) -> dict:
+        """Inline all $ref references in a JSON schema so Gemini can parse it.
+
+        Gemini's response_schema does not support $ref / $defs — any schema
+        produced by Pydantic for nested models must be fully flattened first.
+        """
+        import copy
+        schema = copy.deepcopy(schema)
+        defs = schema.pop("$defs", {})
+
+        def resolve(obj):
+            if not isinstance(obj, dict):
+                return obj
+            if "$ref" in obj:
+                ref_name = obj["$ref"].split("/")[-1]
+                resolved = copy.deepcopy(defs.get(ref_name, obj))
+                return resolve(resolved)
+            return {k: resolve(v) for k, v in obj.items()}
+
+        return resolve(schema)
+
     def _extract_gemini(
         self, prompt: str, response_model: Type[BaseModel], temperature: float
     ) -> BaseModel:
         """Gemini extraction with native SDK and JSON schema enforcement."""
+        import time
+
         model = settings.GEMINI_MODEL
         logger.info(f"[Gemini] Extracting with {model} (native SDK)")
 
-        try:
-            # Use native Google Gen AI SDK with schema
-            response = self.gemini_client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=temperature,
-                    response_mime_type="application/json",
-                    response_schema=response_model.model_json_schema(),
-                    thinking_config=types.ThinkingConfig(
-                        thinking_budget=0,  # thinking_level="MINIMAL"
+        _retryable = ("504", "DEADLINE_EXCEEDED", "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")
+        max_retries = 3
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                inlined_schema = self._inline_schema_refs(
+                    response_model.model_json_schema()
+                )
+                response = self.gemini_client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        response_mime_type="application/json",
+                        response_schema=inlined_schema,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True
+                        ),
                     ),
-                ),
-            )
+                )
 
-            # Parse the JSON response into the Pydantic model
-            import json
+                import json
+                response_data = json.loads(response.text)
+                return response_model(**response_data)
 
-            response_data = json.loads(response.text)
-            return response_model(**response_data)
+            except Exception as e:
+                err = str(e)
+                if "PROHIBITED_CONTENT" in err or "content_filter" in err.lower():
+                    logger.warning("[Gemini] Content filtered. Returning empty model.")
+                    return response_model()
 
-        except Exception as e:
-            # Handle content filter or parsing errors
-            if "PROHIBITED_CONTENT" in str(e) or "content_filter" in str(e).lower():
-                logger.warning(f"[Gemini] Content filtered. Returning empty model.")
-                return response_model()
-            logger.error(f"[Gemini] Extraction error: {e}")
-            raise
+                is_retryable = any(code in err for code in _retryable)
+                if is_retryable and attempt < max_retries:
+                    wait = 2 ** attempt  # 2s, 4s
+                    logger.warning(
+                        f"[Gemini] Retryable error (attempt {attempt}/{max_retries}), "
+                        f"retrying in {wait}s: {err[:120]}"
+                    )
+                    time.sleep(wait)
+                    continue
+
+                logger.error(f"[Gemini] Extraction error: {e}")
+                raise
 
     def _extract_anthropic(
         self, prompt: str, response_model: Type[BaseModel], temperature: float
@@ -558,6 +599,9 @@ class LLMService:
         if self.provider == "gemini":
             response = self.gemini_client.models.generate_content(
                 model=settings.GEMINI_MODEL,
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
                 contents=f"You are a deep reasoning engine. Analyze the input carefully. Detect conflicts, subtleties, or hidden connections.\n\n{prompt}",
             )
             return response.text
@@ -1086,82 +1130,61 @@ FINAL ANSWER:"""
         Returns:
             List of information needs (sub-queries) to retrieve
         """
-        prompt = f"""You are a question analysis expert. Analyze this question and identify what intermediate information you would need to find in a knowledge base to answer it.
+        prompt = f"""You are a question decomposition expert for a PERSONAL knowledge base.
 
-IMPORTANT CONTEXT:
-- This is a PERSONAL knowledge base containing notes, experiences, learnings, and extracted entities
-- Information may be incomplete - we can only answer from what exists in the knowledge base
-- Focus on finding the MOST CRITICAL intermediate facts needed
-- If the question seems unanswerable without external knowledge, still identify what we'd need if it exists
+CONTEXT:
+- The knowledge base contains notes, experiences, learnings, and named entities
+- Information may be incomplete — only identify what might plausibly exist in the knowledge base
+- You are NOT answering the question — you are identifying what to look up
 
 # QUESTION
 {query}
 
 # TASK
-Break down the question into a sequence of information needs. Each need should be a specific question that, when answered, provides information needed for the final answer.
+Break the question into a numbered sequence of information needs.
+Each need must be a specific, independently searchable question.
 
-CRITICAL RULES:
-1. PRESERVE SPECIFICITY: If the question mentions specific names, roles, or attributes, KEEP them in your sub-questions
-   - Bad: "Who starred in X?" (too vague)
-   - Good: "Who portrayed [character name] in X?" (preserves the specific role)
-2. DON'T OVER-DECOMPOSE: If the question already tells you something, don't ask about it again
-   - If question says "who played the main character in film X", don't ask "what character did they play"
-3. PRESERVE QUESTION TYPE: If the original asks "what city?", don't change it to "is X in a city?" (yes/no)
-   - Bad: "Is [person] based in New York?" 
-   - Good: "What city in New York is [person] based in?"
-4. NO FINAL COMPARISON QUESTIONS: For "Were X and Y both...?" or "Did X and Y share...", DON'T add a final question asking if they match
-   - Just ask about each entity separately - the synthesis will handle the comparison
-   - Bad: "1. What is X's nationality? 2. What is Y's nationality? 3. Are they the same?"
-   - Good: "1. What is X's nationality? 2. What is Y's nationality?"
-5. THINK ABOUT DEPENDENCIES: If question B requires info from question A, list A first
-   - Example: Must find "who wrote X" before asking "when was [author] born"
-6. Use placeholders like [actress], [director], [person], [author] for entities discovered in previous steps
-   - These will be filled in with actual names as we retrieve
-   - NEVER use vague back-references like "that series", "that person", "the author", "the director"
-   - Bad:  "2. Within that series, what are the companion books called?"
-   - Good: "2. What companion books are part of [series]?"
-7. Keep it simple - usually 1-3 information needs (rarely 4+)
-   - If the question already contains ALL the filter criteria needed to describe the entity ("What [type] that [has X] and [does Y]?"), it is a SINGLE-HOP question — the ENTIRE question is itself the lookup. Do NOT break it into sub-questions.
-   - Example of SINGLE-HOP: "What science fantasy series told in first person has companion books about enslaved alien worlds?"
-     → 1 need: "What science fantasy series told in first person has companion books about enslaved alien worlds?"
-   - Example of TWO-HOP: "What award did the author of X win?" (need to find the author first, then the award)
-   - Single-hop: 1 need (direct fact lookup)
-   - Two-hop: 2 needs (find entity, then find fact about entity)
-   - Three-hop: 3 needs (rare, only for very complex chains)
-8. Return ONLY the list of questions, one per line, numbered
+RULES (read carefully — all must be followed):
+
+1. SINGLE-HOP DETECTION: If the question is self-contained and asks for one fact directly, return exactly 1 need that mirrors the question verbatim. Do NOT split it further. Only decompose if the question requires looking up a missing intermediate fact.
+
+2. PRESERVE SPECIFICITY: If the question names specific people, roles, or titles, keep those exact names in your sub-questions.
+
+3. DON'T RE-ASK WHAT YOU KNOW: If the question already states a fact (e.g. "the author of Pride and Prejudice"), don't ask about it — use a [placeholder] and move on.
+
+4. USE PLACEHOLDERS, NOT BACK-REFERENCES: For entities discovered in previous steps, you MUST use a typed placeholder like [founder], [director], [author], [film]. NEVER write "that person", "the series", "the film", "that author", or any other definite back-reference.
+
+5. COMPARISON QUESTIONS: For "Were X and Y both…?", ask about each entity separately. Do NOT add a third question comparing the results — synthesis handles that.
+
+6. QUESTION TYPE: If the original asks "what city?", your sub-question must ask "what city?", not "is X in a city?".
+
+7. KEEP IT MINIMAL: Use 1–3 sub-questions. Use 4+ only when the chain genuinely requires it.
+
+8. DEPENDENCIES FIRST: If question B requires information from question A, list A first.
+
+OUTPUT FORMAT: Return ONLY the numbered list. No preamble, no explanation.
 
 # EXAMPLES
 
 Question: "What university did the founder of Tesla attend?"
-Information Needs:
 1. Who founded Tesla?
 2. What university did [founder] attend?
 
-Question: "Were Marie Curie and Albert Einstein both born in Europe?"  
-Information Needs:
+Question: "Were Marie Curie and Albert Einstein both born in Europe?"
 1. Where was Marie Curie born?
 2. Where was Albert Einstein born?
 
 Question: "The author who wrote 'Pride and Prejudice' lived in what English county?"
-Information Needs:
 1. Who wrote 'Pride and Prejudice'?
 2. What English county did [author] live in?
 
-Question: "What award did the physicist who discovered radioactivity receive?"
-Information Needs:
-1. Who discovered radioactivity?
-2. What award did [physicist] receive?
-
-Question: "When was the film directed by Christopher Nolan released?"
-Information Needs:
-1. What film did Christopher Nolan direct?
-2. When was [film] released?
-
 Question: "What young adult series is told in first person and has companion books about enslaved alien worlds?"
-Information Needs:
 1. What young adult series is told in first person and has companion books about enslaved alien worlds?
 
-Now analyze the question above and list the information needs:
+Question: "What is the capital of France?"
+1. What is the capital of France?
+
+Now decompose the question above:
 """
 
         try:
@@ -1190,6 +1213,10 @@ Now analyze the question above and list the information needs:
                 )
 
                 answer = response.choices[0].message.content.strip()
+
+            logger.info(
+                f"[LLM] identify_information_needs raw response:\n{answer}"
+            )
 
             # Parse numbered list
             needs = []
@@ -1368,16 +1395,18 @@ Now extract entities from the context above:
         rewritten = [sub_questions[0]]
         for q in sub_questions[1:]:
             prompt = (
-                "Rewrite this question by replacing ANY vague reference to an "
-                "unspecified entity — i.e. a noun phrase that uses a definite article or "
-                "demonstrative ('that', 'the', 'those', 'this') to point at something "
-                "that is NOT named or defined anywhere in the question itself "
-                "(e.g. 'that series', 'the film', 'that car', 'the author', 'this work') "
-                "— with a [placeholder] token in square brackets.\n"
-                "If every noun phrase in the question refers to a clearly named entity, "
-                "return the question UNCHANGED.\n\n"
+                "Rewrite the question by replacing vague references with [placeholder] tokens.\n\n"
+                "A vague reference is a noun phrase that:\n"
+                "- Uses a definite article or demonstrative ('the', 'that', 'this', 'those')\n"
+                "- AND refers to something NOT named or defined within the question itself\n\n"
+                "Examples of vague references: 'that series', 'the film', 'the author', 'that car', 'this work'\n"
+                "NOT a vague reference: 'the Eiffel Tower' (it IS named), 'Marie Curie' (proper noun)\n\n"
+                "Rules:\n"
+                "- Replace each vague reference with a typed [placeholder] describing the entity type, e.g. [series], [film], [author]\n"
+                "- If the question contains NO vague references, return it UNCHANGED\n"
+                "- Return one line only — no explanation\n\n"
                 f"QUESTION: {q}\n\n"
-                "REWRITTEN (one line only):"
+                "REWRITTEN:"
             )
             try:
                 result = await self.generate(prompt, temperature=0.0, max_tokens=80)
@@ -1404,11 +1433,11 @@ Now extract entities from the context above:
                   'a job title or role', 'an award or distinction'.
         """
         prompt = (
-            "What type of answer does this question require? "
-            "Reply with one short phrase only — nothing else. No line breaks.\n"
-            "Examples: 'a year', 'a person's name', 'a song or album title', "
-            "'yes or no', 'a number or count', 'a place name', "
-            "'a job title or role', 'an award or distinction', 'a company name'.\n\n"
+            "What single type of answer does this question require?\n"
+            "Reply with one short phrase only. No punctuation, no line breaks, no explanation.\n"
+            "Examples: a year, a person's name, a song or album title, "
+            "yes or no, a number or count, a place name, a date range, "
+            "a job title or role, an award or distinction, a company name\n\n"
             f"Question: {question}\n\nAnswer type:"
         )
         try:
@@ -1418,54 +1447,640 @@ Now extract entities from the context above:
         except Exception:
             return "an answer"
 
-    async def select_relevant_docs(
+    async def select_relevant_relationships(
+        self,
+        relationship_entries: list[dict],
+        question: str,
+    ) -> list[int]:
+        """
+        Given the 1-hop neighbourhood of already-relevant nodes, ask the LLM
+        which connected nodes would provide additional evidence for the question.
+
+        Each entry has: source (str), rel_type (str), neighbor (dict with
+        name/summary/entity_type/label), context (str | None).
+
+        Returns a deduplicated list of selected indices.
+        """
+        if not relationship_entries:
+            return []
+
+        lines = []
+        for i, entry in enumerate(relationship_entries):
+            source = entry["source"]
+            neighbor = entry["neighbor"]
+            neighbor_name = neighbor.get("name", "Unknown")
+            neighbor_type = neighbor.get("entity_type") or neighbor.get("label", "")
+            summary = neighbor.get("summary") or neighbor.get("description", "")
+            context = entry.get("context") or ""
+            type_clause = f" ({neighbor_type})" if neighbor_type else ""
+            detail = (summary or context)[:150]
+            detail_clause = f" — {detail}" if detail else ""
+            # Prefer the stored natural language sentence; fall back to formatted rel_type
+            nl_sentence = entry.get("nl_sentence")
+            if nl_sentence:
+                lines.append(f"{i}: {nl_sentence}{detail_clause}")
+            else:
+                rel_type = entry["rel_type"].replace("_", " ").lower()
+                lines.append(
+                    f'{i}: "{source}" {rel_type} "{neighbor_name}"{type_clause}{detail_clause}'
+                )
+
+        rel_list = "\n".join(lines)
+        prompt = (
+            f"QUESTION: {question}\n\n"
+            "The following relationships connect already-relevant nodes to nodes not yet "
+            "in context.\n"
+            "Select ONLY the relationships whose connected node would add useful evidence "
+            "to answer the question. Be selective — skip generic, tangential, or redundant "
+            "nodes.\n"
+            "If none are useful, reply: NONE\n\n"
+            "For each relevant relationship, reply with its number followed by a colon and a brief reason.\n"
+            "One per line. Example:\n"
+            "0: the connected node directly provides the missing date\n"
+            "3: named as the author in context\n\n"
+            f"RELATIONSHIPS:\n{rel_list}\n\n"
+            "Relevant relationship numbers (number: reason):"
+        )
+        try:
+            raw = await self.generate(prompt, temperature=0.0, max_tokens=200)
+            logger.info(
+                f"[LLM] select_relevant_relationships raw response:\n{raw}"
+            )
+            if not raw or raw.strip().upper() == "NONE":
+                return []
+            indices: list[int] = []
+            for line in raw.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                match = re.match(r"^(\d+)", line)
+                if match:
+                    idx = int(match.group(1))
+                    if 0 <= idx < len(relationship_entries):
+                        reason = line[match.end():].lstrip(":, ").strip()
+                        if reason:
+                            logger.info(f"[LLM] relationship {idx} selected: {reason}")
+                        indices.append(idx)
+            seen: set[int] = set()
+            return [idx for idx in indices if not (idx in seen or seen.add(idx))]  # type: ignore[func-returns-value]
+        except Exception as e:
+            logger.warning(f"[LLM] select_relevant_relationships failed: {e}")
+            return []
+
+    async def answer_sub_question(
+        self,
+        sub_question: str,
+        docs: list[dict],
+        keep: int = 12,
+        skip_filter: bool = False,
+    ) -> str | None:
+        """
+        Given retrieved docs for a sub-question, produce a concise answer.
+
+        When skip_filter=True the docs are assumed to have been pre-filtered and
+        graph-expanded by the caller; the internal select_relevant_docs pass is
+        skipped to avoid a redundant LLM call.
+
+        Returns (answer, follow_up_query) where:
+          - answer is the extracted answer string if found
+          - follow_up_query is a targeted search query describing what's still
+            needed when the context is insufficient (so the caller can search
+            for that specific information before drilling deeper)
+          - (None, None) when there is no context at all
+        """
+        # Filter to the most relevant docs (unless pre-filtered externally)
+        relevant = (
+            docs if skip_filter else await self.select_relevant_docs(docs, sub_question)
+        )
+        if not relevant:
+            return None, None
+
+        # Build context from filtered docs — full text, no truncation
+        context_parts = []
+        for doc in relevant:
+            node = doc.get("original_obj", {})
+            # Use doc['text'] first — it is already assembled as natural language
+            # prose ("Joseph is a person. ...") and must not be re-prefixed with
+            # "name: " to avoid duplicating the entity name in context.
+            text = (
+                doc.get("text") or node.get("summary") or node.get("description") or ""
+            ).strip()
+            if text:
+                context_parts.append(text)
+
+        context = "\n\n".join(context_parts)
+        if not context:
+            return None, None
+
+        prompt = (
+            "Answer the question below using ONLY the context provided.\n\n"
+            "Rules:\n"
+            "- Extract the exact phrase from the context that answers the question — preserve all qualifying words (units, descriptors, suffixes, articles) that are part of the answer as it appears in the source\n"
+            "- Do NOT paraphrase, generalise, or infer beyond what is stated\n"
+            "- If the question asks for a name, title, or role: return that exact value from the context, including post-nominal letters (e.g. 'DSC'), first names, and corporate suffixes (e.g. 'Inc.')\n"
+            "- If the question asks for one thing, give one thing. If it explicitly asks for a list, give the list\n"
+            "- For either/or or comparison questions, return exactly one option named in the question when the context supports it\n"
+            "- Do NOT answer with 'Neither' or 'Both' unless the question explicitly asks whether both or neither apply\n"
+            "- For yes/no questions, return YES or NO only\n"
+            "- If the context does not contain enough information to answer, reply in this exact format:\n"
+            "  INSUFFICIENT\n"
+            "  NEED: <5-10 word search query for the specific missing information>\n\n"
+            f"QUESTION: {sub_question}\n\n"
+            f"CONTEXT:\n{context}\n\n"
+            "ANSWER:"
+        )
+        try:
+            if self.is_gemini:
+                response = self.gemini_client.models.generate_content(
+                    model=settings.GEMINI_MODEL,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.0,
+                        max_output_tokens=150,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    ),
+                )
+                raw = response.text.strip()
+            else:
+                raw = await self.generate(prompt, temperature=0.0, max_tokens=150)
+
+            if not raw:
+                return None, None
+            if raw.split("\n")[0].strip().upper().startswith("INSUFFICIENT"):
+                follow_up = None
+                for line in raw.splitlines():
+                    if line.strip().upper().startswith("NEED:"):
+                        follow_up = line.split(":", 1)[1].strip()
+                        break
+                return None, follow_up
+            return raw.split("\n")[0].strip(), None
+        except Exception as e:
+            logger.warning(f"[LLM] answer_sub_question failed: {e}")
+            return None, None
+
+    async def final_synthesis_from_sub_answers(
+        self,
+        original_question: str,
+        sub_answers: list[dict],
+    ) -> tuple[str | None, str | None]:
+        """
+        Produce a final answer from structured sub-question/answer pairs.
+
+        Two-pass approach:
+          Pass 1 (reasoning): SYNTHESIS_RULES-guided, outputs a verbose answer
+                              sentence — no extraction pressure.
+          Pass 2 (extraction): dead-simple prompt copies the minimal phrase from
+                               the verbose sentence; avoids rule conflicts with
+                               formatting.
+
+        Returns (answer, missing) where:
+          - answer is the final answer string if the sub-answers are sufficient
+          - missing is a one-phrase description of what's still needed (if not)
+          - (None, None) on hard failure
+        """
+        if not sub_answers:
+            return None, original_question
+
+        qa_block = "\n".join(
+            f"Q{i+1}: {sa['question']}\nA{i+1}: {sa['answer']}"
+            for i, sa in enumerate(sub_answers)
+        )
+
+        # ── PASS 1: reasoning ────────────────────────────────────────────────
+        # Ask for a bare answer phrase directly in ANSWER: — no full sentence.
+        # SYNTHESIS_RULES guide correct reasoning (YES/NO, comparison winner,
+        # shared-location parent, etc.). FORMAT RULES specify exact phrase shape.
+        reasoning_prompt = (
+            "You are answering a multi-hop question using research findings below.\n\n"
+            f"RESEARCH FINDINGS:\n{qa_block}\n\n"
+            f"Final question: {original_question}\n\n"
+            f"{self._SYNTHESIS_RULES}\n\n"
+            "Write 1–2 sentences of reasoning that trace through the findings to your conclusion, "
+            "then on a new line write:\n"
+            "ANSWER: <bare answer phrase — NOT a full sentence>\n\n"
+            "FORMAT RULES for the ANSWER phrase:\n"
+            "- YES/NO question → YES or NO only\n"
+            "- Either/or or comparison question → answer with exactly one option named in the question, unless it is explicitly a yes/no question\n"
+            "- Never answer 'Neither' or 'Both' unless the question explicitly asks about both or neither\n"
+            "- Person's name → full name as it appears in the source, including all given names and post-nominal letters\n"
+            "- Number → include any unit or qualifier the question implies\n"
+            "- Date range → copy the exact phrase from the source, preserving any leading 'from'/'between' and the exact connective word ('to', 'until', 'through') — do not substitute or drop any of these words\n"
+            "- Title or award → exact title, no leading organization abbreviation\n"
+            "- Song, film, or book → exact primary title, no parenthetical alternate names\n"
+            "- Location → copy the location exactly as it appears in the source (e.g. 'Greenwich Village, New York City', not just 'Greenwich Village')\n\n"
+            "If the findings do NOT contain enough information to answer, write:\n"
+            "ANSWER: INSUFFICIENT\n"
+            "MISSING: <one key entity or concept absent from the findings>\n\n"
+            "Reply:"
+        )
+        try:
+            raw1 = self.reason(reasoning_prompt) or ""
+        except Exception as e:
+            logger.warning(f"[LLM] final_synthesis_from_sub_answers pass1 failed: {e}")
+            return None, None
+
+        _non_answers = {"INSUFFICIENT", "NONE", "N/A", "UNKNOWN", "NOT FOUND"}
+        verbose_answer: str | None = None
+        missing: str | None = None
+        for line in raw1.splitlines():
+            line = line.strip()
+            if line.lower().startswith("answer:"):
+                val = line.split(":", 1)[1].strip()
+                if val.upper() not in _non_answers:
+                    verbose_answer = val
+            elif line.lower().startswith("missing:"):
+                missing = line.split(":", 1)[1].strip() or None
+
+        if not verbose_answer:
+            return None, missing
+
+        # ── PASS 2: extraction ───────────────────────────────────────────────
+        # Pass 1 now outputs a bare phrase directly. Pass 2 is a lightweight
+        # cleanup for edge cases where the model still writes a full sentence.
+        # Skip Pass 2 if Pass 1 already output a bare phrase (≤ 8 tokens, no verb signal)
+        _words = verbose_answer.split()
+        if len(_words) <= 8 and not any(
+            w.lower()
+            in {"is", "are", "was", "were", "has", "have", "had", "be", "been"}
+            for w in _words
+        ):
+            return verbose_answer, None
+
+        extraction_prompt = (
+            "The question below was answered. Determine if the answer is already a bare phrase.\n\n"
+            "A bare phrase is: a name, number, date, title, YES, NO, or a short noun phrase (≤ 8 words, no verb).\n\n"
+            f"Question: {original_question}\n"
+            f"Answer: {verbose_answer}\n\n"
+            "- If the Answer IS already a bare phrase: copy it exactly, unchanged, with no additions or removals.\n"
+            "- If the Answer IS NOT a bare phrase (it is a full sentence): extract only the core phrase that directly answers the question. Do not include surrounding explanation.\n\n"
+            "Reply with the phrase only:"
+        )
+        try:
+            bare = await self.generate(
+                extraction_prompt, temperature=0.0, max_tokens=60
+            )
+            bare = (bare or "").strip()
+            if bare and bare.upper() not in _non_answers:
+                return bare, None
+        except Exception as e:
+            logger.warning(f"[LLM] final_synthesis_from_sub_answers pass2 failed: {e}")
+
+        # Fallback: return the verbose answer from pass 1
+        return verbose_answer, None
+
+    async def extract_final_answer(
+        self,
+        question: str,
+        docs: list[dict],
+        keep: int = 8,
+    ) -> str | None:
+        """
+        Option A+B fallback: select best docs then use reason() with an
+        extraction-focused prompt that demands a minimal answer (name / yes|no /
+        short fact).  Unlike answer_sub_question this uses the thinking model so
+        it can handle multi-hop reasoning, and the prompt prohibits full sentences.
+        """
+        relevant = await self.select_relevant_docs(docs, question)
+        if not relevant:
+            return None
+
+        context_parts = []
+        for doc in relevant:
+            node = doc.get("original_obj", {})
+            name = node.get("name", "")
+            text = (
+                node.get("summary") or node.get("description") or doc.get("text", "")
+            ).strip()
+            if text:
+                context_parts.append(f"{name}: {text}" if name else text)
+
+        context = "\n\n".join(context_parts[:keep])
+        if not context:
+            return None
+
+        prompt = (
+            "You are answering a multi-hop question using retrieved evidence below.\n\n"
+            f"EVIDENCE:\n{context}\n\n"
+            f"Final question: {question}\n\n"
+            f"{self._SYNTHESIS_RULES}\n\n"
+            "First write 1–2 sentences of reasoning that end with a clear statement "
+            "of your answer, then on a new line write:\n"
+            "FINAL: <bare answer only — a name, number, or yes/no — no surrounding explanation or extra words>"
+        )
+        try:
+            raw = (self.reason(prompt) or "").strip()
+            # Parse FINAL: prefix
+            for line in raw.split("\n"):
+                line = line.strip()
+                if line.upper().startswith("FINAL:"):
+                    raw = line[6:].strip()
+                    break
+            else:
+                # No FINAL: line found — take last non-empty line (after reasoning)
+                lines = [line.strip() for line in raw.split("\n") if line.strip()]
+                raw = lines[-1] if lines else ""
+            if not raw or raw.upper() in (
+                "UNKNOWN",
+                "INSUFFICIENT",
+                "UNABLE TO DETERMINE",
+                "N/A",
+            ):
+                return None
+            return raw
+        except Exception as e:
+            logger.warning(f"[LLM] extract_final_answer failed: {e}")
+            return None
+
+    async def select_relevant_docs_with_reasoning(
         self,
         docs: list[dict],
         question: str,
-        keep: int = 6,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], dict[int, str]]:
         """
-        Batch context filter — single LLM call, O(1) per retrieval pass.
+        Same as select_relevant_docs but also returns per-doc reasoning strings.
 
-        Shows all accumulated docs as a numbered list and asks the LLM to
-        pick the `keep` most relevant ones.  Much cheaper than the O(n)
-        per-doc YES/NO pattern used in _verify_candidates.
+        Returns (selected_docs, reasons) where reasons is a dict mapping the
+        original doc index to the LLM's reason string.  Callers should log
+        reasons to trace why each doc was kept or skipped.
 
-        Falls back to returning all docs unmodified on any failure so the
-        pipeline is never blocked by a bad LLM response.
+        Falls back to (all docs, {}) on any failure so the pipeline is never
+        blocked by a bad LLM response.
         """
-        if len(docs) <= keep:
-            return docs
+        if not docs:
+            return [], {}
 
         lines = []
         for i, doc in enumerate(docs):
             node = doc.get("original_obj", {})
             name = node.get("name") or doc.get("name", "?")
             summary = (
-                node.get("summary") or node.get("description") or doc.get("text", "")
+                doc.get("text") or node.get("summary") or node.get("description") or ""
             ).strip()
-            snippet = summary[:200] if summary else "(no text)"
+            snippet = summary if summary else "(no text)"
             lines.append(f"{i}: [{name}] {snippet}")
 
         doc_list = "\n".join(lines)
         prompt = (
             f"QUESTION: {question}\n\n"
-            f"Below are {len(docs)} retrieved knowledge-graph passages numbered "
-            f"0–{len(docs) - 1}.\n"
-            f"Select the {keep} passage numbers most likely to contain the answer.\n"
-            f"Reply with ONLY a comma-separated list of numbers, e.g.: 0, 3, 7\n\n"
+            f"Below are {len(docs)} retrieved passages numbered 0–{len(docs) - 1}.\n"
+            "Be selective — only include passages with direct, useful evidence. "
+            "Exclude passages that only mention a topic tangentially or share a keyword without adding relevant facts.\n"
+            "If no passages are relevant, return: NONE\n\n"
+            "For each relevant passage, reply with its number followed by a colon and a brief reason (1 sentence).\n"
+            "One per line. Example:\n"
+            "0: directly states the founding year\n"
+            "3: names the person who led the project\n\n"
             f"PASSAGES:\n{doc_list}\n\n"
-            f"Most relevant passage numbers:"
+            "Relevant passages (number: reason):"
         )
 
         try:
-            raw = await self.generate(prompt, temperature=0.0, max_tokens=40)
-            indices = []
-            for part in re.split(r"[,\s]+", raw.strip()):
-                part = part.strip().rstrip(".")
-                if part.isdigit():
-                    idx = int(part)
+            raw = await self.generate(prompt, temperature=0.0, max_tokens=1500)
+            logger.info(
+                f"[LLM] select_relevant_docs_with_reasoning raw response:\n{raw}"
+            )
+            if not raw or raw.strip().upper() == "NONE":
+                return [], {}
+            indices: list[int] = []
+            reasons: dict[int, str] = {}
+            for line in raw.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                match = re.match(r"^(\d+)", line)
+                if match:
+                    idx = int(match.group(1))
                     if 0 <= idx < len(docs):
+                        reason = line[match.end():].lstrip(":, ").strip()
+                        reasons[idx] = reason
+                        indices.append(idx)
+            seen: set[int] = set()
+            unique_indices = [idx for idx in indices if not (idx in seen or seen.add(idx))]  # type: ignore[func-returns-value]
+            if unique_indices:
+                return [docs[i] for i in unique_indices], {i: reasons.get(i, "") for i in unique_indices}
+        except Exception as e:
+            logger.warning(f"[LLM] select_relevant_docs_with_reasoning failed: {e}")
+
+        return docs, {}  # fail-open
+
+    async def answer_sub_question_dual(
+        self,
+        sub_question: str,
+        docs: list[dict],
+    ) -> tuple[str | None, str | None, str]:
+        """
+        Answer a sub-question with two granularities + visible reasoning.
+
+        Returns (full_answer, direct_answer, reasoning) where:
+          - full_answer: 2-3 sentence answer covering the topic with context
+          - direct_answer: the single key fact / shortest complete answer
+          - reasoning: the LLM's chain-of-thought explaining its answer
+
+        Returns (None, None, "") if context is insufficient.
+        """
+        if not docs:
+            return None, None, "No context documents provided."
+
+        context_parts = []
+        for doc in docs:
+            node = doc.get("original_obj", {})
+            text = (
+                doc.get("text") or node.get("summary") or node.get("description") or ""
+            ).strip()
+            if text:
+                context_parts.append(text)
+        context = "\n\n".join(context_parts)
+        if not context:
+            return None, None, "All context documents had empty text."
+
+        prompt = (
+            "Answer the question below using ONLY the context provided.\n\n"
+            f"QUESTION: {sub_question}\n\n"
+            f"CONTEXT:\n{context}\n\n"
+            "Reply in this EXACT format (all three sections required):\n\n"
+            "REASONING: <1-3 sentences tracing which part of the context answers the question and why>\n\n"
+            "FULL_ANSWER: <2-3 sentences covering the topic with relevant context — not just the bare fact>\n\n"
+            "DIRECT_ANSWER: <the single key fact, name, date, or yes/no that directly answers the question — "
+            "exact phrase from context, no elaboration>\n\n"
+            "If the context does not contain enough information to answer:\n"
+            "REASONING: <explain what is missing>\n"
+            "FULL_ANSWER: INSUFFICIENT\n"
+            "DIRECT_ANSWER: INSUFFICIENT\n"
+        )
+        try:
+            if self.is_gemini:
+                response = self.gemini_client.models.generate_content(
+                    model=settings.GEMINI_MODEL,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.0,
+                        max_output_tokens=400,
+                        thinking_config=types.ThinkingConfig(thinking_budget=512),
+                    ),
+                )
+                raw = response.text.strip()
+            else:
+                raw = await self.generate(prompt, temperature=0.0, max_tokens=400)
+
+            logger.info(
+                f"[LLM] answer_sub_question_dual raw response:\n{raw}"
+            )
+            if not raw:
+                return None, None, "LLM returned empty response."
+
+            reasoning = ""
+            full_answer = None
+            direct_answer = None
+            for line in raw.splitlines():
+                line = line.strip()
+                if line.upper().startswith("REASONING:"):
+                    reasoning = line.split(":", 1)[1].strip()
+                elif line.upper().startswith("FULL_ANSWER:"):
+                    val = line.split(":", 1)[1].strip()
+                    if val.upper() != "INSUFFICIENT":
+                        full_answer = val
+                elif line.upper().startswith("DIRECT_ANSWER:"):
+                    val = line.split(":", 1)[1].strip()
+                    if val.upper() != "INSUFFICIENT":
+                        direct_answer = val
+
+            return full_answer, direct_answer, reasoning
+
+        except Exception as e:
+            logger.warning(f"[LLM] answer_sub_question_dual failed: {e}")
+            return None, None, f"Exception: {e}"
+
+    async def final_synthesis_from_sub_results(
+        self,
+        original_question: str,
+        sub_results: list[dict],
+    ) -> str | None:
+        """
+        Synthesize a final answer from structured sub-question results.
+
+        Each entry in sub_results has:
+          - question: original sub-question template
+          - resolved_question: with placeholders filled
+          - full_answer: 2-3 sentence contextual answer
+          - direct_answer: bare key fact
+
+        Uses both full_answer (for reasoning) and direct_answer (for precision).
+        Returns the final bare answer phrase, or None if insufficient.
+        """
+        if not sub_results:
+            return None
+
+        qa_block_lines = []
+        for i, sr in enumerate(sub_results, 1):
+            q = sr.get("resolved_question") or sr.get("question", "")
+            full = sr.get("full_answer") or "Not found"
+            direct = sr.get("direct_answer") or "Not found"
+            qa_block_lines.append(
+                f"Sub-question {i}: {q}\n"
+                f"  Full context: {full}\n"
+                f"  Direct answer: {direct}"
+            )
+        qa_block = "\n\n".join(qa_block_lines)
+
+        reasoning_prompt = (
+            "You are answering a multi-hop question using structured research findings.\n\n"
+            f"RESEARCH FINDINGS:\n{qa_block}\n\n"
+            f"Original question: {original_question}\n\n"
+            f"{self._SYNTHESIS_RULES}\n\n"
+            "Write 1–2 sentences of reasoning tracing through the findings to your conclusion, "
+            "then on a new line write:\n"
+            "ANSWER: <bare answer phrase — NOT a full sentence>\n\n"
+            "FORMAT RULES for the ANSWER phrase:\n"
+            "- YES/NO question → YES or NO only\n"
+            "- Either/or or comparison question → answer with exactly one option named in the question\n"
+            "- Never answer 'Neither' or 'Both' unless the question explicitly asks about both or neither\n"
+            "- Person's name → full name as it appears in the source\n"
+            "- Number → include any unit or qualifier the question implies\n"
+            "- Date range → copy exact phrase from source, preserving connective words\n"
+            "- Title or award → exact title\n"
+            "- Location → copy location exactly as it appears in the source\n\n"
+            "If findings are insufficient:\n"
+            "ANSWER: INSUFFICIENT\n\n"
+            "Reply:"
+        )
+        try:
+            raw = self.reason(reasoning_prompt) or ""
+            logger.info(
+                f"[LLM] final_synthesis_from_sub_results raw response:\n{raw}"
+            )
+        except Exception as e:
+            logger.warning(f"[LLM] final_synthesis_from_sub_results failed: {e}")
+            return None
+
+        _non_answers = {"INSUFFICIENT", "NONE", "N/A", "UNKNOWN", "NOT FOUND"}
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.lower().startswith("answer:"):
+                val = line.split(":", 1)[1].strip()
+                if val.upper() not in _non_answers:
+                    return val
+        return None
+
+    async def select_relevant_docs(
+        self,
+        docs: list[dict],
+        question: str,
+    ) -> list[dict]:
+        """
+        Batch context filter — single LLM call, O(1) per retrieval pass.
+
+        Shows all accumulated docs as a numbered list and asks the LLM to
+        select ALL passages it considers relevant — no fixed count. The LLM
+        picks 2 when only 2 are useful, or more for multi-hop questions that
+        need multiple supporting passages.
+
+        Falls back to returning all docs unmodified on any failure so the
+        pipeline is never blocked by a bad LLM response.
+        """
+        lines = []
+        for i, doc in enumerate(docs):
+            node = doc.get("original_obj", {})
+            name = node.get("name") or doc.get("name", "?")
+            # Use doc['text'] first — it includes relationship context ("and is
+            # connected to ...") that may contain the key fact being filtered for.
+            summary = (
+                doc.get("text") or node.get("summary") or node.get("description") or ""
+            ).strip()
+            snippet = summary if summary else "(no text)"
+            lines.append(f"{i}: [{name}] {snippet}")
+
+        doc_list = "\n".join(lines)
+        prompt = (
+            f"QUESTION: {question}\n\n"
+            f"Below are {len(docs)} retrieved passages numbered 0–{len(docs) - 1}.\n"
+            "Be selective — only include passages with direct, useful evidence. "
+            "Exclude passages that only mention a topic tangentially or share a keyword without adding relevant facts.\n"
+            "If no passages are relevant, return: NONE\n\n"
+            "For each relevant passage, reply with its number followed by a colon and a brief reason.\n"
+            "One per line. Example:\n"
+            "0: directly states the founding year\n"
+            "3: names the person who led the project\n\n"
+            f"PASSAGES:\n{doc_list}\n\n"
+            "Relevant passages (number: reason):"
+        )
+
+        try:
+            raw = await self.generate(prompt, temperature=0.0, max_tokens=1000)
+            if not raw or raw.strip().upper() == "NONE":
+                return []
+            indices = []
+            for line in raw.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # Accept "0: reason" or bare "0" or "0, 3" formats
+                match = re.match(r"^(\d+)", line)
+                if match:
+                    idx = int(match.group(1))
+                    if 0 <= idx < len(docs):
+                        reason = line[match.end():].lstrip(":, ").strip()
+                        if reason:
+                            logger.debug(f"[LLM] passage {idx} selected: {reason}")
                         indices.append(idx)
             # Deduplicate while preserving order
             seen: set[int] = set()
@@ -1482,6 +2097,81 @@ Now extract entities from the context above:
             logger.warning(f"[LLM] select_relevant_docs failed: {e}")
 
         return docs  # fail-open
+
+    async def generate_redirect_query(
+        self,
+        docs: list[dict],
+        question: str,
+    ) -> str | None:
+        """
+        When select_relevant_docs returns [], generate a new search query that
+        targets the specific missing information rather than retrying the same query.
+
+        Presents retrieved node names + snippets to the LLM and asks it to craft
+        a focused 5-10 word query for the fact that is still missing.
+        """
+        lines = []
+        for doc in docs[:8]:
+            node = doc.get("original_obj", {})
+            name = node.get("name") or doc.get("name", "?")
+            text = (doc.get("text") or node.get("summary") or "").strip()[:200]
+            lines.append(f"- [{name}]: {text}")
+
+        doc_list = "\n".join(lines) if lines else "(no documents retrieved)"
+        prompt = (
+            f'You were searching for: "{question}"\n\n'
+            f"The following passages were retrieved but NONE contained directly "
+            f"relevant information:\n{doc_list}\n\n"
+            f"Generate a short 5-10 word search query that would find the SPECIFIC "
+            f"missing information needed to answer the question.\n"
+            f"Focus on the key entity or fact that is absent from the passages above.\n"
+            f"Reply with ONLY the search query — no explanation, no quotes."
+        )
+        try:
+            raw = await self.generate(prompt, temperature=0.1, max_tokens=30)
+            query = raw.strip().strip('"').strip("'")
+            if query and 2 <= len(query.split()) <= 15:
+                return query
+        except Exception as e:
+            logger.warning(f"[LLM] generate_redirect_query failed: {e}")
+        return None
+
+    async def summarize_search_failure(
+        self,
+        question: str,
+        all_docs: list[dict],
+    ) -> str:
+        """
+        After all search attempts are exhausted, produce a single informative
+        sentence describing what was found and what is still missing.
+
+        This is used as the sub-answer for synthesis so the final answer can
+        acknowledge the gap rather than silently returning None.
+        """
+        lines = []
+        for doc in all_docs[:6]:
+            node = doc.get("original_obj", {})
+            name = node.get("name") or doc.get("name", "?")
+            text = (doc.get("text") or node.get("summary") or "").strip()[:200]
+            lines.append(f"- [{name}]: {text}")
+
+        context = "\n".join(lines) if lines else "No relevant documents were found."
+        prompt = (
+            f"Question: {question}\n\n"
+            f"After multiple searches the following information was found but "
+            f"the question could not be answered:\n{context}\n\n"
+            f"In ONE sentence, describe what was found and what information is "
+            f"still missing to answer the question.\n"
+            f"Reply with ONLY the one sentence."
+        )
+        try:
+            raw = await self.generate(prompt, temperature=0.0, max_tokens=100)
+            sentence = raw.strip()
+            if sentence:
+                return sentence
+        except Exception as e:
+            logger.warning(f"[LLM] summarize_search_failure failed: {e}")
+        return f"Could not find sufficient information to answer: {question}"
 
     async def extract_name_for_hop(
         self,
@@ -1515,15 +2205,14 @@ Now extract entities from the context above:
         if original_question:
             granularity_hint = (
                 f'\nIMPORTANT: The final question is: "{original_question}"\n'
-                "Extract only the part of the answer relevant to that question's "
-                "granularity (e.g. if the final question compares neighborhoods, "
-                "return the neighborhood name only — not the full address)."
+                "Return only the part of your answer relevant to that question's level of detail "
+                "(e.g. if the final question compares neighborhoods, return the neighborhood name only, not the city)."
             )
         prompt = (
-            f"Answer the question below with ONLY the name or value — "
-            f"no sentence, no explanation.{granularity_hint}\n\n"
+            f"Extract the answer to the question from the context below.{granularity_hint}\n"
+            "Reply with ONLY the name or value — 1 to 6 words, no sentence, no explanation.\n\n"
             f"CONTEXT:\n{context}\n\n"
-            f"QUESTION: {question}\n\nANSWER (1–6 words):"
+            f"QUESTION: {question}\n\nANSWER:"
         )
         try:
             result = await self.generate(prompt, temperature=0.0, max_tokens=20)
@@ -1690,37 +2379,42 @@ Synonyms:"""
     # Injected into BENCHMARK_MODE prompt and personal mode to enforce correct
     # answer-type discipline, comparison direction, specificity, and past/present.
     _SYNTHESIS_RULES = (
-        "Use the specific details in the evidence above to answer precisely.\n"
-        "RULE 1 (YES/NO): If the question asks whether two things share the same "
-        "property, extract the specific value for each from the evidence "
-        "(e.g. the exact neighborhood, not just the city), then compare. "
-        "ALL same → YES. ANY differ → NO. Never output the compared value.\n"
-        "RULE 2 (COMPARISON): If the question asks which had more/fewer/greater/less/"
-        "older/younger, compare the values, then output the WINNER'S NAME — not the "
-        "metric. For age: born in an EARLIER year = OLDER "
-        "(e.g. born 1965 is older than born 1970).\n"
-        "RULE 3 (MULTI-HOP): The final answer comes from the last relevant sub-question. "
-        "Bridge entities found along the way are NOT the final answer.\n"
-        "RULE 4 (ANSWER TYPE): Match the exact type of thing the question asks for — "
-        "never substitute a related entity:\n"
-        "  - 'What song/award/title/distinction...' → output the song/award/title, "
-        "NOT the person associated with it\n"
-        "  - 'How many / what population...' → output the number, NOT the entity being counted\n"
-        "  - 'What city/neighbourhood...' → output the city/location, "
-        "NOT a building or institution inside it\n"
-        "  - 'What position/role/office...' → output the title, NOT the person who held it\n"
-        "RULE 5 (SPECIFICITY): Use the most specific value the evidence supports. "
-        "If the evidence says 'formed in Fujioka, Gunma', answer with 'Fujioka, Gunma' — not 'Japan'. "
-        "If the evidence gives a specific street/neighbourhood, do not broaden to city or country.\n"
-        "RULE 6 (PAST vs CURRENT): If the question asks about a past or former state "
-        "(e.g. 'formerly known as', 'from 1988 to 1996', 'at the time'), answer with "
-        "the historical value from that period — not the current name or current value.\n"
-        "RULE 7 (CHAIN TRACING): For multi-hop questions, explicitly trace the reasoning chain "
-        "before committing to an answer:\n"
-        "  Step 1 — identify the bridge entity (the intermediate fact that connects the two hops).\n"
-        "  Step 2 — use only the bridge entity to locate the final answer in the evidence.\n"
-        "  The bridge entity is NOT the final answer; it is the key to finding it. "
-        "State both steps in your reasoning before writing FINAL."
+        "SYNTHESIS RULES — follow all of these when reasoning to your answer:\n\n"
+        "RULE 1 — YES/NO: For yes/no comparisons, extract the relevant value per entity, "
+        "compare them, then output YES or NO. Never output the compared value itself as the answer.\n"
+        "RULE 2 — COMPARISON: For 'which of X or Y is more/older/greater', output the winner's "
+        "full name, not the metric or value. Older = earlier birth year. "
+        "Higher ratio = more instruments per person. Output the name of the winning entity.\n"
+        "RULE 3 — MULTI-HOP CHAIN: Trace all findings in order. The bridge entity (the answer "
+        "to an intermediate sub-question) is NOT the final answer — use it to find what was "
+        "actually asked.\n"
+        "RULE 4 — ANSWER TYPE: Match the exact type the question asks for. Common traps: "
+        "song ≠ person who sang it; show ≠ character; number ≠ demonym; city ≠ building; "
+        "position ≠ person who holds it; animal ≠ person named after it.\n"
+        "RULE 5 — SPECIFICITY: Use the most specific value the evidence supports. "
+        "Do not broaden: neighborhood → city, city → country, person → organization.\n"
+        "RULE 6 — TEMPORAL: If the question asks for a former or historical value, use the "
+        "value from that period, not the current one.\n"
+        "RULE 7 — CHAIN TRACING: For two-hop questions, explicitly name the bridge entity "
+        "first, then use it to reach the final answer. Do not shortcut.\n"
+        "RULE 8 — ONE ANSWER: If the question asks for one thing, give one thing. "
+        "Do not list alternatives or add caveats.\n"
+        "RULE 9 — EXACT EXTRACTION:\n"
+        "  (a) Do NOT ADD: parent geography, org prefix, or any qualifier not in the question.\n"
+        "  (b) Do NOT STRIP: first names, suffixes, units, or qualifiers that are part of the answer.\n"
+        "RULE 10 — CONFIRMATION QUESTION: When a question is phrased as a factual statement "
+        "ending in '?' (e.g. 'X was founded by the person who did Y?'), output the specific "
+        "name or entity being described — not YES. Only output YES/NO for questions that "
+        "explicitly compare two named entities or ask whether two things share a property.\n"
+        "RULE 11 — SHARED LOCATION: If two entities share a parent region, output the parent. "
+        "Only list sub-locations when they differ from each other.\n"
+        "RULE 12 — TYPE SANITY CHECK: Before writing your answer, verify it matches what was "
+        "asked. A hedgehog is not a human; a country is not a city; a film is not a person.\n"
+        "RULE 13 — PRESERVE TEMPORAL CONNECTIVES: When the answer describes a time span, "
+        "copy the exact phrase from the source — including any leading 'from' or 'between' "
+        "and the exact connective word ('to', 'until', 'through', 'and'). "
+        "Do not normalise connectives: if the source uses 'until', keep 'until' — do not replace it with 'to'. "
+        "If the source phrase has a leading 'from', keep it — do not drop it."
     )
 
     async def synthesize(
@@ -1802,9 +2496,9 @@ Synonyms:"""
                 f"Final question: {query}\n\n"
                 f"{answer_type_constraint}"
                 f"{self._SYNTHESIS_RULES}\n\n"
-                "First write 1–2 sentences of reasoning that end with a clear statement "
-                "of your answer, then on a new line write:\n"
-                "FINAL: <bare answer only — a name, number, or yes/no — no surrounding explanation or extra words>"
+                "Write 1–2 sentences of reasoning that trace through the evidence, "
+                "then on a new line write:\n"
+                "FINAL: <bare answer only — a name, number, date range, or yes/no — no explanation>"
             )
         else:
             prompt = f"""
@@ -2114,16 +2808,20 @@ ANSWER (be brief, max 2-3 sentences):"""
         """
         if not context or not context.strip():
             return {
-                "title": entity_name,
-                "summary": f"Information about {entity_name}.",
+                "description": f"Information about {entity_name}.",
             }
 
         # Benchmark mode uses factual, objective prompts
         if settings.BENCHMARK_MODE:
             format_rules = """### FORMAT RULES
-        - START with a FACTS line: "FACTS: <comma-separated key=value atomic facts, e.g. Origin=Lincoln Nebraska, Founded=1984, Genre=post-punk, Born=1962>."
-        - Then write a CONTEXT paragraph: prose summary of the entity.
-        - Include in FACTS any dates, locations, nationalities, classifications, or numeric values present in the context.
+        - Write a concise prose summary of the entity in 2–4 sentences.
+        - Prioritize key facts by node type:
+            Person       → nationality, occupation, known_for
+            Place        → country, type, located_in
+            Organization → founded_year, headquarters, type
+            Event        → date, location, outcome
+        - Normalize values: nationalities as country names ("United States" not "American"). Years as 4-digit integers.
+        - If the same fact appears multiple times, deduplicate — include it ONCE only.
         - Use third-person, objective language (not "you" or "I").
         - Be factual and grounded IN THE PROVIDED CONTEXT ONLY.
         - Do NOT use personal framing or address any user."""
@@ -2131,8 +2829,7 @@ ANSWER (be brief, max 2-3 sentences):"""
         Generate a short descriptive title (MAX 5 WORDS) for '{entity_name}'."""
         else:
             format_rules = """### FORMAT RULES
-        - START with a FACTS line: "FACTS: <comma-separated key=value atomic facts, e.g. Origin=Lincoln Nebraska, Founded=1984, Genre=post-punk>."
-        - Then write a CONTEXT paragraph: prose summary of the entity.
+        - Write a concise prose summary of the entity.
         - ADDRESS USER AS "YOU" (not "I" or third person).
         - Be factual and grounded IN THE PROVIDED CONTEXT ONLY."""
             title_rules = f"""### TITLE RULES
@@ -2152,6 +2849,7 @@ ANSWER (be brief, max 2-3 sentences):"""
         1. Include ALL relevant details from the context about '{entity_name}'.
         2. Preserve specific facts: dates, numbers, names, outcomes FROM THE CONTEXT ONLY.
         3. Write in a way that captures what was ACTUALLY written, not what you think was meant.
+        4. If the same fact appears multiple times in the context, include it ONCE only — deduplicate aggressively.
         
         {title_rules}
         
@@ -2199,7 +2897,7 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                 raw_content = response.choices[0].message.content
                 cleaned_json = self._clean_json(raw_content)
                 parsed = self.SummaryUpdate.model_validate_json(cleaned_json)
-                return {"title": parsed.title, "summary": parsed.summary}
+                return {"description": parsed.summary}
             else:
                 # For Gemini: use native SDK with schema enforcement
                 response = self.gemini_client.models.generate_content(
@@ -2209,8 +2907,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                         temperature=0.1,
                         response_mime_type="application/json",
                         response_schema=self.SummaryUpdate.model_json_schema(),
-                        thinking_config=types.ThinkingConfig(
-                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True
                         ),
                     ),
                 )
@@ -2218,16 +2917,14 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
 
                 response_data = json.loads(response.text)
                 return {
-                    "title": response_data.get("title", entity_name),
-                    "summary": response_data.get(
+                    "description": response_data.get(
                         "summary", f"Information about {entity_name}."
                     ),
                 }
         except Exception as e:
             logger.error(f"Entity Summary Generation Failed for {entity_name}: {e}")
             return {
-                "title": entity_name,
-                "summary": f"Information about {entity_name}.",
+                "description": f"Information about {entity_name}.",
             }
 
     async def generate_entity_summary_async(
@@ -2240,9 +2937,14 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
         # Benchmark mode uses factual, objective prompts
         if settings.BENCHMARK_MODE:
             format_rules = """### FORMAT RULES
-        - START with a FACTS line: "FACTS: <comma-separated key=value atomic facts, e.g. Origin=Lincoln Nebraska, Founded=1984, Genre=post-punk, Born=1962>."
-        - Then write a CONTEXT paragraph: prose summary of the entity.
-        - Include in FACTS any dates, locations, nationalities, classifications, or numeric values present in the context.
+        - Write a concise prose summary of the entity in 2–4 sentences.
+        - Prioritize key facts by node type:
+            Person       → nationality, occupation, known_for
+            Place        → country, type, located_in
+            Organization → founded_year, headquarters, type
+            Event        → date, location, outcome
+        - Normalize values: nationalities as country names ("United States" not "American"). Years as 4-digit integers.
+        - If the same fact appears multiple times, deduplicate — include it ONCE only.
         - Use third-person, objective language (not "you" or "I").
         - Be factual and grounded IN THE PROVIDED CONTEXT ONLY.
         - Do NOT use personal framing or address any user."""
@@ -2250,12 +2952,12 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
         Generate a short descriptive title (MAX 5 WORDS) for '{entity_name}'."""
         else:
             format_rules = """### FORMAT RULES
-        - START with a FACTS line: "FACTS: <comma-separated key=value atomic facts>."
-        - Then write a CONTEXT paragraph: prose summary of the entity.
+        - Write a concise prose summary of the entity.
         - ADDRESS USER AS "YOU" (not "I" or third person).
         - Be factual and grounded IN THE PROVIDED CONTEXT ONLY."""
             title_rules = f"""### TITLE RULES
         Generate a punchy title (MAX 5 WORDS) capturing '{entity_name}''s role in the user's life."""
+
 
         prompt = f"""
         ### SYSTEM INSTRUCTIONS
@@ -2271,6 +2973,7 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
         1. Include ALL relevant details from the provided context about '{entity_name}'.
         2. Preserve specific facts: dates, numbers, names, outcomes FROM THE CONTEXT ONLY.
         3. Write in a way that captures what was ACTUALLY written, not what you think was meant.
+        4. If the same fact appears multiple times in the context, include it ONCE only — deduplicate aggressively.
         
         {title_rules}
         
@@ -2305,8 +3008,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                         temperature=0.1,
                         response_mime_type="application/json",
                         response_schema=self.SummaryUpdate.model_json_schema(),
-                        thinking_config=types.ThinkingConfig(
-                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True
                         ),
                     ),
                 )
@@ -2314,9 +3018,8 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
 
                 response_data = json.loads(response.text)
                 return {
-                    "title": response_data.get("title", entity_name),
-                    "summary": response_data.get(
-                        "summary", f"Information about {entity_name}."
+                    "description": response_data.get(
+                        "summary", response_data.get("description", f"Information about {entity_name}.")
                     ),
                 }
             elif self.provider in ["ollama", "lm_studio", "openai"]:
@@ -2338,9 +3041,8 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
 
                 response_data = json.loads(response.choices[0].message.content)
                 return {
-                    "title": response_data.get("title", entity_name),
-                    "summary": response_data.get(
-                        "summary", f"Information about {entity_name}."
+                    "description": response_data.get(
+                        "summary", response_data.get("description", f"Information about {entity_name}.")
                     ),
                 }
             else:
@@ -2351,8 +3053,7 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                 f"Async Entity Summary Generation Failed for {entity_name}: {e}"
             )
             return {
-                "title": entity_name,
-                "summary": f"Information about {entity_name}.",
+                "description": f"Information about {entity_name}.",
             }
 
     def extract_atomic_facts(
@@ -2360,49 +3061,41 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
         context: str,
         entity_name: str,
         entity_type: str,
-    ) -> list[dict]:
+    ) -> list[str]:
         """
-        Extract typed atomic (property, value) pairs from node context.
+        Atomize the context about entity_name into proposition sentences.
 
-        Applies to all node types: Entity, Concept, Task, Persona, Reference.
+        Each fact is a self-contained sentence that can be understood without
+        additional context, e.g.:
+            "The Eiffel Tower was built in 1889."
+            "Neil Armstrong walked on the Moon in 1969."
 
-        Returns a list of {"property": str, "value": str} dicts, e.g.:
-            Entity  → [{"property": "origin_city", "value": "Lincoln"}, ...]
-            Concept → [{"property": "domain", "value": "music theory"}, ...]
-            Ref     → [{"property": "author", "value": "Cal Newport"}, ...]
-
-        Stored as JSON under the `facts` property on the Neo4j node for
-        direct-match retrieval at query time (bypasses cosine similarity for
-        atomic lookups like "Where is X from?" or "When was X founded?").
+        Returns a list of plain English proposition strings (NOT key-value pairs).
         """
         if not context or not context.strip():
             return []
 
         prompt = (
-            f"Extract the most important atomic facts about '{entity_name}' "
-            f"({entity_type}) from the context below.\n\n"
-            f"Return ONLY facts explicitly stated in the context. Do NOT invent or infer.\n"
-            f"For each fact, use a short snake_case property name appropriate to the node type "
-            f"and the exact value from the text.\n\n"
-            f"Property name examples by type:\n"
-            f"  Entity/Person : birth_year, death_year, nationality, occupation, "
-            f"origin_city, origin_country, founded_year, parent_organization, genre, classification\n"
-            f"  Concept       : domain, category, definition_source, applies_to, "
-            f"related_field, type, scope\n"
-            f"  Task          : status, due_date, priority, project, assigned_to\n"
-            f"  Persona       : trait_category, intensity, context\n"
-            f"  Reference     : author, published_year, publisher, medium, url\n\n"
+            f"Atomize the following context about '{entity_name}' into individual "
+            f"proposition sentences.\n\n"
+            f"Rules:\n"
+            f"- Each proposition must be a complete, self-contained sentence.\n"
+            f"- Use the entity's full name in each sentence (not pronouns).\n"
+            f"- Only include facts EXPLICITLY stated in the context. Do NOT invent or infer.\n"
+            f"- Do NOT use key-value format. Only plain English sentences.\n"
+            f"- Deduplicate: if the same fact appears twice, include it once.\n"
+            f"- Include all factual propositions from the context. Do not limit the count.\n\n"
+            f"Examples:\n"
+            f'Input: "The Eiffel Tower, built in 1889, is a wrought-iron lattice tower in Paris."\n'
+            f'Output: ["The Eiffel Tower was built in 1889.", '
+            f'"The Eiffel Tower is a wrought-iron lattice tower.", '
+            f'"The Eiffel Tower is located in Paris."]\n\n'
             f"CONTEXT:\n{context}\n\n"
-            f"OUTPUT (JSON object with a 'facts' array, 2-8 items max):\n"
-            f'{{ "facts": [{{"property": "...", "value": "..."}}] }}'
+            f'OUTPUT (JSON array of strings only): ["fact 1", "fact 2", ...]'
         )
 
-        class _Fact(BaseModel):
-            property: str
-            value: str
-
         class _FactList(BaseModel):
-            facts: list[_Fact]
+            facts: list[str]
 
         try:
             model = (
@@ -2417,24 +3110,28 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                     messages=[
                         {
                             "role": "system",
-                            "content": 'Return valid JSON only: {"facts": [{"property": "...", "value": "..."}]}',
+                            "content": 'Return valid JSON only: {"facts": ["sentence 1", "sentence 2"]}',
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    max_tokens=400,
+                    max_tokens=2000,
                     extra_body=extra_body,
                 )
                 raw = resp.choices[0].message.content
                 cleaned = self._clean_json(raw)
+                import json as _json
+                import re as _re
                 try:
-                    parsed = _FactList.model_validate_json(cleaned)
-                    return [f.model_dump() for f in parsed.facts]
+                    data = _json.loads(cleaned)
+                    if isinstance(data, dict) and "facts" in data:
+                        return [str(f) for f in data["facts"]]
+                    if isinstance(data, list):
+                        return [str(f) for f in data]
+                    return []
                 except Exception:
-                    import json as _json
-
-                    arr = _json.loads(cleaned)
-                    if isinstance(arr, list):
-                        return arr
+                    match = _re.search(r"\[.*?\]", cleaned, _re.DOTALL)
+                    if match:
+                        return _json.loads(match.group())
                     return []
             else:
                 from google.genai import types as _gtypes
@@ -2446,17 +3143,110 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                         temperature=0.0,
                         response_mime_type="application/json",
                         response_schema=_FactList.model_json_schema(),
+                        thinking_config=_gtypes.ThinkingConfig(thinking_budget=0),
+                        automatic_function_calling=_gtypes.AutomaticFunctionCallingConfig(
+                            disable=True
+                        ),
+                    ),
+                )
+                import json as _json
+                data = _json.loads(resp.text)
+                if isinstance(data, dict) and "facts" in data:
+                    return data["facts"]
+                return []
+        except Exception as e:
+            logger.warning(f"Atomic fact extraction failed for {entity_name}: {e}")
+            return []
+
+    def generate_potential_questions(
+        self,
+        name: str,
+        node_type: str,
+        description: str,
+        facts_list: list[str],
+    ) -> list[str]:
+        """Generate up to MAX_POTENTIAL_QUESTIONS questions this node's information could answer.
+
+        Questions are based on name + description + facts (proposition sentences).
+        Relationships are intentionally excluded (they are separate Qdrant points).
+
+        Returns a list of plain-English question strings (no leading numbering).
+        """
+        if not description and not facts_list:
+            return []
+
+        facts_text = ""
+        if facts_list:
+            facts_text = "\n".join(f"- {f}" for f in facts_list)
+
+        prompt = (
+            f"You are generating retrieval questions for a knowledge-graph node.\n\n"
+            f"Node name: {name}\n"
+            f"Node type: {node_type}\n"
+            f"Description: {description}\n"
+            + (f"Facts:\n{facts_text}\n" if facts_text else "")
+            + f"\nGenerate all specific, meaningful questions that the information "
+            f"above could directly answer. Include every relevant question — do not limit the count. "
+            f"Focus on factual, precise questions "
+            f"(e.g. 'What year was X founded?' 'Where is X located?' 'Who leads X?').\n\n"
+            f"Rules:\n"
+            f"- Only ask questions answerable from the information provided.\n"
+            f"- Do NOT ask vague or overly broad questions.\n"
+            f"- Do NOT number the questions.\n"
+            f'- Return ONLY a JSON array of strings: ["question 1", "question 2", ...]'
+        )
+
+        try:
+            model = (
+                settings.GEMINI_MODEL
+                if self.is_gemini
+                else self._get_model_for_task("extraction")
+            )
+            if not self.is_gemini:
+                extra_body = self._with_keep_alive({"format": "json"})
+                resp = self.chat_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Return valid JSON only: a flat array of question strings.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=1000,
+                    extra_body=extra_body,
+                )
+                import json as _json
+                import re as _re
+
+                raw = resp.choices[0].message.content
+                cleaned = self._clean_json(raw)
+                match = _re.search(r"\[.*?\]", cleaned, _re.DOTALL)
+                if match:
+                    return _json.loads(match.group())
+                return []
+            else:
+                from google.genai import types as _gtypes
+
+                resp = self.gemini_client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=_gtypes.GenerateContentConfig(
+                        temperature=0.1,
+                        response_mime_type="application/json",
                         thinking_config=types.ThinkingConfig(
-                            thinking_budget=0,  # thinking_level="MINIMAL"
+                            thinking_budget=0,
                         ),
                     ),
                 )
                 import json as _json
 
                 data = _json.loads(resp.text)
-                return data.get("facts", [])
-        except Exception as e:
-            logger.warning(f"Atomic fact extraction failed for {entity_name}: {e}")
+                if isinstance(data, list):
+                    return [str(q) for q in data]
+                return []
+        except Exception as exc:
+            logger.warning(f"generate_potential_questions failed for {name}: {exc}")
             return []
 
     def update_summary(
@@ -2584,8 +3374,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                         temperature=0.1,
                         response_mime_type="application/json",
                         response_schema=self.SummaryUpdate.model_json_schema(),
-                        thinking_config=types.ThinkingConfig(
-                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True
                         ),
                     ),
                 )
@@ -2704,8 +3495,9 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
                         temperature=0.1,
                         response_mime_type="application/json",
                         response_schema=self.SummaryUpdate.model_json_schema(),
-                        thinking_config=types.ThinkingConfig(
-                            thinking_budget=0,  # thinking_level="MINIMAL"
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True
                         ),
                     ),
                 )
@@ -2802,58 +3594,66 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
 
         return "\n\n".join(parts)
 
-    def verify_alias(
+    def detect_similarity(
         self,
         name1: str,
         name2: str,
         context1: str = "",
         context2: str = "",
-    ) -> tuple[bool, float]:
+        facts1: str = "",
+        facts2: str = "",
+    ) -> tuple[bool, float, str]:
         """
-        Use LLM to verify if two entity names refer to the same real-world entity.
+        Use LLM to detect the similarity relationship between two entity names.
 
-        This is used during ingestion to create ALIAS_OF relationships when
-        we detect potential aliases (e.g., "Robert Smith" vs "Bob Smith").
-
-        Args:
-            name1: First entity name
-            name2: Second entity name
-            context1: Summary/description of entity1 (if available)
-            context2: Summary/description of entity2 (if available)
-
-        Returns:
-            Tuple of (is_alias: bool, confidence: float)
+        Returns a 3-tuple: (has_relationship, confidence, relationship_type).
+        relationship_type is a free-text phrase normalized to a Neo4j label, e.g.:
+            IS_SHORTENED_TITLE, IS_CANONICAL_NAME_VARIANT, IS_FORMER_TITLE, etc.
+        Returns (False, 0.0, "") if no meaningful relationship exists.
         """
         import json
 
-        prompt = f"""Determine if these two names refer to the SAME real-world entity (person, place, organization, etc.).
+        def _format_facts(facts_json: str) -> str:
+            """Parse stored JSON facts (proposition sentences) into readable bullet lines."""
+            if not facts_json:
+                return ""
+            try:
+                import json as _j
+
+                items = _j.loads(facts_json)
+                if not items:
+                    return ""
+                lines = [f"  - {f}" for f in items if isinstance(f, str) and f.strip()]
+                return "\nKnown facts:\n" + "\n".join(lines) if lines else ""
+            except Exception:
+                return ""
+
+        ctx1 = (context1 if context1 else "No additional context") + _format_facts(
+            facts1
+        )
+        ctx2 = (context2 if context2 else "No additional context") + _format_facts(
+            facts2
+        )
+
+        prompt = f"""You are a graph database assistant. Two entity names were flagged as textually similar.
 
 NAME 1: "{name1}"
-CONTEXT 1: {context1 if context1 else "No additional context"}
+CONTEXT 1: {ctx1}
 
-NAME 2: "{name2}"  
-CONTEXT 2: {context2 if context2 else "No additional context"}
+NAME 2: "{name2}"
+CONTEXT 2: {ctx2}"
 
-CRITICAL RULES:
-1. "Sr." and "Jr." ALWAYS indicate DIFFERENT people (father and son)
-2. Roman numerals (I, II, III) indicate DIFFERENT people in a family line
-3. Context MUST be consistent - same profession, time period, and relationships
-4. If contexts describe different professions or time periods, they are DIFFERENT people
-5. When in doubt, say DIFFERENT (false positives are worse than false negatives)
+What is the relationship between these two names, if any?
 
-SAME PERSON examples:
-- "Robert Smith" and "Bob Smith" -> SAME (nickname)
-- "Margaret Johnson" and "Margaret Johnson-Williams" -> SAME (married name)
-- "William Gates III" and "Bill Gates" -> SAME (nickname, same person despite numeral)
+Default answer: NONE. Only return a relationship if there is a specific, meaningful connection worth creating as a graph edge.
 
-DIFFERENT PERSON examples:
-- "John Adams" and "John Adams Jr." -> DIFFERENT (father and son)
-- "James Wilson Sr." and "James Wilson" -> DIFFERENT (could be father/son)
-- "George Bush" (41st president) and "George Bush" (43rd president) -> DIFFERENT
-- "Thomas Anderson" (farmer, 1800s) and "Thomas Anderson" (programmer, 2000s) -> DIFFERENT
+If a relationship exists, write a short noun phrase (2–5 words) that completes: "NAME 1 is a ______ of NAME 2".
+- Return only the core label. No filler words like "is", "a", "the", "of".
+- If the two names refer to completely different things that merely share some words, return "none".
+- If you are uncertain, return "none".
 
 Respond with ONLY a JSON object:
-{{"is_same_entity": true/false, "confidence": 0.0-1.0, "reason": "brief explanation"}}
+{{"relationship": "<your label or 'none'>", "confidence": <1.0=obvious, 0.5=plausible, 0.2=speculative>, "reason": "<one sentence>"}}
 
 JSON response:"""
 
@@ -2909,38 +3709,60 @@ JSON response:"""
             import re
 
             json_match = re.search(
-                r'\{[^{}]*"is_same_entity"[^{}]*\}', response_text, re.DOTALL
+                r'\{[^{}]*"relationship"[^{}]*\}', response_text, re.DOTALL
             )
             if json_match:
                 response_text = json_match.group(0)
 
-            # Clean up common issues
             response_text = response_text.strip()
 
             result = json.loads(response_text)
-            is_same = result.get("is_same_entity", False)
             confidence = float(result.get("confidence", 0.0))
             reason = result.get("reason", "")
+            relationship_raw = result.get("relationship", "").strip()
+
+            # "none" (or empty) means no edge gets created
+            if not relationship_raw or relationship_raw.lower() in (
+                "none",
+                "no relationship",
+                "no",
+                "",
+            ):
+                logger.info(
+                    f"[Similarity] {name1} <-> {name2}: none "
+                    f"(confidence={confidence:.2f}, reason={reason})"
+                )
+                return False, 0.0, ""
+
+            # Normalize free-text phrase to a Neo4j relationship label:
+            # uppercase, replace non-alphanumeric with _, prefix with IS_
+            import re as _re_alias
+
+            label = (
+                _re_alias.sub(r"[^A-Za-z0-9]+", "_", relationship_raw.strip())
+                .upper()
+                .strip("_")
+            )
+            if not label.startswith("IS_"):
+                label = "IS_" + label
+            rel_type = label
 
             logger.info(
-                f"[Alias Check] {name1} <-> {name2}: "
-                f"{'SAME' if is_same else 'DIFFERENT'} "
+                f"[Similarity] {name1} <-> {name2}: {rel_type} "
                 f"(confidence={confidence:.2f}, reason={reason})"
             )
 
-            return is_same, confidence
+            return True, confidence, rel_type
 
         except json.JSONDecodeError as e:
-            logger.warning(f"[Alias Check] Failed for {name1} <-> {name2}: {e}")
+            logger.warning(f"[Similarity] Failed for {name1} <-> {name2}: {e}")
             logger.debug(
-                f"[Alias Check] Raw response was: {response_text[:200] if 'response_text' in dir() else 'N/A'}"
+                f"[Similarity] Raw response was: {response_text[:200] if 'response_text' in dir() else 'N/A'}"
             )
-            # Default to not creating alias if we can't verify
-            return False, 0.0
+            return False, 0.0, ""
         except Exception as e:
-            logger.warning(f"[Alias Check] Failed for {name1} <-> {name2}: {e}")
-            # Default to not creating alias if we can't verify
-            return False, 0.0
+            logger.warning(f"[Similarity] Failed for {name1} <-> {name2}: {e}")
+            return False, 0.0, ""
 
     def _extract_relevant_snippet(
         self, content: str, query_terms: set, window_size: int = 300

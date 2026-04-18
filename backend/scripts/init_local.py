@@ -7,12 +7,20 @@ from sqlalchemy import text
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 # Add parent dir to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# Add scripts dir so per-service init modules are importable
+_scripts_dir = os.path.abspath(os.path.dirname(__file__))
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
 
 from app.core.config import settings
 from app.core.database import engine
-from app.services.graph import graph_service
 from alembic.config import Config
+
+from init_neo4j import init_neo4j
+from init_qdrant import init_qdrant
+from init_elasticsearch import init_elasticsearch
 
 
 # 1. Wait for Postgres
@@ -89,86 +97,6 @@ def init_minio():
     print(f"✅ Public Read Policy applied to '{bucket_name}'.")
 
 
-# 4. Init Neo4j
-@retry(stop=stop_after_attempt(10), wait=wait_fixed(2))
-def init_neo4j():
-    print("⏳ Waiting for Neo4j & Initializing...")
-
-    # Verify connection
-    if not graph_service.verify_connection():
-        raise Exception("Cannot connect to Neo4j")
-
-    print("✅ Neo4j is Ready.")
-
-    # Create constraints
-    print("🔄 Creating Neo4j Constraints...")
-    graph_service.execute_query(
-        "CREATE CONSTRAINT note_id_unique IF NOT EXISTS FOR (n:Note) REQUIRE n.id IS UNIQUE"
-    )
-    graph_service.execute_query(
-        "CREATE CONSTRAINT entity_name_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE"
-    )
-    graph_service.execute_query(
-        "CREATE CONSTRAINT concept_name_unique IF NOT EXISTS FOR (c:Concept) REQUIRE c.name IS UNIQUE"
-    )
-    print("✅ Constraints created.")
-
-    # Drop old vector index if exists
-    print("🗑️  Cleaning up old vector index...")
-    try:
-        graph_service.execute_query("DROP INDEX note_vector_index IF EXISTS")
-    except Exception as e:
-        print(f"   (No old index to drop: {e})")
-
-    # Create vector index with configured dimensions
-    print(f"🔄 Creating {settings.EMBEDDING_DIMENSIONS}-dim Vector Index for Notes...")
-    try:
-        query_index = f"""
-        CREATE VECTOR INDEX note_vector_index IF NOT EXISTS
-        FOR (n:Note)
-        ON (n.embedding)
-        OPTIONS {{indexConfig: {{
-         `vector.dimensions`: {settings.EMBEDDING_DIMENSIONS},
-         `vector.similarity_function`: 'cosine'
-        }}}}
-        """
-        graph_service.execute_query(query_index)
-        print(
-            f"✅ Note Vector Index created with {settings.EMBEDDING_DIMENSIONS} dimensions."
-        )
-    except Exception as e:
-        print(f"❌ Note Vector Index creation failed: {e}")
-        raise
-
-    # Create unified knowledge graph vector index for Concepts, Entities, Tasks, Personas, References, Communities
-    print(f"🔄 Creating Unified Knowledge Graph Vector Index...")
-    try:
-        # Drop old index if exists
-        try:
-            graph_service.execute_query(
-                "DROP INDEX distilled_knowledge_index IF EXISTS"
-            )
-        except Exception:
-            pass
-
-        query_knowledge_index = f"""
-        CREATE VECTOR INDEX distilled_knowledge_index IF NOT EXISTS
-        FOR (n:Indexable)
-        ON (n.embedding)
-        OPTIONS {{indexConfig: {{
-         `vector.dimensions`: {settings.EMBEDDING_DIMENSIONS},
-         `vector.similarity_function`: 'cosine'
-        }}}}
-        """
-        graph_service.execute_query(query_knowledge_index)
-        print(
-            f"✅ Knowledge Graph Vector Index created for :Indexable nodes (Concept, Entity, Task, Persona, Reference, Community)."
-        )
-    except Exception as e:
-        print(f"❌ Knowledge Graph Vector Index creation failed: {e}")
-        raise
-
-
 async def main():
     print("\n🚀 Initializing Local Infrastructure...\n")
 
@@ -180,6 +108,12 @@ async def main():
 
     # Check MinIO
     init_minio()
+
+    # Initialize Qdrant
+    init_qdrant()
+
+    # Initialize Elasticsearch
+    init_elasticsearch()
 
     # Initialize Neo4j
     init_neo4j()

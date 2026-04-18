@@ -129,44 +129,46 @@ def send_note(
         return None, str(e)
 
 
-def wait_for_ingestion_success(note_id: str, timeout: int = 2000):
+def wait_for_ingestion_success(note_id: str, initial_pos: int, timeout: int = 2000):
     """
-    Tail the ingestion log file and wait for SUCCESS message for the given note_id.
+    Tail the ingestion log file from initial_pos and wait for SUCCESS message.
     Returns True if found within timeout, False otherwise.
     """
     if not LOG_FILE.exists():
         print(f"   ⚠️  Log file not found: {LOG_FILE}")
-        print(f"      Waiting {timeout}s as fallback...")
-        time.sleep(timeout)
+        print(f"      Waiting 30s as fallback...")
+        time.sleep(30)
         return True
 
     start_time = time.time()
-    success_pattern = f"SUCCESS: Note {note_id} fully indexed"
+    # "Marked Note as Processed" is logged immediately after the note is saved
+    # to Postgres — before the spring layout — so we don't wait 30-90s extra.
+    success_pattern = f"[Ingestion] Marked Note {note_id} as Processed"
+    failure_pattern = f"[Ingestion] FAILURE note_id={note_id}"
 
-    # Get current file size to start tailing from end
-    initial_size = LOG_FILE.stat().st_size
-
-    print(f"   ⏳ Waiting for ingestion to complete (timeout: {timeout}s)...")
+    print(f"   ⏳ Waiting for ingestion to complete...", end="", flush=True)
 
     with open(LOG_FILE, "r") as f:
-        # Seek to end of file
-        f.seek(initial_size)
+        f.seek(initial_pos)
 
         while True:
-            # Check timeout
             if time.time() - start_time > timeout:
-                print(f"   ⚠️  Timeout reached ({timeout}s)")
+                print(f" ⚠️ timeout ({timeout}s)")
                 return False
 
-            # Read new lines
             line = f.readline()
             if line:
                 if success_pattern in line:
-                    print(f"   ✅ Ingestion complete!")
+                    print(" ✅")
                     return True
+                if failure_pattern in line:
+                    print(f" ❌ failed")
+                    return False
             else:
-                # No new data, sleep briefly
-                time.sleep(0.5)
+                # Force Python to drop its internal read buffer so the next
+                # readline() actually re-checks the OS file cache.
+                f.seek(f.tell())
+                time.sleep(0.1)
 
 
 def extract_date_from_filename(filename: str) -> str:
@@ -340,6 +342,9 @@ def batch_ingest(
         # Extract title from filename (remove extension)
         title = filename.rsplit(".", 1)[0] if "." in filename else filename
 
+        # Capture log position BEFORE sending so no SUCCESS line can slip by
+        initial_pos = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
+
         result, error = send_note(
             content, created_at=created_at, title=title, dry_run=dry_run
         )
@@ -357,7 +362,7 @@ def batch_ingest(
 
             if not dry_run:
                 # Wait for ingestion to complete before proceeding
-                success = wait_for_ingestion_success(note_id, timeout=2000)
+                success = wait_for_ingestion_success(note_id, initial_pos, timeout=2000)
                 if not success:
                     print("   ⚠️  Failed to confirm completion - stopping batch process")
                     print("   ‼️ Check logs for last processed note")

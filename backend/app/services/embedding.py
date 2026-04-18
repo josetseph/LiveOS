@@ -92,10 +92,9 @@ class EmbeddingService:
 
         # Qwen3-Embedding instruction prefix for QUERIES (not documents).
         # Critical for Qwen3 series — omitting it degrades recall significantly.
+        # Exact prefix specified in plan: "Instruct: Given a question, retrieve relevant context.\nQuery: "
         self.query_instruction = (
-            "Instruct: Given a question about personal knowledge, notes, or "
-            "experiences, retrieve relevant information from the knowledge base "
-            "that helps answer the question\nQuery: "
+            "Instruct: Given a question, retrieve relevant context.\nQuery: "
         )
 
         # Detect Qwen3 by leaf model name so MODELS_PATH depth doesn't matter.
