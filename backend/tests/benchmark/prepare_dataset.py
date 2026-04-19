@@ -215,6 +215,8 @@ async def retry_failed(dataset: str) -> None:
     print(f"   Sending {len(items)} notes sequentially (1 at a time)…\n", flush=True)
     succeeded = 0
     failed_count = 0
+    consecutive_failures = 0
+    CIRCUIT_BREAKER_THRESHOLD = 3
 
     async with httpx.AsyncClient() as client:
         for i, (fname, content, title) in enumerate(items, 1):
@@ -225,6 +227,14 @@ async def retry_failed(dataset: str) -> None:
                 progress[dataset] = dataset_progress
                 _save_progress(progress)
                 failed_count += 1
+                consecutive_failures += 1
+                if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+                    print(
+                        f"\n🔴 Circuit breaker: {consecutive_failures} consecutive failures."
+                        f" LLM backend may be down. Stopping early — run with --resume to continue.",
+                        flush=True,
+                    )
+                    break
                 continue
 
             # Persist as pending immediately so --resume can recover if interrupted.
@@ -239,8 +249,17 @@ async def retry_failed(dataset: str) -> None:
 
             if ok:
                 succeeded += 1
+                consecutive_failures = 0
             else:
                 failed_count += 1
+                consecutive_failures += 1
+                if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+                    print(
+                        f"\n🔴 Circuit breaker: {consecutive_failures} consecutive failures."
+                        f" LLM backend may be down. Stopping early — run with --resume to continue.",
+                        flush=True,
+                    )
+                    break
 
     print(f"\n✨ Retry done: {succeeded} succeeded, {failed_count} failed.")
     still = [f for f, v in dataset_progress.items() if v == "failed"]
@@ -362,6 +381,8 @@ async def prepare(
     print(f"   Sending {len(items)} notes sequentially (1 at a time)…\n", flush=True)
     succeeded = 0
     failed_count = 0
+    consecutive_failures = 0
+    CIRCUIT_BREAKER_THRESHOLD = 3
 
     async with httpx.AsyncClient() as client:
         for i, (fname, content, title) in enumerate(items, 1):
@@ -372,6 +393,14 @@ async def prepare(
                 progress[dataset] = dataset_progress
                 _save_progress(progress)
                 failed_count += 1
+                consecutive_failures += 1
+                if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+                    print(
+                        f"\n🔴 Circuit breaker: {consecutive_failures} consecutive failures."
+                        f" LLM backend may be down. Stopping early — run with --resume to continue.",
+                        flush=True,
+                    )
+                    break
                 continue
 
             # Persist as pending immediately so --resume can recover if interrupted.
@@ -386,8 +415,17 @@ async def prepare(
 
             if ok:
                 succeeded += 1
+                consecutive_failures = 0
             else:
                 failed_count += 1
+                consecutive_failures += 1
+                if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+                    print(
+                        f"\n🔴 Circuit breaker: {consecutive_failures} consecutive failures."
+                        f" LLM backend may be down. Stopping early — run with --resume to continue.",
+                        flush=True,
+                    )
+                    break
 
     total = len(all_note_files)
     confirmed_total = sum(1 for v in dataset_progress.values() if _is_confirmed(v))

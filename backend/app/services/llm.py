@@ -42,13 +42,13 @@ class LLMService:
             api_key = settings.LLM_API_KEY
 
             self.extraction_client = instructor.patch(
-                OpenAI(base_url=base_url, api_key=api_key, timeout=300.0),
+                OpenAI(base_url=base_url, api_key=api_key, timeout=300.0, max_retries=5),
                 mode=instructor.Mode.MD_JSON,
             )
-            self.chat_client = OpenAI(base_url=base_url, api_key=api_key, timeout=300.0)
+            self.chat_client = OpenAI(base_url=base_url, api_key=api_key, timeout=300.0, max_retries=5)
             # Async client for batch processing
             self.async_chat_client = AsyncOpenAI(
-                base_url=base_url, api_key=api_key, timeout=300.0
+                base_url=base_url, api_key=api_key, timeout=300.0, max_retries=5
             )
 
         elif self.provider == "lm_studio":
@@ -59,11 +59,11 @@ class LLMService:
             api_key = settings.LLM_API_KEY
 
             self.extraction_client = instructor.patch(
-                OpenAI(base_url=base_url, api_key=api_key, timeout=300.0)
+                OpenAI(base_url=base_url, api_key=api_key, timeout=300.0, max_retries=5)
             )
-            self.chat_client = OpenAI(base_url=base_url, api_key=api_key, timeout=300.0)
+            self.chat_client = OpenAI(base_url=base_url, api_key=api_key, timeout=300.0, max_retries=5)
             self.async_chat_client = AsyncOpenAI(
-                base_url=base_url, api_key=api_key, timeout=300.0
+                base_url=base_url, api_key=api_key, timeout=300.0, max_retries=5
             )
 
         elif self.provider == "openai":
@@ -365,27 +365,21 @@ class LLMService:
 
         try:
             parsed = json.loads(cleaned_json)
-            # Case-insensitive key lookup for logging
-            entities = []
-            concepts = []
-
-            for k, v in parsed.items():
-                if k.lower() == "entities" and isinstance(v, list):
-                    entities = v
-                elif k.lower() == "concepts" and isinstance(v, list):
-                    concepts = v
-
-            entity_count = len(entities)
-            concept_count = len(concepts)
-
-            logger.info(
-                f"[Ollama] Raw extraction: {entity_count} entities, {concept_count} concepts"
-            )
-            if entity_count == 0:
-                # Only warn if it's truly empty, but check if we might have missed the key due to structure
-                # We check for list content to avoid false positives on empty lists
+            # Handle bare list (top-level array) or normal object
+            if isinstance(parsed, list):
+                node_count = len(parsed)
+                rel_count = sum(len(n.get("relationships", [])) for n in parsed if isinstance(n, dict))
+            else:
+                node_count = len(
+                    parsed.get("nodes") or parsed.get("entities") or parsed.get("node_list") or []
+                )
+                rel_count = len(
+                    parsed.get("relationships") or parsed.get("edges") or parsed.get("links") or []
+                )
+            logger.info(f"[Ollama] Raw extraction: {node_count} nodes, {rel_count} relationships")
+            if node_count == 0:
                 logger.warning(
-                    f"[Ollama] Empty entities (or capture failed). Full JSON: {cleaned_json[:2000]}"
+                    f"[Ollama] Empty nodes. Full JSON: {cleaned_json[:2000]}"
                 )
         except Exception:
             logger.warning(f"[Ollama] Could not pre-parse JSON: {cleaned_json[:500]}")
@@ -551,7 +545,8 @@ class LLMService:
 
                 import json
                 response_data = json.loads(response.text)
-                return response_model(**response_data)
+                # Use model_validate (not **kwargs) so model_validator(mode='before') fires
+                return response_model.model_validate(response_data)
 
             except Exception as e:
                 err = str(e)
@@ -2992,69 +2987,86 @@ Double-quote all keys. Use straight quotes, not curly quotes.""",
         }}
         """
 
-        try:
-            model = (
-                settings.GEMINI_MODEL
-                if self.is_gemini
-                else self._get_model_for_task("extraction")
-            )
+        import asyncio
+        import json
 
-            if self.is_gemini:
-                # Use Gemini async client for batch processing
-                response = await self.gemini_client.aio.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.1,
-                        response_mime_type="application/json",
-                        response_schema=self.SummaryUpdate.model_json_schema(),
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                            disable=True
+        model = (
+            settings.GEMINI_MODEL
+            if self.is_gemini
+            else self._get_model_for_task("extraction")
+        )
+
+        MAX_RETRIES = 3
+        last_error: Exception | None = None
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                if self.is_gemini:
+                    response = await self.gemini_client.aio.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=0.1,
+                            response_mime_type="application/json",
+                            response_schema=self.SummaryUpdate.model_json_schema(),
+                            thinking_config=types.ThinkingConfig(thinking_budget=0),
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                disable=True
+                            ),
                         ),
-                    ),
-                )
-                import json
+                    )
+                    raw_text = response.text
+                    if not raw_text:
+                        raise ValueError("Empty Gemini response for entity summary")
+                    response_data = json.loads(raw_text)
+                    return {
+                        "description": response_data.get(
+                            "summary", response_data.get("description", f"Information about {entity_name}.")
+                        ),
+                    }
+                elif self.provider in ["ollama", "lm_studio", "openai"]:
+                    response_format = (
+                        self._lm_studio_text_response_format()
+                        if self.provider == "lm_studio"
+                        else {"type": "json_object"}
+                    )
+                    response = await self.async_chat_client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.1,
+                        extra_body=self._with_keep_alive(
+                            {"response_format": response_format}
+                        ),
+                    )
+                    raw_content = response.choices[0].message.content
+                    if not raw_content:
+                        raise ValueError("Empty LLM response for entity summary")
+                    response_data = json.loads(raw_content)
+                    return {
+                        "description": response_data.get(
+                            "summary", response_data.get("description", f"Information about {entity_name}.")
+                        ),
+                    }
+                else:
+                    # Non-async provider — no retry needed
+                    return self.generate_entity_summary(context, entity_name, entity_type)
+            except Exception as e:
+                last_error = e
+                if attempt < MAX_RETRIES - 1:
+                    wait = attempt + 1  # 1s, 2s
+                    logger.warning(
+                        f"Entity summary attempt {attempt + 1}/{MAX_RETRIES} failed for "
+                        f"{entity_name!r}: {e}. Retrying in {wait}s..."
+                    )
+                    await asyncio.sleep(wait)
 
-                response_data = json.loads(response.text)
-                return {
-                    "description": response_data.get(
-                        "summary", response_data.get("description", f"Information about {entity_name}.")
-                    ),
-                }
-            elif self.provider in ["ollama", "lm_studio", "openai"]:
-                # Use async OpenAI client for Ollama, LM Studio, and OpenAI batch processing
-                response_format = (
-                    self._lm_studio_text_response_format()
-                    if self.provider == "lm_studio"
-                    else {"type": "json_object"}
-                )
-                response = await self.async_chat_client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.1,
-                    extra_body=self._with_keep_alive(
-                        {"response_format": response_format}
-                    ),
-                )
-                import json
-
-                response_data = json.loads(response.choices[0].message.content)
-                return {
-                    "description": response_data.get(
-                        "summary", response_data.get("description", f"Information about {entity_name}.")
-                    ),
-                }
-            else:
-                # Fallback to sync for other providers
-                return self.generate_entity_summary(context, entity_name, entity_type)
-        except Exception as e:
-            logger.error(
-                f"Async Entity Summary Generation Failed for {entity_name}: {e}"
-            )
-            return {
-                "description": f"Information about {entity_name}.",
-            }
+        logger.error(
+            f"Async Entity Summary Generation Failed for {entity_name!r} after "
+            f"{MAX_RETRIES} attempts: {last_error}"
+        )
+        return {
+            "description": f"Information about {entity_name}.",
+        }
 
     def extract_atomic_facts(
         self,

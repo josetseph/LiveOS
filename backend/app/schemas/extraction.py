@@ -111,12 +111,36 @@ class Extraction(BaseModel):
         the unified `nodes` list so old-format responses still parse cleanly.
         """
         if not isinstance(data, dict):
+            # LLM returned a bare list of node dicts, e.g. gemma4 format:
+            # [{"name": "X", "relationships": [...]}, ...]
+            # Hoist any relationships embedded inside each node dict.
+            if isinstance(data, list):
+                hoisted_rels: list = []
+                clean_nodes: list = []
+                for item in data:
+                    if isinstance(item, dict):
+                        embedded = item.pop("relationships", None)
+                        if isinstance(embedded, list):
+                            hoisted_rels.extend(embedded)
+                        clean_nodes.append(item)
+                    elif isinstance(item, str) and item.strip():
+                        clean_nodes.append({"name": item.strip()})
+                    else:
+                        clean_nodes.append(item)
+                return {"nodes": clean_nodes, "relationships": hoisted_rels}
             return data
 
         # Unwrap {"extraction": {...}} wrapper
         wrapped = data.get("extraction")
         if isinstance(wrapped, dict):
             data = wrapped
+
+        # Unwrap {"data": {...}} or {"result": {...}} wrapper
+        for outer_key in ("data", "result"):
+            outer = data.get(outer_key)
+            if isinstance(outer, dict) and ("nodes" in outer or "relationships" in outer or "entities" in outer):
+                data = outer
+                break
 
         # Normalise all keys to lowercase_underscore
         norm: dict = {}
@@ -126,8 +150,20 @@ class Extraction(BaseModel):
 
         result: dict = {}
 
-        # domain / sentiment / relationships pass through directly
-        for field in ("domain", "domain_categorization", "sentiment", "relationships", "nodes"):
+        # Relationship key aliases: relationships / edges / links / connections / graph_edges
+        for rel_key in ("relationships", "edges", "links", "connections", "graph_edges", "edge_list"):
+            if rel_key in norm and "relationships" not in result:
+                result["relationships"] = norm[rel_key]
+                break
+
+        # Node key aliases: nodes / node_list / graph_nodes / elements
+        for node_key in ("nodes", "node_list", "graph_nodes", "elements"):
+            if node_key in norm and "nodes" not in result:
+                result["nodes"] = norm[node_key]
+                break
+
+        # domain / sentiment pass through directly
+        for field in ("domain", "domain_categorization", "sentiment"):
             if field in norm:
                 v = norm[field]
                 real_key = "domain" if field == "domain_categorization" else field
@@ -154,12 +190,16 @@ class Extraction(BaseModel):
             result["nodes"] = legacy_nodes
 
         # Pass through any remaining unknown keys
+        _consumed = {
+            "entities", "concepts", "tasks", "persona_traits",
+            "persona", "traits", "references", "external_references",
+            "domain_categorization", "summary", "quote",
+            "edges", "links", "connections", "graph_edges", "edge_list",
+            "node_list", "graph_nodes", "elements",
+            "data", "result",
+        }
         for k, v in norm.items():
-            if k not in result and k not in (
-                "entities", "concepts", "tasks", "persona_traits",
-                "persona", "traits", "references", "external_references",
-                "domain_categorization", "summary", "quote",
-            ):
+            if k not in result and k not in _consumed:
                 result[k] = v
 
         return result
@@ -169,6 +209,12 @@ class Extraction(BaseModel):
     def ensure_list(cls, v, info):
         if v is None or not isinstance(v, list):
             return []
+        if info.field_name == "nodes":
+            # Coerce plain strings → minimal node dicts so Node validation doesn't crash
+            return [
+                {"name": item.strip()} if isinstance(item, str) and item.strip() else item
+                for item in v
+            ]
         return v
 
     @field_validator("sentiment", mode="before")

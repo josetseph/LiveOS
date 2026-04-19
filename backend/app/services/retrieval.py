@@ -1326,10 +1326,23 @@ class RetrievalService:
         )
 
         def _fill_placeholders(text: str, prior_answers: list[str]) -> str:
-            """Replace [anything] placeholders with the most recent concrete direct answer."""
-            if "[" not in text or not prior_answers:
+            """Replace [anything] placeholders with the most recent concrete direct answer.
+
+            If no prior answer is available, strip the brackets so the inner word
+            still acts as a search token rather than sending a literal '[ambassador]'
+            to the search engine.
+            """
+            if "[" not in text:
                 return text
-            return _re_sq.sub(r"\[[^\]]+\]", prior_answers[-1], text)
+            if prior_answers:
+                return _re_sq.sub(r"\[[^\]]+\]", prior_answers[-1], text)
+            # No concrete prior answer — strip brackets to keep the search term usable
+            stripped = _re_sq.sub(r"\[([^\]]+)\]", r"\1", text)
+            logger.info(
+                f"  [Pipeline] Placeholder in sub-question could not be resolved "
+                f"(no prior concrete answer). Stripped brackets: '{stripped}'"
+            )
+            return stripped
 
         sub_results: list[dict] = []
         prior_direct_answers: list[str] = []
@@ -1350,6 +1363,19 @@ class RetrievalService:
             logger.info(
                 f"  [SubQ {step_num}] hybrid_search returned {len(raw_docs)} candidates"
             )
+
+            # ── a2. Rerank + cut to top-20 before LLM sees candidates ────
+            # _apply_reranker_logging scores and sorts by relevance.
+            # When RERANKER_ENABLED is True we then cut to top-20 so the LLM
+            # isn't shown 100 candidates — community summaries and other
+            # zero-score noise are naturally pushed below the cutoff.
+            # When disabled (current default) we pass all docs through unchanged.
+            raw_docs = await self._apply_reranker_logging(resolved_sq, raw_docs)
+            if settings.RERANKER_ENABLED and len(raw_docs) > 20:
+                logger.info(
+                    f"  [SubQ {step_num}] Reranker cut {len(raw_docs)} → 20 candidates"
+                )
+                raw_docs = raw_docs[:20]
 
             # ── b. LLM selects relevant docs with reasoning ───────────────
             selected_docs, selection_reasons = (
@@ -1545,11 +1571,23 @@ class RetrievalService:
         )
 
         def _fill_placeholders(text: str, prior_answers: list[str]) -> str:
-            """Replace [anything] CoT placeholders with the most recent concrete answer."""
-            if "[" not in text or not prior_answers:
+            """Replace [anything] CoT placeholders with the most recent concrete answer.
+
+            If no prior answer is available, strip the brackets so the inner word
+            still acts as a search token rather than sending a literal '[entity]'
+            to the search engine.
+            """
+            if "[" not in text:
                 return text
-            last = prior_answers[-1]
-            return _re.sub(r"\[[^\]]+\]", last, text)
+            if prior_answers:
+                return _re.sub(r"\[[^\]]+\]", prior_answers[-1], text)
+            # No concrete prior answer — strip brackets to keep the search term usable
+            stripped = _re.sub(r"\[([^\]]+)\]", r"\1", text)
+            logger.info(
+                f"  [StructSubQ] Placeholder could not be resolved "
+                f"(no prior concrete answer). Stripped brackets: '{stripped}'"
+            )
+            return stripped
 
         async def _answer_question(question: str) -> str | None:
             """

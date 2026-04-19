@@ -50,7 +50,7 @@ class RerankerService:
 
                 loop = asyncio.get_event_loop()
                 self._model = await loop.run_in_executor(None, _load)
-                logger.info(f"[Reranker] Loaded jina-reranker-v3 from {model_path}")
+                logger.info(f"[Reranker] Loaded {settings.MODEL_RERANKER_LOCAL} from {model_path}")
                 return True
             except Exception as exc:
                 logger.error(f"[Reranker] Failed to load model: {exc}")
@@ -84,14 +84,19 @@ class RerankerService:
         try:
             loop = asyncio.get_event_loop()
             raw = await loop.run_in_executor(None, _run)
-            return [
-                {
-                    "index": r["index"],
-                    "text": r["document"],
-                    "relevance_score": float(r["relevance_score"]),
-                }
-                for r in raw
-            ]
+            results = []
+            for r in raw:
+                doc = r["document"]
+                # v2 wraps text in {"text": ...}; v3 returns a plain string
+                text = doc["text"] if isinstance(doc, dict) else doc
+                results.append(
+                    {
+                        "index": r["index"],
+                        "text": text,
+                        "relevance_score": float(r["relevance_score"]),
+                    }
+                )
+            return results
         except Exception as exc:
             logger.error(f"[Reranker] Inference failed: {exc}")
             return []

@@ -1428,7 +1428,7 @@ class IngestionWorkflow:
             f"[Community] Leiden recompute COMPLETE: {created} community nodes rebuilt\n"
             f"  Nodes in graph: {len(node_ids)}\n"
             f"  Edges in graph: {len(edge_list)}\n"
-            f"  Levels: {list(resolutions.keys())}\n"
+            f"  Levels: {[f'L{level}' for level, _ in resolutions]}\n"
             f"{'='*70}"
         )
         return created

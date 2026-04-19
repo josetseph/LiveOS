@@ -169,7 +169,7 @@ function HUD({ nodeCount, edgeCount }: { nodeCount: number; edgeCount: number })
         backdropFilter: "blur(8px)", userSelect: "none", pointerEvents: "none",
         whiteSpace: "nowrap", fontFamily: "system-ui, sans-serif",
       }}>
-        Drag to look &nbsp;·&nbsp; Right drag to pan &nbsp;·&nbsp; Scroll to fly &nbsp;·&nbsp; Click node for details
+        Drag to look &nbsp;·&nbsp; Right drag to pan &nbsp;·&nbsp; Scroll to fly &nbsp;·&nbsp; WASD to move &nbsp;·&nbsp; Click node for details
       </div>
     </>
   );

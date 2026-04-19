@@ -16,13 +16,13 @@ class Settings(BaseSettings):
 
     # ── LLM Provider ──────────────────────────────────────────────────────────
     # "ollama", "lm_studio", "openai", "gemini", "anthropic"
-    LLM_PROVIDER: str = "gemini"
+    LLM_PROVIDER: str = "ollama"
     LLM_FALLBACK_PROVIDER: str | None = None  # Optional fallback if primary fails
 
     # Local / OpenAI-compatible LLM (Ollama, LM Studio, or any v1 endpoint)
     # These are used when LLM_PROVIDER is "ollama" or "lm_studio".
     LLM_BASE_URL: str = (
-        "http://localhost:11434"  # LM Studio default: http://127.0.0.1:1234
+        "http://192.168.10.182:11434"  # LM Studio default: http://127.0.0.1:1234
     )
     LLM_API_KEY: str = "ollama"  # LM Studio default: "lm-studio"
     LLM_MODEL: str = "gemma3:4b"  # LM Studio example: "google/gemma-3-4b"
@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     MODEL_FLORENCE_LOCAL: str = "florence-2-large"
     MODEL_WHISPER_HF: str = "openai/whisper-large-v3-turbo"
     MODEL_WHISPER_LOCAL: str = "whisper-large-v3-turbo"
-    MODEL_RERANKER_LOCAL: str = "jina-reranker-v3"
+    MODEL_RERANKER_LOCAL: str = "jina-reranker-v2-base-multilingual"
 
     # Model storage path (relative to backend root)
     MODELS_PATH: str = "models"
