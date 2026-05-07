@@ -1,6 +1,7 @@
-import sys
-import os
 import asyncio
+import os
+import sys
+
 import boto3
 from botocore.exceptions import ClientError
 from sqlalchemy import text
@@ -14,13 +15,12 @@ _scripts_dir = os.path.abspath(os.path.dirname(__file__))
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
 
+from alembic.config import Config
 from app.core.config import settings
 from app.core.database import engine
-from alembic.config import Config
-
-from init_neo4j import init_neo4j
+from init_kuzu import init_kuzu
 from init_qdrant import init_qdrant
-from init_elasticsearch import init_elasticsearch
+from init_typesense import init_typesense
 
 
 # 1. Wait for Postgres
@@ -112,11 +112,11 @@ async def main():
     # Initialize Qdrant
     init_qdrant()
 
-    # Initialize Elasticsearch
-    init_elasticsearch()
+    # Initialize Kuzu (embedded — creates DB dir + schema)
+    init_kuzu()
 
-    # Initialize Neo4j
-    init_neo4j()
+    # Initialize Typesense
+    init_typesense()
 
     print(
         "\n✨ Local Stack Initialized Successfully! You are fully offline-capable now.\n"

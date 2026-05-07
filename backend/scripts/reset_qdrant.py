@@ -4,15 +4,15 @@ reset_qdrant.py — Delete all Qdrant collections and recreate them empty.
 This preserves the collection schema (vector size, distance metric) while
 discarding every stored point.
 """
-import sys
+
 import os
+import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from app.core.config import settings
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
-
-from app.core.config import settings
 
 
 def reset_qdrant() -> None:
@@ -25,8 +25,6 @@ def reset_qdrant() -> None:
 
     collections = [
         settings.QDRANT_COLLECTION_NODE_CORES,
-        settings.QDRANT_COLLECTION_NODE_FACTS,
-        settings.QDRANT_COLLECTION_NODE_QUESTIONS,
         settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS,
         settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
     ]

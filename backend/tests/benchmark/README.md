@@ -2,7 +2,24 @@
 
 This directory contains tools for evaluating LiveOS retrieval and answer quality against standardized multi-hop reasoning datasets.
 
-## ⚠️ Important: Benchmark Mode
+## Latest Retrieval Fix Snapshot (2026-04-28)
+
+Recent retrieval fixes validated in the latest HotpotQA smoke benchmark:
+
+- `select_relevant_docs_with_reasoning()` compatibility update now accepts `original_query`.
+- Retrieval now enforces entity-first search with vector/full-text fallback only when entity matches lack usable text evidence.
+- One-hop graph expansion LLM evaluation is no longer failing in this run.
+
+Benchmark artifact:
+- `backend/tests/benchmark/results/hotpotqa_n5_20260428_145930.json`
+
+Current top outcomes (n=5):
+- `error_count=0`, `valid_tests=5`
+- Answer metrics: `exact_match=0.4`, `answer_f1=0.4`, `fuzzy_match=0.4`
+- Retrieval metrics: `precision=0.3848`, `recall=0.7`, `retrieval_f1=0.4966`
+- Avg response time: `116929.65 ms`
+
+## Important: Benchmark Mode
 
 LiveOS is designed for **personal knowledge management** with prompts that address the user as "You" and build personal narratives. This causes issues when testing with Wikipedia-style benchmark data.
 
@@ -58,6 +75,18 @@ unset BENCHMARK_MODE
 python ../batch-note-processing/batch_ingest.py tests/benchmark/musique_notes/ # MuSiQue
 python ../batch-note-processing/batch_ingest.py tests/benchmark/hotpotqa_notes/ # HotPotQA
 ```
+
+If you need a full manual community rebuild before evaluation:
+
+```bash
+# From backend/ with venv active
+python scripts/run_community_detection.py
+```
+
+Usage expectations with current orchestration:
+- Start this only after ingestion has gone idle.
+- If a new ingestion starts during recompute, the recompute cancels immediately.
+- Recompute requests are single-flight with superseding semantics, so only the newest request/run proceeds.
 
 ### Step 2: Run Evaluation
 
@@ -167,7 +196,7 @@ python tests/benchmark/evaluate_ragas.py --dataset musique --no-save
 
 ## Tips for Research Paper
 
-1. **Report F1 on HotpotQA** - This is the standard benchmark metric
+1. **Report F1 on HotpotQA** - This is the standard   benchmark metric
 2. **Break down by question type** - "bridge" vs "comparison" questions
 3. **Show retrieval quality** - Not just final answer accuracy
 4. **Compare timing** - Your graph traversal vs. embedding all documents

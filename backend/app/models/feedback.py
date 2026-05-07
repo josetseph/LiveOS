@@ -1,10 +1,9 @@
 import uuid
 from datetime import datetime, timezone
 
+from app.core.database import Base
 from sqlalchemy import Column, DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY
-
-from app.core.database import Base
 
 
 class Feedback(Base):

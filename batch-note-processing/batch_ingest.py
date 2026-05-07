@@ -124,7 +124,7 @@ def send_note(
     except requests.exceptions.ConnectionError:
         return None, "Connection error - is the backend running?"
     except requests.exceptions.HTTPError as e:
-        return None, f"HTTP {response.status_code}: {response.text[:100]}"
+        return None, f"HTTP {response.status_code}: {response.text}"
     except Exception as e:
         return None, str(e)
 
@@ -135,7 +135,7 @@ def wait_for_ingestion_success(note_id: str, initial_pos: int, timeout: int = 20
     Returns True if found within timeout, False otherwise.
     """
     if not LOG_FILE.exists():
-        print(f"   ⚠️  Log file not found: {LOG_FILE}")
+        print(f"    Log file not found: {LOG_FILE}")
         print(f"      Waiting 30s as fallback...")
         time.sleep(30)
         return True
@@ -153,7 +153,7 @@ def wait_for_ingestion_success(note_id: str, initial_pos: int, timeout: int = 20
 
         while True:
             if time.time() - start_time > timeout:
-                print(f" ⚠️ timeout ({timeout}s)")
+                print(f" timeout ({timeout}s)")
                 return False
 
             line = f.readline()
@@ -289,7 +289,7 @@ def batch_ingest(
                     break
             if start_index == 0:
                 print(
-                    f"   ⚠️  Could not find last processed file, starting from beginning"
+                    f"    Could not find last processed file, starting from beginning"
                 )
         else:
             print(f"   ℹ️  No progress file found, starting from beginning")
@@ -357,14 +357,14 @@ def batch_ingest(
             note_id = result["note_id"]
             print(f"   ✅ Sent: {note_id}")
             print(
-                f"      Preview: {content[:80].strip()}{'...' if len(content) > 80 else ''}"
+                f"      Preview: {content.strip()}{'...' if len(content) > 80 else ''}"
             )
 
             if not dry_run:
                 # Wait for ingestion to complete before proceeding
-                success = wait_for_ingestion_success(note_id, initial_pos, timeout=2000)
+                success = wait_for_ingestion_success(note_id, initial_pos, timeout=3600)
                 if not success:
-                    print("   ⚠️  Failed to confirm completion - stopping batch process")
+                    print("    Failed to confirm completion - stopping batch process")
                     print("   ‼️ Check logs for last processed note")
                     print("   💡 Resume with: python batch_ingest.py --resume")
                     return
@@ -373,7 +373,7 @@ def batch_ingest(
 
             results["success"] += 1
         else:
-            print(f"   ⚠️  Skipped: Empty content")
+            print(f"    Skipped: Empty content")
             results["skipped"] += 1
 
         print()
@@ -384,7 +384,7 @@ def batch_ingest(
     print("=" * 60)
     print(f"✅ Successful: {results['success']}")
     print(f"❌ Failed:     {results['failed']}")
-    print(f"⚠️  Skipped:    {results['skipped']}")
+    print(f" Skipped:    {results['skipped']}")
     print(f"📝 Total:      {len(note_files) - start_index}")
 
     if results["failed"] == 0 and not dry_run:

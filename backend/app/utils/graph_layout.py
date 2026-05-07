@@ -9,20 +9,21 @@ Algorithm:
   4. Nodes with no community assignment are placed on a fallback inner sphere so
      they are always visible, even before communities have been computed.
 
-The result is a static dict {node_id: (x, y, z)} that is stored in Neo4j so
+The result is a static dict {node_id: (x, y, z)} that is stored in Kuzu so
 the frontend never has to run a physics simulation.
 """
 
 from __future__ import annotations
 
-import math
 import hashlib
+import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def _fibonacci_sphere(n: int, radius: float) -> list[tuple[float, float, float]]:
     """Return n evenly-distributed points on the surface of a sphere."""
@@ -61,9 +62,9 @@ def _centroid(points: list[tuple[float, float, float]]) -> tuple[float, float, f
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-UNIVERSE_RADIUS = 1200.0     # radius of the top-level sphere
+UNIVERSE_RADIUS = 1200.0  # radius of the top-level sphere
 CLUSTER_RADIUS_BASE = 120.0  # base radius of each community cluster sphere
-ORPHAN_RADIUS = 600.0        # fallback sphere radius for unclustered nodes
+ORPHAN_RADIUS = 600.0  # fallback sphere radius for unclustered nodes
 
 # Solar-system layout constants
 #
@@ -73,16 +74,17 @@ ORPHAN_RADIUS = 600.0        # fallback sphere radius for unclustered nodes
 #   L2 orbit     = 150 units (L2 planet around L1 star)  → 3× node
 #   L1 orbit     = 500 units (L1 star around L0 galaxy)  → 3.3× L2+node radius
 #
-SOLAR_UNIVERSE_RADIUS = 1800.0   # L0 galaxies placed on this sphere
-SOLAR_L0_RING_BASE    = 500.0    # L1 orbit radius (per sqrt of child count)
-SOLAR_L0_RING_MAX     = 1200.0
-SOLAR_L1_RING_BASE    = 150.0    # L2 orbit radius around L1 star
-SOLAR_L1_RING_MAX     = 400.0
-SOLAR_L2_NODE_BASE    = 18.0     # node orbit radius (per sqrt of member count)
-SOLAR_L2_NODE_MAX     = 55.0
+SOLAR_UNIVERSE_RADIUS = 1800.0  # L0 galaxies placed on this sphere
+SOLAR_L0_RING_BASE = 500.0  # L1 orbit radius (per sqrt of child count)
+SOLAR_L0_RING_MAX = 1200.0
+SOLAR_L1_RING_BASE = 150.0  # L2 orbit radius around L1 star
+SOLAR_L1_RING_MAX = 400.0
+SOLAR_L2_NODE_BASE = 18.0  # node orbit radius (per sqrt of member count)
+SOLAR_L2_NODE_MAX = 55.0
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
+
 
 def compute_positions(
     communities: list[dict],
@@ -106,7 +108,8 @@ def compute_positions(
 
     # ── 1. Level-2 cluster centres on the universe sphere ────────────────────
     level2 = [
-        c for c in communities
+        c
+        for c in communities
         if c.get("community_level") == 2 and memberships.get(c["community_id"])
     ]
 
@@ -206,9 +209,9 @@ def compute_solar_positions(
     positions: dict[str, tuple[float, float, float]] = {}
 
     # ── Build community membership lists and parent-vote tallies ─────────────
-    l2_members: dict[str, list[str]] = {}          # l2_cid → [node_id, ...]
-    l2_l1_votes: dict[str, dict[str, int]] = {}    # l2_cid → {l1_cid: vote_count}
-    l1_l0_votes: dict[str, dict[str, int]] = {}    # l1_cid → {l0_cid: vote_count}
+    l2_members: dict[str, list[str]] = {}  # l2_cid → [node_id, ...]
+    l2_l1_votes: dict[str, dict[str, int]] = {}  # l2_cid → {l1_cid: vote_count}
+    l1_l0_votes: dict[str, dict[str, int]] = {}  # l1_cid → {l0_cid: vote_count}
 
     for node_id, level_map in node_level_map.items():
         l2 = level_map.get(2)
@@ -225,12 +228,10 @@ def compute_solar_positions(
 
     # Resolve parent by majority vote
     l2_parent: dict[str, str] = {
-        cid: max(votes, key=votes.__getitem__)
-        for cid, votes in l2_l1_votes.items()
+        cid: max(votes, key=votes.__getitem__) for cid, votes in l2_l1_votes.items()
     }
     l1_parent: dict[str, str] = {
-        cid: max(votes, key=votes.__getitem__)
-        for cid, votes in l1_l0_votes.items()
+        cid: max(votes, key=votes.__getitem__) for cid, votes in l1_l0_votes.items()
     }
 
     # Build children sets (needed for sizing the orbit spheres)
@@ -362,7 +363,10 @@ def compute_solar_positions(
             for l1_cid, members in l1_orphan_groups.items():
                 cx, cy, cz = l1_positions[l1_cid]
                 n = len(members)
-                node_r = min(SOLAR_L1_RING_BASE * 0.7 * math.sqrt(max(n, 1)), SOLAR_L1_RING_MAX * 0.5)
+                node_r = min(
+                    SOLAR_L1_RING_BASE * 0.7 * math.sqrt(max(n, 1)),
+                    SOLAR_L1_RING_MAX * 0.5,
+                )
                 pts = _fibonacci_sphere(n, node_r)
                 for i, node_id in enumerate(sorted(members)):
                     jx, jy, jz = _deterministic_jitter(node_id, 2.0)
@@ -373,20 +377,36 @@ def compute_solar_positions(
             for l0_cid, members in l0_orphan_groups.items():
                 cx, cy, cz = l0_positions[l0_cid]
                 n = len(members)
-                node_r = min(SOLAR_L0_RING_BASE * 0.4 * math.sqrt(max(n, 1)), SOLAR_L0_RING_MAX * 0.3)
+                node_r = min(
+                    SOLAR_L0_RING_BASE * 0.4 * math.sqrt(max(n, 1)),
+                    SOLAR_L0_RING_MAX * 0.3,
+                )
                 pts = _fibonacci_sphere(n, node_r)
                 for i, node_id in enumerate(sorted(members)):
                     jx, jy, jz = _deterministic_jitter(node_id, 2.0)
                     px, py, pz = pts[i]
                     positions[node_id] = (cx + px + jx, cy + py + jy, cz + pz + jz)
 
-            # Truly orphan — scatter across the universe mixed in with the galaxies
+            # Truly orphan — scatter as asteroids throughout the universe volume.
+            # We use a hash-derived spherical coordinate where r is spread across
+            # the full universe depth (not a surface), so they appear as background
+            # asteroids between star systems rather than a solid central sphere.
             if truly_orphan:
-                orphan_pts = _fibonacci_sphere(len(truly_orphan), SOLAR_UNIVERSE_RADIUS * 0.6)
-                for j, node_id in enumerate(truly_orphan):
-                    ox, oy, oz = orphan_pts[j]
-                    jx, jy, jz = _deterministic_jitter(node_id, 3.0)
-                    positions[node_id] = (ox + jx, oy + jy, oz + jz)
+                _MAX_R = SOLAR_UNIVERSE_RADIUS * 1.4
+                _MIN_R = 80.0
+                for node_id in truly_orphan:
+                    h = int(hashlib.md5(node_id.encode()).hexdigest(), 16)
+                    # Uniform point on unit sphere (rejection-free method)
+                    cos_theta = ((h & 0xFFFF) / 65535.0) * 2.0 - 1.0
+                    phi = ((h >> 16) & 0xFFFF) / 65535.0 * 2.0 * math.pi
+                    sin_theta = math.sqrt(max(0.0, 1.0 - cos_theta * cos_theta))
+                    nx = sin_theta * math.cos(phi)
+                    ny = cos_theta
+                    nz = sin_theta * math.sin(phi)
+                    # r uniformly distributed across volume (cube-root gives uniform 3D density)
+                    r_frac = ((h >> 32) & 0xFFFFFF) / float(0xFFFFFF)
+                    r = _MIN_R + (r_frac ** (1.0 / 3.0)) * (_MAX_R - _MIN_R)
+                    positions[node_id] = (nx * r, ny * r, nz * r)
 
     return positions
 
@@ -463,7 +483,7 @@ def compute_spring_layout_3d(
                 dy = pos[u][1] - pos[v][1]
                 dz = pos[u][2] - pos[v][2]
                 d = math.sqrt(dx * dx + dy * dy + dz * dz) or 0.01
-                f = (k * k) / d       # repulsion magnitude
+                f = (k * k) / d  # repulsion magnitude
                 nx_, ny_, nz_ = dx / d, dy / d, dz / d
                 disp[u][0] += nx_ * f
                 disp[u][1] += ny_ * f
@@ -478,7 +498,7 @@ def compute_spring_layout_3d(
             dy = pos[src][1] - pos[tgt][1]
             dz = pos[src][2] - pos[tgt][2]
             d = math.sqrt(dx * dx + dy * dy + dz * dz) or 0.01
-            f = (d * d) / k           # attraction magnitude
+            f = (d * d) / k  # attraction magnitude
             nx_, ny_, nz_ = dx / d, dy / d, dz / d
             disp[src][0] -= nx_ * f
             disp[src][1] -= ny_ * f

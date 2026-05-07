@@ -499,7 +499,7 @@ Switching extraction backends (Ollama → LM Studio/MLX) affects only the **23% 
 |---|---|---|
 | Entities per note | 4.88 avg | ✅ Good for HotPotQA density |
 | Concepts per note | 2.25 avg | ✅ Reasonable abstraction level |
-| Relationship extraction | 0.66 avg | ⚠️ Low — mostly structural linking |
+| Relationship extraction | 0.66 avg | Low — mostly structural linking |
 | Domain accuracy | Near-100% Neutral sentiment | ✅ Correct for encyclopedia |
 | Alias yield | 65 IS_SAME_AS from 9,122 lookups | ✅ Low but appropriate for clean dataset |
 | Task extraction | 0.13/note | ✅ Expected (not a task-management corpus) |

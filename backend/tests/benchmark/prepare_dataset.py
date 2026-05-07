@@ -68,7 +68,9 @@ def _save_progress(progress: dict) -> None:
         json.dump(progress, f, indent=2)
 
 
-async def _create_and_ingest(client: httpx.AsyncClient, content: str, title: str) -> str | None:
+async def _create_and_ingest(
+    client: httpx.AsyncClient, content: str, title: str
+) -> str | None:
     """Create a note and trigger ingestion. Returns the note_id or None on failure."""
     try:
         r = await client.post(
@@ -89,7 +91,7 @@ async def _create_and_ingest(client: httpx.AsyncClient, content: str, title: str
         )
         r.raise_for_status()
     except Exception as exc:
-        print(f"     ⚠️  Ingest trigger failed for '{title}' ({note_id}): {exc}")
+        print(f"      Ingest trigger failed for '{title}' ({note_id}): {exc}")
         # Note was created; still return the id so we don't retry create.
 
     return note_id
@@ -124,23 +126,23 @@ async def _wait_for_completion(
         try:
             processed, failed = await _poll_status(client, note_id)
         except Exception as exc:
-            print(f"   ⚠️  Status poll error for {note_id[:8]}…: {exc}", flush=True)
+            print(f"    Status poll error for {note_id}…: {exc}", flush=True)
             await asyncio.sleep(poll_interval)
             continue
 
         if processed:
             elapsed = int(time.time() - t_start)
-            print(f"   ✅ [{elapsed}s] {note_id[:8]}… done", flush=True)
+            print(f"   ✅ [{elapsed}s] {note_id}… done", flush=True)
             return True
         if failed:
             elapsed = int(time.time() - t_start)
-            print(f"   ❌ [{elapsed}s] {note_id[:8]}… FAILED", flush=True)
+            print(f"   ❌ [{elapsed}s] {note_id}… FAILED", flush=True)
             return False
 
         now = time.time()
         if now - last_report >= 30:
             elapsed = int(now - t_start)
-            print(f"   ⏳ [{elapsed}s] {note_id[:8]}… still processing…", flush=True)
+            print(f"   ⏳ [{elapsed}s] {note_id}… still processing…", flush=True)
             last_report = now
 
         await asyncio.sleep(poll_interval)
@@ -154,6 +156,7 @@ async def _resolve_pending(
     Check the current status of multiple notes concurrently (used on --resume).
     Returns dict[note_id -> True (completed) | False (failed) | None (still processing)].
     """
+
     async def check_one(nid: str) -> tuple[str, bool | None]:
         try:
             processed, failed = await _poll_status(client, nid)
@@ -167,7 +170,6 @@ async def _resolve_pending(
 
     results = await asyncio.gather(*[check_one(nid) for nid in note_ids])
     return dict(results)
-
 
 
 async def retry_failed(dataset: str) -> None:
@@ -195,12 +197,12 @@ async def retry_failed(dataset: str) -> None:
     for fname in to_retry:
         note_path = notes_dir / fname
         if not note_path.exists():
-            print(f"   ⚠️  File not found, skipping: {fname}")
+            print(f"    File not found, skipping: {fname}")
             dataset_progress[fname] = "missing"
             continue
         content = _clean_content(note_path.read_text(encoding="utf-8"))
         if not content:
-            print(f"   ⚠️  Empty content, skipping: {fname}")
+            print(f"    Empty content, skipping: {fname}")
             dataset_progress[fname] = "empty"
             continue
         title = fname.replace(".md", "").replace("_", " ")
@@ -220,7 +222,7 @@ async def retry_failed(dataset: str) -> None:
 
     async with httpx.AsyncClient() as client:
         for i, (fname, content, title) in enumerate(items, 1):
-            print(f"   [{i}/{len(items)}] {title[:60]}…", flush=True)
+            print(f"   [{i}/{len(items)}] {title}…", flush=True)
             note_id = await _create_and_ingest(client, content, title)
             if not note_id:
                 dataset_progress[fname] = "failed"
@@ -310,12 +312,14 @@ async def prepare(
 
     # On resume, resolve any "pending:xxx" notes left by an interrupted run.
     pending_entries = {
-        fname: val[len("pending:"):]
+        fname: val[len("pending:") :]
         for fname, val in dataset_progress.items()
         if val.startswith("pending:")
     }
     if pending_entries and resume:
-        print(f"   Checking {len(pending_entries)} in-progress notes from previous run…")
+        print(
+            f"   Checking {len(pending_entries)} in-progress notes from previous run…"
+        )
         async with httpx.AsyncClient() as client:
             statuses = await _resolve_pending(client, list(pending_entries.values()))
         for fname, note_id in pending_entries.items():
@@ -329,13 +333,19 @@ async def prepare(
             else:
                 # Still processing or unknown — treat as failed so it gets re-queued.
                 dataset_progress[fname] = "failed"
-                print(f"   ⚠️  Unresolved (re-queued): {fname}")
+                print(f"    Unresolved (re-queued): {fname}")
         progress[dataset] = dataset_progress
         _save_progress(progress)
 
-    to_ingest = [f for f in all_note_files if not _is_confirmed(dataset_progress.get(f, ""))]
+    to_ingest = [
+        f for f in all_note_files if not _is_confirmed(dataset_progress.get(f, ""))
+    ]
     # Also skip permanent non-retryable states
-    to_ingest = [f for f in to_ingest if dataset_progress.get(f) not in ("missing", "empty", "dry-run")]
+    to_ingest = [
+        f
+        for f in to_ingest
+        if dataset_progress.get(f) not in ("missing", "empty", "dry-run")
+    ]
     already_done = len(all_note_files) - len(to_ingest)
 
     print(f"\n📚 Dataset: {manifest['dataset']}")
@@ -362,19 +372,19 @@ async def prepare(
     for fname in to_ingest:
         note_path = notes_dir / fname
         if not note_path.exists():
-            print(f"   ⚠️  File not found, skipping: {fname}")
+            print(f"    File not found, skipping: {fname}")
             dataset_progress[fname] = "missing"
             continue
         content = _clean_content(note_path.read_text(encoding="utf-8"))
         if not content:
-            print(f"   ⚠️  Empty after cleaning, skipping: {fname}")
+            print(f"    Empty after cleaning, skipping: {fname}")
             dataset_progress[fname] = "empty"
             continue
         title = fname.replace(".md", "").replace("_", " ")
         items.append((fname, content, title))
 
     if not items:
-        print("⚠️  Nothing to send.")
+        print(" Nothing to send.")
         return
 
     # Capture log position BEFORE any requests so we don't miss completions.
@@ -386,7 +396,7 @@ async def prepare(
 
     async with httpx.AsyncClient() as client:
         for i, (fname, content, title) in enumerate(items, 1):
-            print(f"   [{i}/{len(items)}] {title[:60]}…", flush=True)
+            print(f"   [{i}/{len(items)}] {title}…", flush=True)
             note_id = await _create_and_ingest(client, content, title)
             if not note_id:
                 dataset_progress[fname] = "failed"
@@ -442,10 +452,20 @@ def main() -> None:
         choices=["hotpotqa", "musique"],
         required=True,
     )
-    parser.add_argument("--limit", type=int, default=None, help="Ingest at most N notes")
-    parser.add_argument("--resume", action="store_true", help="Skip already-ingested notes")
-    parser.add_argument("--retry-failed", action="store_true", help="Retry all failed/timeout notes sequentially")
-    parser.add_argument("--dry-run", action="store_true", help="Preview without sending")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Ingest at most N notes"
+    )
+    parser.add_argument(
+        "--resume", action="store_true", help="Skip already-ingested notes"
+    )
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry all failed/timeout notes sequentially",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview without sending"
+    )
     parser.add_argument("--delay", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--base-url", type=str, default=API_BASE)
 

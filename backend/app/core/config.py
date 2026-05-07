@@ -1,32 +1,36 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+REPO_ROOT = BACKEND_DIR.parent
+DEFAULT_KUZU_DB_PATH = str(REPO_ROOT / "data" / "kuzu" / "kuzu_graph")
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=str(BACKEND_DIR / ".env"), env_file_encoding="utf-8", extra="ignore"
     )
 
     PROJECT_NAME: str = "LiveOS Brain"
     API_V1_STR: str = "/api/v1"
 
-    # Neo4j
-    NEO4J_URI: str = "bolt://127.0.0.1:7687"
-    NEO4J_USER: str = "neo4j"
-    NEO4J_PASSWORD: str = "password"
+    # ── Kuzu (embedded graph database) ──────────────────────────────────────
+    KUZU_DB_PATH: str = DEFAULT_KUZU_DB_PATH
 
     # ── LLM Provider ──────────────────────────────────────────────────────────
-    # "ollama", "lm_studio", "openai", "gemini", "anthropic"
+    # "ollama", "lm_studio", "openai", "gemini", "anthropic", "huggingface"
     LLM_PROVIDER: str = "ollama"
     LLM_FALLBACK_PROVIDER: str | None = None  # Optional fallback if primary fails
 
     # Local / OpenAI-compatible LLM (Ollama, LM Studio, or any v1 endpoint)
     # These are used when LLM_PROVIDER is "ollama" or "lm_studio".
     LLM_BASE_URL: str = (
-        "http://192.168.10.182:11434"  # LM Studio default: http://127.0.0.1:1234
+        "http://127.0.0.1:11434"  # LM Studio default: http://127.0.0.1:1234
     )
     LLM_API_KEY: str = "ollama"  # LM Studio default: "lm-studio"
     LLM_MODEL: str = "gemma3:4b"  # LM Studio example: "google/gemma-3-4b"
-    LLM_KEEP_ALIVE: str = "-1"  # Keep model loaded indefinitely
+    LLM_KEEP_ALIVE: str = "20m"  # Keep model loaded for 20 minutes after last request
     # Response format for local JSON extraction ("text", "json_object", "auto").
     # LM Studio no longer accepts "json_object" (returns 400) — use "text".
     LLM_RESPONSE_FORMAT: str = "text"
@@ -44,10 +48,12 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSIONS: int = 1024
 
     # ── Retrieval / Pipeline Controls ────────────────────────────────────────
-    VECTOR_SIMILARITY_THRESHOLD: float = 0.5
+    VECTOR_SIMILARITY_THRESHOLD: float = 0.50
     COMMUNITY_RECOMPUTE_BATCH_SIZE: int = 100
-    RERANKER_ENABLED: bool = False
+    RERANKER_ENABLED: bool = True
+    RERANKER_TOP_K: int = 10  # Candidates passed to LLM after reranking
     MAX_POTENTIAL_QUESTIONS: int = 10
+    MAX_LOOP_ITERATIONS: int = 10
     FALLBACK_MODE: str = "none"  # "none" | "web" | "self"
     TAVILY_API_KEY: str | None = None
 
@@ -56,22 +62,22 @@ class Settings(BaseSettings):
     QDRANT_PORT: int = 6333
     QDRANT_API_KEY: str | None = None
     QDRANT_COLLECTION_NODE_CORES: str = "node_cores"
-    QDRANT_COLLECTION_NODE_FACTS: str = "node_facts"
-    QDRANT_COLLECTION_NODE_QUESTIONS: str = "node_questions"
     QDRANT_COLLECTION_NODE_RELATIONSHIPS: str = "node_relationships"
     QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS: str = "node_isolated_contexts"
 
-    # ── Elasticsearch ────────────────────────────────────────────────────────
-    ELASTICSEARCH_HOST: str = "127.0.0.1"
-    ELASTICSEARCH_PORT: int = 9200
-    ELASTICSEARCH_INDEX_NAME: str = "liveos_nodes"
+    # ── Typesense ─────────────────────────────────────────────────────────────
+    TYPESENSE_HOST: str = "127.0.0.1"
+    TYPESENSE_PORT: int = 8108
+    TYPESENSE_API_KEY: str = "liveos-dev-key"
+    TYPESENSE_COLLECTION_NAME: str = "liveos_nodes"
 
     # ── Vision / Audio Models ─────────────────────────────────────────────────
     MODEL_FLORENCE_HF: str = "microsoft/Florence-2-large"
     MODEL_FLORENCE_LOCAL: str = "florence-2-large"
     MODEL_WHISPER_HF: str = "openai/whisper-large-v3-turbo"
     MODEL_WHISPER_LOCAL: str = "whisper-large-v3-turbo"
-    MODEL_RERANKER_LOCAL: str = "jina-reranker-v2-base-multilingual"
+    # MODEL_RERANKER_LOCAL: str = "jina-reranker-v2-base-multilingual"
+    MODEL_RERANKER_LOCAL: str = "qwen3-reranker-0.6b"
 
     # Model storage path (relative to backend root)
     MODELS_PATH: str = "models"
@@ -89,6 +95,10 @@ class Settings(BaseSettings):
     # Anthropic Claude
     ANTHROPIC_API_KEY: str | None = None
     ANTHROPIC_MODEL: str | None = None  # e.g. "claude-3-5-sonnet-20241022"
+
+    # HuggingFace Inference API
+    HUGGINGFACE_API_KEY: str | None = None
+    HUGGINGFACE_MODEL: str | None = None  # e.g. "meta-llama/Llama-3.3-70B-Instruct"
 
     # ── Storage (R2 / MinIO) ──────────────────────────────────────────────────
     BUCKET_NAME: str = "liveos-assets"
@@ -112,6 +122,13 @@ class Settings(BaseSettings):
 
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_LEVEL: str = "DEBUG"  # "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+
+    # ── Ingestion Concurrency ─────────────────────────────────────────────────
+    # Maximum concurrent LLM calls inside the ingestion agent.
+    # Semaphore(1) was the original Gemini rate-limit guard; for local providers
+    # (Ollama / LM Studio / OpenAI) a higher value enables real parallelism.
+    # Change via .env: INGESTION_AGENT_CONCURRENCY=4
+    INGESTION_AGENT_CONCURRENCY: int = 2  # override to >1 for non-Gemini providers
 
     # ── Benchmark Mode ────────────────────────────────────────────────────────
     # When True, uses factual/objective prompts instead of personal narrative.

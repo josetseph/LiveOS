@@ -3,15 +3,14 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { Home, MessageSquare, FileText, Network, Box } from "lucide-react";
+import { Home, MessageSquare, FileText, Box } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navigation = [
   { name: "Home", href: "/", icon: Home },
   { name: "Chat", href: "/chat", icon: MessageSquare },
   { name: "Notes", href: "/notes", icon: FileText },
-  { name: "Graph 2D", href: "/graph", icon: Network },
-  { name: "Graph 3D", href: "/graph-3d", icon: Box },
+  { name: "Graph", href: "/graph-3d", icon: Box },
 ];
 
 export function Sidebar() {
@@ -22,7 +21,13 @@ export function Sidebar() {
       <div className="flex h-full flex-col items-center py-8">
         {/* Logo */}
         <div className="mb-8 flex h-12 w-12 items-center justify-center rounded-xl overflow-hidden">
-          <Image src="/logo-black-background.png" alt="LiveOS" width={48} height={48} className="h-full w-full object-cover" />
+          <Image
+            src="/logo-black-background.png"
+            alt="LiveOS"
+            width={48}
+            height={48}
+            className="h-full w-full object-cover"
+          />
         </div>
 
         {/* Navigation */}
@@ -39,7 +44,7 @@ export function Sidebar() {
                   "group relative flex h-12 w-12 items-center justify-center rounded-xl transition-all duration-200",
                   isActive
                     ? "bg-white/10 text-white shadow-lg shadow-purple-500/20"
-                    : "text-white/50 hover:bg-white/5 hover:text-white"
+                    : "text-white/50 hover:bg-white/5 hover:text-white",
                 )}
                 title={item.name}
               >

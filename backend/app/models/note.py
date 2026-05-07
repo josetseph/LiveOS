@@ -1,7 +1,8 @@
-from sqlalchemy import Column, String, DateTime, Text, Boolean
-from app.core.database import Base
-from datetime import datetime, timezone
 import uuid
+from datetime import datetime, timezone
+
+from app.core.database import Base
+from sqlalchemy import Boolean, Column, DateTime, String, Text
 
 
 class Note(Base):
@@ -19,5 +20,4 @@ class Note(Base):
     )
     processed = Column(Boolean, default=False)
     failed = Column(Boolean, default=False)
-    domain = Column(String, default="Personal")
     # Could add user_id later

@@ -1,13 +1,12 @@
 import asyncio
+import os
+import sys
 from logging.config import fileConfig
 
+from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
-
-from alembic import context
-import os
-import sys
 
 # Ensure app is importable
 sys.path.append(os.getcwd())
@@ -26,8 +25,8 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 from app.core.database import Base  # noqa: E402
-from app.models.note import Note  # noqa: E402,F401
 from app.models.feedback import Feedback  # noqa: E402,F401
+from app.models.note import Note  # noqa: E402,F401
 
 target_metadata = Base.metadata
 

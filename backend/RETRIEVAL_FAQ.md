@@ -3,59 +3,52 @@
 ## Q1: How do community summaries and neighborhood summaries work?
 
 ### What They Are
-In your system, **"neighborhood summaries"** refer to the **summary field on graph nodes** (Concepts, Entities, Tasks, Personas, References). There are no separate "community summaries" - the node summaries serve this purpose.
+In current ingestion, node updates are isolated-context-first. The update path accumulates source contexts for each node and keeps relationship structure current.
 
 ### How They Work
 
 #### 1. **Initial Creation**
 When a note is first ingested:
-- Extracted entities (Concepts, Entities, Tasks, etc.) are stored as nodes in Neo4j
-- Each node gets an initial `summary` field that describes it
+- Extraction returns nodes with `name`, `type`, and `isolated_context`
+- Extraction also returns relationships, which are written to the graph and relationship index
+- Node `description` is not part of the extraction payload
 
 #### 2. **Incremental Updates** (`_update_neighborhoods`)
 When a new note mentions existing entities:
-- The `_update_neighborhoods()` method in [ingestion.py](ingestion.py#L480) updates summaries
+- The `_update_neighborhoods()` path updates per-node isolated context storage for affected entities
 - For each mentioned entity, it:
-  1. **Fetches existing summary** from Neo4j
-  2. **Extracts context** - Gets text around the entity mention (±1 sentence window)
-  3. **Calls LLM** - `llm_service.update_summary()` merges old summary + new context
-  4. **Generates embedding** - Creates vector embedding from `title: summary`
-  5. **Saves update** - Stores new summary, title, and embedding back to Neo4j
+    1. **Fetches existing persisted content** for the entity
+    2. **Extracts isolated context** for the new mention
+    3. **Appends new isolated contexts** and embeds only those new contexts
+    4. **Indexes context + relationship text** for retrieval
+
+No description generation is performed in this update phase.
 
 #### 3. **Usage in Retrieval**
-When searching ([retrieval.py](retrieval.py#L251)):
+When searching, retrieval can still use relationship evidence plus stored isolated contexts for node-level grounding.
+
+Conceptually, updated node payload is closer to:
 ```python
-text = f"[{node_label}: {node_name}]: {node.summary}"
+text = f"contexts: {' '.join(isolated_contexts)} | relationships: {relationship_nl}"
 ```
-The summary is formatted as a text snippet and added to candidates for reranking.
 
 ### Example Flow
 ```
 Note: "I'm working on Votex365 USSD integration"
 ↓
-1. Find existing Concept node "Votex365" (has summary from past notes)
+1. Find existing node "Votex365"
 2. Extract context: "working on Votex365 USSD integration"
-3. LLM updates summary:
-   OLD: "A business platform for students"
-   NEW: "A business platform for students. Recent work focuses on USSD integration."
-4. Generate embedding for updated summary
-5. Save to graph
+3. Append this isolated context for that node
+4. Embed and persist the appended context
+5. Keep relationship extraction/storage active for graph and relationship search
 ```
 
 ### How to Test Them
-Currently, neighborhood summaries are tested implicitly through:
-1. **Ingestion tests** - Verify nodes are created with summaries
-2. **Retrieval tests** - Check that graph nodes appear in results with `type: "graph_consensus"`
+This now has direct unit coverage in addition to broader ingestion/retrieval checks:
+1. **Ingestion tests** verify isolated contexts are appended and embedded on updates
+2. **Retrieval tests** verify isolated contexts and relationship text surface as grounded evidence
 
-**To explicitly test summaries**:
-```python
-# Query a node's summary directly
-result = graph_service.execute_query(
-    "MATCH (n:Concept {name: $name}) RETURN n.summary, n.title",
-    {"name": "Votex365"}
-)
-print(result[0]['summary'])
-```
+To inspect it manually, check persisted entries in `node_isolated_contexts` and verify relationships still exist in graph + `node_relationships`.
 
 ---
 
@@ -138,9 +131,9 @@ filtered = [r for r in results if r.score >= cutoff_score][:25]
 ```python
 # Keep top 70th percentile
 if len(results) > 10:
-    scores = [r['final_score'] for r in results]
+    scores = [r["final_score"] for r in results]
     p70 = np.percentile(scores, 70)
-    filtered = [r for r in results if r['final_score'] >= p70][:25]
+    filtered = [r for r in results if r["final_score"] >= p70][:25]
 else:
     filtered = results[:10]
 ```
@@ -156,7 +149,7 @@ elif query_entities:
 else:
     cutoff = 6.0  # Default for general queries
 
-filtered = [r for r in results if r['final_score'] >= cutoff][:25]
+filtered = [r for r in results if r["final_score"] >= cutoff][:25]
 ```
 **Pros**: 
 - Optimized for each query type
@@ -181,16 +174,21 @@ Looking at your results:
 Add to [retrieval.py](retrieval.py):
 
 ```python
-def _get_cutoff_score(self, query: str, is_temporal_query: bool, 
-                      query_entities: List[str], results: List[dict]) -> float:
+def _get_cutoff_score(
+    self,
+    query: str,
+    is_temporal_query: bool,
+    query_entities: List[str],
+    results: List[dict],
+) -> float:
     """
     Determine dynamic cutoff score based on query type and result distribution.
     """
     if not results:
         return 0.6  # Minimum threshold
-    
-    top_score = results[0].get('final_score', 0)
-    
+
+    top_score = results[0].get("final_score", 0)
+
     # Tiered cutoffs
     if query_entities:
         # Entity queries: High precision
@@ -201,20 +199,20 @@ def _get_cutoff_score(self, query: str, is_temporal_query: bool,
     else:
         # General queries: Balanced
         base_cutoff = 6.0
-    
+
     # Adaptive: If top score is low, lower the bar
     if top_score < base_cutoff:
         return max(0.6, top_score * 0.6)  # 60% of top score, min 0.6
-    
+
     return base_cutoff
 
 
 # Usage in hybrid_search():
-all_results.sort(key=lambda x: x.get('final_score', 0), reverse=True)
+all_results.sort(key=lambda x: x.get("final_score", 0), reverse=True)
 
 # Apply dynamic cutoff
 cutoff = self._get_cutoff_score(query, is_temporal_query, query_entities, all_results)
-filtered_results = [r for r in all_results if r.get('final_score', 0) >= cutoff]
+filtered_results = [r for r in all_results if r.get("final_score", 0) >= cutoff]
 
 # Then apply diversity constraint
 final_list = self._apply_diversity_constraint(filtered_results, max_per_note=3)
@@ -244,12 +242,92 @@ Based on typical LLM context windows:
 
 2. **Add score-based limit** (2 minutes):
    ```python
-   final_list = [r for r in final_list if r['final_score'] >= cutoff][:25]
+   final_list = [r for r in final_list if r["final_score"] >= cutoff][:25]
    ```
 
 3. **Log cutoff decisions** (1 minute):
    ```python
-   logger.info(f"Applied cutoff {cutoff:.2f}: {len(all_results)} → {len(filtered_results)} results")
+   logger.info(
+       f"Applied cutoff {cutoff:.2f}: {len(all_results)} → {len(filtered_results)} results"
+   )
    ```
 
 This will prevent feeding low-quality results (score < 5-7) to your LLM while maintaining good recall for different query types.
+
+---
+
+## Q4: Why did duplicate same-name nodes with empty content appear, and what was fixed?
+
+### Root Cause
+Duplicate same-name nodes with empty content were caused by an **ingestion identity mismatch** between Kuzu and Qdrant during summary updates:
+
+- A node could already exist structurally in Kuzu.
+- If Qdrant lookup missed that name in the summary stage, ingestion minted a new `node_id`.
+- That produced another node with the same name, often with sparse or empty content initially.
+
+### Fix Applied
+Two changes were made to prevent this:
+
+1. **Summary-stage ID reuse on Qdrant miss**:
+    - If Qdrant misses, ingestion now checks Kuzu for an exact same-name `indexable` node.
+    - When found, it reuses that existing Kuzu `node_id` instead of creating a new one.
+
+2. **Paginated batch name lookup in Qdrant**:
+    - `find_node_ids_by_names` now scrolls through pages (instead of relying on a single limited result set).
+    - This avoids unresolved names when many same-name/duplicate candidates exist.
+
+### Safe Cleanup Guidance
+Do **not** bulk-delete all empty nodes.
+
+- Many empty nodes may still carry graph edges and deleting them blindly can break traversal paths.
+- Only empty nodes with **no incoming and no outgoing edges** are safe to delete directly.
+- For empty nodes with edges, rewire/merge relationships first, then delete.
+
+---
+
+## Q5: What retrieval fixes were shipped in the latest remediation pass?
+
+Two remediation passes were shipped in April 2026.
+
+**Pass 1 — Stability fixes (three changes):**
+
+1. **`select_relevant_docs_with_reasoning()` compatibility update**
+    - The method now accepts `original_query`.
+    - This lets sub-question filtering preserve full original question context, improving relevance decisions during multi-hop loops.
+
+2. **Entity-first retrieval with guarded vector fallback**
+    - Retrieval attempts entity-first evidence first.
+    - Vector/full-text fallback is only used when entity matches do not provide usable text evidence.
+    - This avoids unnecessary vector noise while still recovering when entity-only evidence is insufficient.
+
+3. **One-hop graph expansion evaluation stability**
+    - The one-hop graph expansion + LLM selection/evaluation stage is no longer failing in the latest benchmark run.
+
+**Pass 2 — Pipeline hardening:**
+
+1. **`hybrid_search` is entity-first** — entity lookup runs before any vector scan. Vector/full-text search is a fallback only, not the primary path.
+
+2. **Pre-batch relationship cache (`_rel_cache`)** — relationships are fetched once per `hybrid_search` call (not per candidate), reducing graph round-trips and improving performance.
+
+3. **Dead code removed from `retrieval.py`** — `_build_query_variants`, `_generate_rewritten_query`, and `_generate_step_back_query` were never called from any active code path and have been deleted.
+
+4. **`query_decomposition.py` deleted** — this file was a legacy unused workflow and has been removed entirely. It is not part of the active chat pipeline.
+
+5. **`retrieve_with_self_correction` is a compatibility stub** — it no longer triggers a self-correction loop; it delegates directly to the standard retrieval path.
+
+6. **`_verify_candidates` removed from `chat.py`** — was dead code; `_extract_references` now uses only `linked_notes`.
+
+7. **LLM contract fixes in `llm.py`**:
+    - Yes/no normalization now matches a broader range of surface forms.
+    - Multi-line `FULL_ANSWER` sections are parsed correctly.
+    - A redundant LLM call in synthesis was eliminated via the `query_attr` parameter.
+
+8. **Test suite expanded**: `backend/tests/unit/test_llm_contracts.py` now has 52 passing cases.
+
+Latest benchmark artifact (Pass 1 smoke run):
+- `backend/tests/benchmark/results/hotpotqa_n5_20260428_145930.json`
+
+Top outcomes from that run (`n=5`):
+- `error_count=0`
+- `answer_exact_match=0.4`, `answer_f1=0.4`, `answer_fuzzy_match=0.4`
+- `retrieval_precision=0.3848`, `retrieval_recall=0.7`, `retrieval_f1=0.4966`

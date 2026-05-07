@@ -4,13 +4,15 @@
 
 LiveOS Brain is a multimodal, graph-based personal memory system. It ingests notes, audio, images, and PDFs, understands their semantic meaning, and creates a living ontology (knowledge graph) of your life.
 
+Note (2026-04-29): notes no longer use or store a domain classification field.
+
 > **Project History**: For a detailed log of the architectural evolution and model choices, see [Development Process](./development_process.md).
 
 ## System Architecture
 
 The system operates on a **Polyglot Persistence** model ("Mind & Body") with **adaptive knowledge management** across multiple domains: Personal Journal, Academic/Professional PKM, and Creative Writing.
 
-**Why Multi-Purpose?** A single system that handles personal reflections ("I'm anxious about my thesis"), academic learning ("Markov Chains have the memoryless property"), and creative expression ("The moon is a ghost") with domain-aware intelligence. The system automatically detects the note's purpose and adapts retrieval and synthesis accordingly.
+**Why Multi-Purpose?** A single system that handles personal reflections ("I'm anxious about my thesis"), academic learning ("Markov Chains have the memoryless property"), and creative expression ("The moon is a ghost") with adaptive retrieval and synthesis.
 
 ### Multi-Mode Operation
 
@@ -63,7 +65,7 @@ graph TD
     subgraph Retrieval Pipeline [GraphRAG]
         User -->|Query| QueryClassifier{Detect Domain}
         QueryClassifier -->|Academic/Personal/Pro| Search[Hybrid Search + Domain Boost]
-        Search -->|1. Vector Scan| Neo4j
+        Search -->|1. Entity Search| Neo4j
         Search -.->|2. Fetch Content| Postgres
         Search -->|3. Graph Expansion| Neo4j
         Search -->|4. Symbolic Ranking| Ranker[Priority Scoring - Primary 100, Secondary 50]
@@ -172,9 +174,23 @@ If you want to wipe all data (Notes, Graph, Vectors, Files) and start fresh:
 2.  **Run the Reset Script**:
     ```bash
     cd backend
-    python scripts/reset_db_and_verify.py
+    python scripts/reset_all.py
     ```
-    *This script will wipe the Neo4j Graph, Postgres Tables, and MinIO Bucket.*
+    *This script wipes PostgreSQL, Kuzu, Qdrant, Typesense, and MinIO data.*
+
+### How to Reset Only the Kuzu Graph
+If you only need to reset the graph database state:
+
+```bash
+cd backend
+python scripts/reset_kuzu.py
+```
+
+`reset_kuzu.py` now removes both:
+- the configured `KUZU_DB_PATH` location, and
+- the legacy `data/kuzu_graph` location,
+
+and also deletes each sibling `.wal` file. This prevents stale graph remigration from leftover legacy files on the next startup.
 
 ### How to Manage Models
 The system uses Ollama models for LLM inference. To update models:
@@ -184,6 +200,13 @@ ollama pull gemma3:4b
 ollama pull qwen3-embedding:0.6b
 ollama pull MedAIBase/PaddleOCR-VL:0.9b
 ```
+
+### Empty Node Cleanup Safety
+Avoid deleting all empty nodes in bulk.
+
+*   Empty nodes can still participate in graph edges; deleting them blindly can break traversal paths.
+*   Direct deletion is only safe for empty nodes with no incoming and no outgoing edges.
+*   For edge-bearing empties, merge/rewire relationships first, then delete.
 
 ---
 
@@ -200,21 +223,23 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 
 2.  **Cognition (Extraction)**:
     *   **Model**: `gemma3:4b` - Lightweight model optimized for structured JSON extraction.
-    *   **Schema**: Strict JSON extraction for `Entities`, `Concepts`, `Tasks`, `Persona`, `Domain`, `References`.
-    *   **Domain Classification**: Automatically categorizes notes as Academic/Personal/Professional/Creative/Dreams based on primary subject matter.
+    *   **Schema**: Strict JSON extraction for nodes and relationships. Node payload is now `name`, `type`, and `isolated_context` (no extracted `description` field).
     *   **Reference Extraction**: Captures citations (papers, books, quotes) with full attribution for academic notes.
-    *   **Isolated Context Detection**: Identifies facts that are only true within the note's context (e.g., "today" references).
+    *   **Single-Pass Extraction**: Knowledge extraction runs as one LLM call per note; there is no active refinement or second-pass reasoning step in the ingestion graph.
     *   **Schema Normalization**: Handles LLM inconsistencies (capitalized keys, string importance values, status variations) via Pydantic validators.
-    *   **Entity Deduplication**: Normalizes names (strips `#` prefix, applies `.title()` case) to prevent duplicate nodes.
+    *   **Entity Deduplication**: Normalizes names (strips `#` prefix) to prevent duplicate nodes; garbage-name recovery uses a lightweight LLM batch rename for nameless nodes that have valid context.
     *   **JSON Repair Pipeline**: A robust regex layer fixes common LLM syntax errors (comments, smart quotes, control characters, markdown fences).
     *   **Entity-Level Locking**: Prevents race conditions when multiple notes update the same entity concurrently.
 
 3.  **Embedding & Graph Storage**:
     *   **Embedding**: `qwen3-embedding:0.6b` generates 1024-dim vectors - optimized for speed on consumer hardware.
     *   **Graph**: Neo4j stores the ontology with relationships (`MENTIONS`, `CONTRIBUTES_TO`, `PRODUCES_TASK`, `REVEALED_BY`).
+    *   **Update Phase Contract**: Node update writes are isolated-context-only. The update path appends new isolated contexts and embeddings and does not generate node description/facts/questions.
+    *   **Relationships**: Inter-node relationships are still extracted from each note and written to graph and relationship search storage.
     *   **Bi-Temporal Relationships**: Each relationship tracks `valid_from` (event time), `ingested_at` (system time), `valid_to`, and `is_active`.
-    *   **Community Assignment**: Nodes are automatically assigned to domain-based Community clusters (Professional, Academic, Personal, Creative, Dreams).
+    *   **Community Assignment**: Nodes are automatically assigned to Community clusters.
     *   **Soft Invalidation**: Contradicted relationships are marked `is_active=false` with `valid_to` timestamp instead of deletion.
+    *   **Identity Reconciliation (Apr 2026)**: If summary-stage Qdrant lookup misses, ingestion reuses an existing same-name Kuzu `node_id` when present, and Qdrant batch name resolution is paginated to avoid missed mappings under large result sets.
     *   **Neighborhood Summaries**: Parallel updates with async locking ensure data integrity.
 
 ---
@@ -222,6 +247,31 @@ When you create a note or upload a file, it enters the **Ingestion Agent** (`app
 ## 2. The Retrieval System ("The Voice")
 
 LiveOS uses an **empirically optimized GraphRAG retrieval system** that was systematically tested and refined (Feb 9-10, 2026). After testing 6 refinements, the system achieved **45% exact match, 75% fuzzy match, 32.8s avg latency** on HotpotQA multi-hop questions with 0% error rate.
+
+### Recent Retrieval Remediation (Apr 2026)
+
+The retrieval stack was updated in two passes to improve multi-hop stability, sub-question precision, and internal correctness:
+
+**Pass 1 — Stability fixes:**
+*   **Sub-question compatibility fix**: `select_relevant_docs_with_reasoning()` now accepts `original_query`, so doc selection can evaluate each sub-question with full original-question context.
+*   **Entity-first retrieval with guarded fallback**: retrieval stays entity-first, and vector/keyword fallback is used when entity matches do not provide usable text evidence.
+*   **One-hop graph expansion stability**: one-hop graph expansion + LLM evaluation no longer fails in the latest benchmark run.
+
+**Pass 2 — Pipeline hardening:**
+*   **`hybrid_search` confirmed entity-first**: entity lookup runs before any vector scan; vector/full-text search is a fallback only.
+*   **Pre-batch relationship cache (`_rel_cache`)**: relationships are fetched once per `hybrid_search` call instead of per-candidate, reducing graph round-trips.
+*   **Dead code removed**: `_build_query_variants`, `_generate_rewritten_query`, and `_generate_step_back_query` in `retrieval.py` were never called from any active path and have been deleted. `query_decomposition.py` (legacy unused workflow) has been deleted. `_verify_candidates` in `chat.py` has been removed.
+*   **`retrieve_with_self_correction` is now a compatibility stub** — the self-correction loop it previously triggered is no longer active.
+*   **LLM yes/no normalization broadened**: `llm.py` now handles a wider range of affirmative/negative surface forms and correctly parses multi-line `FULL_ANSWER` sections. A redundant LLM call in synthesis was eliminated via the `query_attr` parameter.
+*   **Test coverage expanded**: `backend/tests/unit/test_llm_contracts.py` now has 52 passing cases (up from 40).
+
+**Latest benchmark artifact:** `backend/tests/benchmark/results/hotpotqa_n5_20260428_145930.json`
+
+**Current top outcomes (n=5):**
+*   0 errors (`error_count=0`, `valid_tests=5`)
+*   40% exact match, 40% answer F1, 40% fuzzy match
+*   Retrieval: precision 0.385, recall 0.700, F1 0.497
+*   Average response time: ~116.9s
 
 ### Empirically Validated Design
 
@@ -271,7 +321,7 @@ LiveOS uses an **empirically optimized GraphRAG retrieval system** that was syst
     *   Strict grounding: Every claim traces to context
     *   No formulaic headers or invented information
 
-**Performance:** 45% exact match, 62% F1 score, 75% fuzzy match on multi-hop questions (HotpotQA benchmark, 100 questions, Feb 2026). Note: F1 score is the standard QA benchmark metric using token-level overlap.
+**Performance:** Historical full-run benchmark (Feb 2026, 100-question HotpotQA) reached 45% exact match, 62% F1 score, and 75% fuzzy match. Latest remediation smoke run (Apr 2026, n=5) is recorded in `backend/tests/benchmark/results/hotpotqa_n5_20260428_145930.json` with 0 runtime errors and 40% exact/fuzzy match. Note: F1 score is the standard QA benchmark metric using token-level overlap.
 
 ---
 
@@ -346,7 +396,7 @@ While DeepSeek-OCR is faster on single pages (0.01s vs 0.48s), the difference be
 *   **Symbolic Ranking**: Pure priority-based scoring (primary=100, secondary=50) for instant, grounded retrieval
 *   **Extraction Robustness**: Schema normalization, type coercion, and JSON repair handle LLM inconsistencies
 *   **Entity Deduplication**: Automatic name normalization prevents duplicate nodes (`#project` = `project`)
-*   **Unified Isolated Context**: All extracted types (Entity, Concept, Task, Persona, Reference) use consistent `isolated_context` field
+*   **Verbatim Node Persistence**: `isolated_context`, persisted `description`, and persisted `facts` are grounded in the source text. Persisted description/fact text must come from a single isolated context, not a stitched multi-context span, and legacy facts that fail that check are removed on rewrite.
 *   **Markdown Support**: Note previews render markdown in chat
 *   **Real-time System Info**: Header displays all active services and databases
 *   **Dual Graph Visualization**: 2D Force Graph and 3D WebGL graph with Community clusters
@@ -625,6 +675,19 @@ LiveOS implements **Microsoft GraphRAG-style Community Summaries** for broad, ex
 1. **Ingestion**: Each extracted entity/concept is assigned to a Community based on detected domain
 2. **Aggregation**: Communities track member nodes and generate high-level summaries
 3. **Retrieval**: Broad queries (e.g., "summarize my work life") fetch Community summaries first
+
+**Recompute Orchestration:**
+- Community recompute is automatically scheduled after ingestion goes idle (5-minute debounce after all active ingestions finish).
+- If a new ingestion starts while recompute is running, the recompute is cancelled immediately so ingestion throughput takes priority.
+- Recompute uses single-flight superseding semantics: only the newest requested run is allowed to proceed; older requests/runs are superseded.
+- Manual runs (admin endpoint or script) follow the same cancellation/superseding rules.
+
+**Manual Recompute (when needed):**
+```bash
+# From backend/ with venv active
+python scripts/run_community_detection.py
+```
+Run this only when ingestion is idle. If ingestion starts during the run, the recompute exits early and should be re-run after ingestion settles.
 
 **Query Example:**
 ```

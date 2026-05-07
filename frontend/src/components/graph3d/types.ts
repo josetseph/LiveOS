@@ -15,6 +15,7 @@ export interface KnowledgeNode {
   name: string;
   node_type: string;
   description: string;
+  isolated_contexts?: string[];
   facts?: string[];
   domain?: string;
   status?: string;

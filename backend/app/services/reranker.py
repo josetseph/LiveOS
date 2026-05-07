@@ -1,24 +1,43 @@
-import os
 import asyncio
-import torch
+import os
 from typing import Optional
 
+import torch
 from app.core.config import settings
 from app.core.log import get_logger
 
 logger = get_logger("RerankerService")
 
+# Qwen3-Reranker prompt format (generative reranker: scores via yes/no logits)
+_SYSTEM_PROMPT = (
+    "Judge whether the Document meets the requirements based on the Query and the "
+    'Instruct provided. Note that the answer can only be "yes" or "no".'
+)
+_INSTRUCTION = "Given a question, retrieve relevant passages that answer the question"
+
+_PROMPT_TEMPLATE = (
+    "<|im_start|>system\n{system}\n<|im_end|>\n"
+    "<|im_start|>user\n"
+    "<Instruct>: {instruction}\n"
+    "<Query>: {query}\n\n"
+    "<Document>: {document}\n"
+    "<|im_end|>\n"
+    "<|im_start|>assistant\n<think>\n\n</think>\n"
+)
+
 
 class RerankerService:
     def __init__(self):
         self._model = None
+        self._tokenizer = None
+        self._yes_token_id: int | None = None
+        self._no_token_id: int | None = None
         self._load_lock: asyncio.Lock | None = None
         self.models_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), f"../../{settings.MODELS_PATH}")
         )
 
     def _get_lock(self) -> asyncio.Lock:
-        # Lazy-init so the lock is created in the running event loop.
         if self._load_lock is None:
             self._load_lock = asyncio.Lock()
         return self._load_lock
@@ -37,20 +56,32 @@ class RerankerService:
                 return False
 
             try:
-                from transformers import AutoModel
+                from transformers import AutoModelForCausalLM, AutoTokenizer
 
                 def _load():
-                    model = AutoModel.from_pretrained(
+                    tokenizer = AutoTokenizer.from_pretrained(model_path)
+                    model = AutoModelForCausalLM.from_pretrained(
                         model_path,
-                        trust_remote_code=True,
-                        torch_dtype="auto",
+                        dtype=(
+                            torch.float16
+                            if torch.cuda.is_available()
+                            else torch.float32
+                        ),
                     )
                     model.eval()
-                    return model
+                    # Resolve yes/no token IDs once at load time
+                    yes_id = tokenizer.encode("yes", add_special_tokens=False)[-1]
+                    no_id = tokenizer.encode("no", add_special_tokens=False)[-1]
+                    return tokenizer, model, yes_id, no_id
 
                 loop = asyncio.get_event_loop()
-                self._model = await loop.run_in_executor(None, _load)
-                logger.info(f"[Reranker] Loaded {settings.MODEL_RERANKER_LOCAL} from {model_path}")
+                self._tokenizer, self._model, self._yes_token_id, self._no_token_id = (
+                    await loop.run_in_executor(None, _load)
+                )
+                logger.info(
+                    f"[Reranker] Loaded {settings.MODEL_RERANKER_LOCAL} from {model_path} "
+                    f"(yes={self._yes_token_id}, no={self._no_token_id})"
+                )
                 return True
             except Exception as exc:
                 logger.error(f"[Reranker] Failed to load model: {exc}")
@@ -63,8 +94,9 @@ class RerankerService:
         top_n: Optional[int] = None,
     ) -> list[dict]:
         """
-        Score and rank documents against a query using the local jina-reranker-v3.
+        Score and rank documents against a query using the local qwen3-reranker.
 
+        Uses generative yes/no logit scoring (qwen3-reranker-0.6b style).
         Returns list of ``{index, text, relevance_score}`` sorted by score descending.
         Falls back to an empty list if the model is unavailable or inference fails.
         """
@@ -75,28 +107,47 @@ class RerankerService:
         if not loaded or self._model is None:
             return []
 
+        tokenizer = self._tokenizer
         model = self._model
+        yes_id = self._yes_token_id
+        no_id = self._no_token_id
 
         def _run() -> list[dict]:
+            results = []
             with torch.no_grad():
-                return model.rerank(query, documents, top_n=top_n)
+                for idx, doc in enumerate(documents):
+                    prompt = _PROMPT_TEMPLATE.format(
+                        system=_SYSTEM_PROMPT,
+                        instruction=_INSTRUCTION,
+                        query=query,
+                        document=doc[:1500],  # cap to avoid OOM on long docs
+                    )
+                    inputs = tokenizer(
+                        prompt,
+                        return_tensors="pt",
+                        truncation=True,
+                        max_length=2048,
+                    )
+                    outputs = model(**inputs)
+                    # Score is probability of "yes" at the next token position
+                    last_logits = outputs.logits[0, -1, :]  # (vocab_size,)
+                    yes_no_logits = torch.stack(
+                        [last_logits[yes_id], last_logits[no_id]]
+                    )
+                    probs = torch.softmax(yes_no_logits, dim=0)
+                    score = float(probs[0])  # P(yes)
+                    results.append(
+                        {"index": idx, "text": doc, "relevance_score": score}
+                    )
+
+            results.sort(key=lambda r: r["relevance_score"], reverse=True)
+            if top_n is not None:
+                results = results[:top_n]
+            return results
 
         try:
             loop = asyncio.get_event_loop()
-            raw = await loop.run_in_executor(None, _run)
-            results = []
-            for r in raw:
-                doc = r["document"]
-                # v2 wraps text in {"text": ...}; v3 returns a plain string
-                text = doc["text"] if isinstance(doc, dict) else doc
-                results.append(
-                    {
-                        "index": r["index"],
-                        "text": text,
-                        "relevance_score": float(r["relevance_score"]),
-                    }
-                )
-            return results
+            return await loop.run_in_executor(None, _run)
         except Exception as exc:
             logger.error(f"[Reranker] Inference failed: {exc}")
             return []

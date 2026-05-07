@@ -4,6 +4,21 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 
 ---
 
+## 📅 Phase 22: Ingestion Contract Simplification (Apr 2026)
+**Goal**: Reduce update-time drift and keep update writes deterministic.
+
+*   **Extraction Contract Tightening**:
+    *   Extraction node payload now carries only `name`, `type`, and `isolated_context` for nodes.
+    *   Node `description` is no longer part of extraction payloads.
+*   **Update-Phase Scope Reduction**:
+    *   Node update writes are now **isolated-context-only**.
+    *   Update path appends/embeds new isolated contexts and does **not** generate description/facts/questions.
+    *   The `node_facts` and `node_questions` Qdrant collections are no longer part of the system — both were deleted as part of the Final Implementation cleanup.
+*   **Relationship Continuity**:
+    *   Relationship extraction and storage remain active; relationship edges are still written to graph/search stores.
+
+---
+
 ## 📅 Phase 1: The Genesis (Local-First Ambition)
 **Goal**: Create a "Second Brain" that runs locally on consumer hardware (Mac), capable of ingesting and understanding notes.
 
@@ -228,6 +243,8 @@ This document tracks the journey of building the **LiveOS Brain**, detailing the
 
 ## 📅 Phase 16: The "PKM Upgrade" (Dual-Purpose Knowledge Management)
 **Goal**: Transform LiveOS from pure personal journal into dual-purpose system supporting Academic/Professional PKM alongside personal journaling.
+
+> Update (2026-04-29): Note-level domain classification was later removed. Notes are no longer classified into or stored with a domain field.
 
 *   **Domain Categorization**:
     *   **Schema Extension**: Added `domain` field (Academic/Personal/Professional) and `references: List[ExternalReference]` to Extraction model.

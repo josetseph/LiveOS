@@ -4,14 +4,15 @@ reset_minio.py — Delete all objects from the MinIO storage bucket.
 Removes every stored file (attachments, audio, images, PDFs) without
 deleting the bucket itself.
 """
-import sys
-import os
+
 import asyncio
+import os
+import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.utils.bucket_storage import s3_client
 from app.core.config import settings
+from app.utils.bucket_storage import s3_client
 
 
 async def _reset_minio() -> None:

@@ -45,15 +45,13 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless — no display required
 import matplotlib.pyplot as plt
-import numpy as np
 import networkx as nx
+import numpy as np
+from app.services.graph import graph_service
 from matplotlib.patches import Patch
 
-from app.services.graph import graph_service
-
-
 # ═════════════════════════════════════════════════════════════════════════════
-# CONFIG — edit these to adapt the script to a different dataset / Neo4j schema
+# CONFIG — edit these to adapt the script to a different dataset / Kuzu schema
 # ═════════════════════════════════════════════════════════════════════════════
 
 # Node labels to include.  None = include everything.
@@ -94,23 +92,22 @@ HUB_SUBGRAPH_N = 30
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def load_graph_from_neo4j() -> tuple:
+def load_graph_from_kuzu() -> tuple:
     """
-    Pull all nodes and active relationships from Neo4j.
+    Pull all nodes and active relationships from Kuzu.
     Returns (DiGraph, meta_dict).
     meta_dict contains the raw row lists for any downstream use.
     """
     print("  Loading nodes …")
     node_rows = graph_service.execute_query(
         """
-        MATCH (n)
-        WHERE NOT labels(n)[0] IN $exclude
+        MATCH (n:Node)
+        WHERE n.kind NOT IN $exclude AND n.id IS NOT NULL
         RETURN
-            elementId(n)   AS nid,
-            labels(n)[0]   AS label,
-            COALESCE(n.name, n.title, n.trait, elementId(n)) AS display_name,
-            n.type         AS entity_type,
-            n.summary      AS summary
+            n.id     AS nid,
+            n.kind   AS label,
+            COALESCE(n.name, n.id) AS display_name,
+            n.type   AS entity_type
         """,
         {"exclude": list(EXCLUDE_LABELS)},
     )
@@ -118,17 +115,17 @@ def load_graph_from_neo4j() -> tuple:
     print("  Loading relationships …")
     rel_rows = graph_service.execute_query(
         """
-        MATCH (a)-[r]->(b)
-        WHERE NOT labels(a)[0] IN $exclude
-          AND NOT labels(b)[0] IN $exclude
+        MATCH (a:Node)-[r:SEMANTIC_REL]->(b:Node)
+        WHERE a.kind NOT IN $exclude
+          AND b.kind NOT IN $exclude
+          AND (r.is_active = true OR r.is_active IS NULL)
         RETURN
-            elementId(a)                    AS src,
-            elementId(b)                    AS tgt,
-            type(r)                         AS rel_type,
+            a.id                            AS src,
+            b.id                            AS tgt,
+            r.rel_type                      AS rel_type,
             COALESCE(r.confidence, 1.0)     AS confidence,
-            r.context                       AS context,
-            labels(a)[0]                    AS src_label,
-            labels(b)[0]                    AS tgt_label
+            a.kind                          AS src_label,
+            b.kind                          AS tgt_label
         """,
         {"exclude": list(EXCLUDE_LABELS)},
     )
@@ -144,7 +141,7 @@ def load_graph_from_neo4j() -> tuple:
             label=label,
             name=row["display_name"] or "",
             entity_type=row["entity_type"] or "",
-            summary=row["summary"] or "",
+            summary="",
         )
 
     for row in rel_rows:
@@ -156,7 +153,7 @@ def load_graph_from_neo4j() -> tuple:
             tgt,
             rel_type=row["rel_type"],
             confidence=float(row["confidence"] or 1.0),
-            context=row["context"] or "",
+            context="",
             src_label=row["src_label"] or "",
             tgt_label=row["tgt_label"] or "",
         )
@@ -228,7 +225,7 @@ def compute_degree_stats(G: nx.DiGraph) -> dict:
     in_degrees = [d for _, d in G.in_degree()]
     out_degrees = [d for _, d in G.out_degree()]
 
-    top_hubs = sorted(UG.degree(), key=lambda x: x[1], reverse=True)[:20]
+    top_hubs = sorted(UG.degree(), key=lambda x: x[1], reverse=True)
     hub_details = [
         {
             "name": G.nodes[n].get("name", str(n)),
@@ -979,8 +976,8 @@ def main():
     t_start = time.perf_counter()
 
     # ── 1. Load ───────────────────────────────────────────────────────────────
-    print("[1/7] Loading graph from Neo4j …")
-    G, meta = load_graph_from_neo4j()
+    print("[1/7] Loading graph from Kuzu …")
+    G, meta = load_graph_from_kuzu()
     print(
         f"  → {G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges "
         f"({time.perf_counter()-t_start:.1f}s)"

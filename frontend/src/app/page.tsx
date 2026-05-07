@@ -3,7 +3,16 @@
 import { motion } from "framer-motion";
 import Link from "next/link";
 import Image from "next/image";
-import { MessageSquare, FileText, Network, Brain, Database, Cpu } from "lucide-react";
+import {
+  MessageSquare,
+  FileText,
+  Network,
+  Brain,
+  Database,
+  Cpu,
+  Search,
+  Layers,
+} from "lucide-react";
 import { ShaderBackground } from "@/components/shader-background";
 
 export default function Home() {
@@ -27,7 +36,13 @@ export default function Home() {
             transition={{ duration: 0.5 }}
             className="mb-8 inline-flex h-24 w-24 items-center justify-center rounded-2xl bg-linear-to-br from-purple-500 to-pink-500 shadow-2xl shadow-purple-500/50 overflow-hidden"
           >
-            <Image src="/logo.png" alt="LiveOS" width={96} height={96} className="h-24 w-24 object-contain" />
+            <Image
+              src="/logo.png"
+              alt="LiveOS"
+              width={96}
+              height={96}
+              className="h-24 w-24 object-contain"
+            />
           </motion.div>
 
           {/* Title */}
@@ -63,7 +78,9 @@ export default function Home() {
             >
               <MessageSquare className="mb-4 h-8 w-8 text-purple-400 transition-transform group-hover:scale-110" />
               <h3 className="mb-2 text-lg font-semibold text-white">Chat</h3>
-              <p className="text-sm text-white/60">Talk to your brain and get insights</p>
+              <p className="text-sm text-white/60">
+                Talk to your brain and get insights
+              </p>
             </Link>
 
             <Link
@@ -72,16 +89,20 @@ export default function Home() {
             >
               <FileText className="mb-4 h-8 w-8 text-pink-400 transition-transform group-hover:scale-110" />
               <h3 className="mb-2 text-lg font-semibold text-white">Notes</h3>
-              <p className="text-sm text-white/60">Capture your thoughts and ideas</p>
+              <p className="text-sm text-white/60">
+                Capture your thoughts and ideas
+              </p>
             </Link>
 
             <Link
-              href="/graph"
+              href="/graph-3d"
               className="group rounded-2xl border border-white/10 bg-white/5 p-6 backdrop-blur-xl transition-all hover:border-purple-500/50 hover:bg-white/10"
             >
               <Network className="mb-4 h-8 w-8 text-purple-400 transition-transform group-hover:scale-110" />
               <h3 className="mb-2 text-lg font-semibold text-white">Graph</h3>
-              <p className="text-sm text-white/60">Visualize your knowledge network</p>
+              <p className="text-sm text-white/60">
+                Visualize your knowledge network
+              </p>
             </Link>
           </motion.div>
 
@@ -95,7 +116,7 @@ export default function Home() {
             <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 backdrop-blur-xl">
               <Brain className="h-4 w-4 text-purple-400" />
               <span className="text-sm text-white/80">
-                Models: Gemma3, Whisper V3, Florence 2, Qwen3, Paddle OCR
+                Models: Gemma3, Whisper V3, Florence 2, Qwen3 (Embedding and Reranker)
               </span>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-2">
@@ -105,7 +126,15 @@ export default function Home() {
               </div>
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
                 <Network className="h-3 w-3 text-blue-400" />
-                <span className="text-xs text-white/70">Neo4j</span>
+                <span className="text-xs text-white/70">Kuzu</span>
+              </div>
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
+                <Layers className="h-3 w-3 text-cyan-400" />
+                <span className="text-xs text-white/70">Qdrant</span>
+              </div>
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
+                <Search className="h-3 w-3 text-yellow-400" />
+                <span className="text-xs text-white/70">Typesense</span>
               </div>
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
                 <Cpu className="h-3 w-3 text-orange-400" />

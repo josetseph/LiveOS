@@ -40,7 +40,7 @@ def send_note(content: str, created_at: str = None):
         print(f"   Status: {result['status']}")
         print(f"   Created: {result['created_at']}")
         print(f"\n📝 Content preview:")
-        print(f"   {content[:100]}{'...' if len(content) > 100 else ''}")
+        print(f"   {content}{'...' if len(content) > 100 else ''}")
 
     except requests.exceptions.ConnectionError:
         print(f"❌ Error: Could not connect to {API_URL}")

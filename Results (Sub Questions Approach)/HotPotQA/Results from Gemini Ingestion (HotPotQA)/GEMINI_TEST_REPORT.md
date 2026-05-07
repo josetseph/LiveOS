@@ -581,7 +581,7 @@ Pass Rate:                   28.3%
 - **Appropriate Recall:** 71% retrieval recall supports multi-hop requirements
 - **Efficient LLM Usage:** 7.23 calls per question is reasonable for complex reasoning
 
-⚠️ **Areas for Improvement:**
+**Areas for Improvement:**
 - **Response Time:** 50.5s average is slow for production (target: <30s)
 - **Ranking Bottleneck:** Consumes 43% of processing time
 - **Exact Match Gap:** 62% exact vs 75% fuzzy suggests formatting improvements needed

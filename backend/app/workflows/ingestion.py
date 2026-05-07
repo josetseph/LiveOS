@@ -1,16 +1,18 @@
 import asyncio
+import re
+import threading
+import time
 import uuid
 from collections import defaultdict
-from datetime import datetime
 
 from app.core.config import settings
 from app.core.log import get_logger
 from app.schemas.extraction import Extraction, NoteInput
-from app.services.elasticsearch_service import elasticsearch_service
 from app.services.graph import graph_service
 from app.services.ingestion_tracker import ingestion_tracker
 from app.services.llm import llm_service
 from app.services.qdrant_service import qdrant_service
+from app.services.typesense_service import typesense_service
 from app.workflows.agents.ingestion_agent import ingestion_agent
 
 # Hard cap on concurrent ingestion pipelines.
@@ -21,6 +23,49 @@ _PROCESS_CONCURRENCY = 20
 _process_semaphore = asyncio.Semaphore(_PROCESS_CONCURRENCY)
 
 logger = get_logger("IngestionPipeline")
+
+# Single-flight guard for full community recompute.
+# Any newer recompute request supersedes older requests/runs.
+_community_run_state_lock = threading.Lock()
+_community_run_seq = 0
+_community_run_active_seq = 0
+_community_run_running = False
+
+
+def clean_rel_type(rel_type: str, source_name: str, target_name: str) -> str:
+    """Remove entity name tokens from a relationship predicate.
+
+    LLMs frequently embed the object (or subject) name into the predicate,
+    e.g. "plays_corliss_archer" instead of just "plays".  This function
+    strips any token that appears verbatim (case-insensitive) in either
+    entity name, then collapses consecutive underscores left by the removal.
+
+    Examples:
+        clean_rel_type("plays_corliss_archer", "shirley temple", "corliss archer")
+        → "plays"
+        clean_rel_type("is_directed_by", "film", "director")
+        → "is_directed_by"   (no entity tokens present)
+    """
+    if not rel_type:
+        return rel_type
+
+    # Tokenise entity names into individual words (ignore single-char tokens)
+    entity_tokens: set[str] = set()
+    for name in (source_name, target_name):
+        for token in re.split(r"[\s_\-]+", name.lower()):
+            if len(token) > 1:
+                entity_tokens.add(token)
+
+    if not entity_tokens:
+        return rel_type
+
+    # Tokenise the predicate, drop entity tokens, rejoin
+    parts = re.split(r"_", rel_type.lower())
+    cleaned = [p for p in parts if p not in entity_tokens]
+    if not cleaned:
+        # Entire predicate was entity names — fall back to "relates_to"
+        return "relates_to"
+    return "_".join(cleaned)
 
 
 class EntityLockManager:
@@ -40,27 +85,6 @@ entity_lock_manager = EntityLockManager()
 
 
 class IngestionWorkflow:
-    async def _update_note_domain_postgres(self, note_id: str, domain: str):
-        """
-        Syncs the extracted domain to Postgres.
-        """
-        from app.core.database import AsyncSessionLocal
-        from app.models.note import Note
-        from sqlalchemy import update
-
-        async with AsyncSessionLocal() as session:
-            try:
-                await session.execute(
-                    update(Note).where(Note.id == note_id).values(domain=domain)
-                )
-                await session.commit()
-                logger.info(
-                    f"[Ingestion] Updated Postgres Domain for Note {note_id}: '{domain}'"
-                )
-            except Exception as e:
-                logger.error(f"Error updating Postgres domain: {e}")
-                raise e
-
     async def process_note(self, note_input: NoteInput, note_id: str = None):
         if not note_id:
             note_id = str(uuid.uuid4())
@@ -111,9 +135,9 @@ class IngestionWorkflow:
                         f"{len(getattr(extraction, 'nodes', []))} nodes, "
                         f"{len(getattr(extraction, 'relationships', []))} relationships"
                     )
-                    for n in getattr(extraction, 'nodes', []):
+                    for n in getattr(extraction, "nodes", []):
                         logger.debug(f"  [Extraction] node: '{n.name}' type='{n.type}'")
-                    for r in getattr(extraction, 'relationships', []):
+                    for r in getattr(extraction, "relationships", []):
                         logger.debug(
                             f"  [Extraction] rel: '{r.source_name}' --[{r.relationship_type}]--> '{r.target_name}' "
                             f"(strength={r.strength}, confidence={r.confidence}, relevance={r.relevance})"
@@ -137,7 +161,7 @@ class IngestionWorkflow:
                     "processed_content": final_state["content"],
                 }
 
-            except Exception as exc:
+            except Exception:
                 await self._mark_note_failed(note_id)
                 raise
 
@@ -157,9 +181,10 @@ class IngestionWorkflow:
         Updates the Note content in Postgres (The Body).
         Called by Agent when new text (transcription/OCR) is found.
         """
+        from sqlalchemy import update
+
         from app.core.database import AsyncSessionLocal
         from app.models.note import Note
-        from sqlalchemy import update
 
         async with AsyncSessionLocal() as session:
             try:
@@ -179,9 +204,10 @@ class IngestionWorkflow:
         """
         Updates the Note title in Postgres.
         """
+        from sqlalchemy import update
+
         from app.core.database import AsyncSessionLocal
         from app.models.note import Note
-        from sqlalchemy import update
 
         async with AsyncSessionLocal() as session:
             try:
@@ -203,9 +229,10 @@ class IngestionWorkflow:
         """
         Sets processed = True in Postgres to prevent re-runs.
         """
+        from sqlalchemy import update
+
         from app.core.database import AsyncSessionLocal
         from app.models.note import Note
-        from sqlalchemy import update
 
         async with AsyncSessionLocal() as session:
             try:
@@ -226,9 +253,10 @@ class IngestionWorkflow:
         Sets failed = True in Postgres so callers can distinguish a permanent
         failure from a note that is still being processed.
         """
+        from sqlalchemy import update
+
         from app.core.database import AsyncSessionLocal
         from app.models.note import Note
-        from sqlalchemy import update
 
         async with AsyncSessionLocal() as session:
             try:
@@ -250,20 +278,19 @@ class IngestionWorkflow:
         custom_title: str = None,
     ):
         logger.info(f"[Ontology] Writing ontology for note {note_id}")
-        # 0. Generate or use provided Title & Summary
+        # 0. Resolve title: user-provided > extracted by LLM during extraction > separate LLM call
         if custom_title:
             title = custom_title
             logger.info(f"[Ontology] Using provided title: '{title}'")
+        elif extraction.title:
+            title = extraction.title
+            logger.info(f"[Ontology] Using extracted title: '{title}'")
         else:
             title = llm_service.generate_title(content)
             logger.info(f"[Ontology] Generated title: '{title}'")
-        summary = llm_service.summarize(content)
-        logger.debug(f"[Ontology] Summary ({len(summary or '')} chars): {(summary or '')[:120]}...")
-
-        # Base Note Node — bare structural node in Neo4j with :Note label.
-        # All content (title, summary, domain) lives in Qdrant node_cores.
+        # Base Note Node — structural node in Kuzu with kind='note'.
         query_note = """
-        MERGE (n:Note:Indexable {id: $id})
+        MERGE (n:Node {id: $id}) ON CREATE SET n.kind = 'note'
         """
         graph_service.execute_query(
             query_note,
@@ -280,46 +307,97 @@ class IngestionWorkflow:
         if extraction.nodes:
             from app.services.embedding import embedding_service
 
-            node_embeddings = {}
+            # Build deduplicated (norm_name, text) pairs first, then embed in one shot.
+            _embed_keys: list[str] = []
+            _embed_texts: list[str] = []
+            _seen_embed: set[str] = set()
             for n in extraction.nodes:
                 norm_name = normalize_name(n.name)
-                if not norm_name:
+                if not norm_name or norm_name in _seen_embed:
                     continue
-                text_to_embed = f"{norm_name} ({n.type}): {(n.isolated_context or '')[:200]}"
-                node_embeddings[norm_name] = embedding_service.embed_query(text_to_embed)
+                _seen_embed.add(norm_name)
+                _embed_keys.append(norm_name)
+                _embed_texts.append(
+                    f"{norm_name} ({n.type}): {(n.isolated_context or '')}"
+                )
 
-            # Resolve or assign stable IDs: look up Qdrant first so we reuse
-            # existing IDs for known nodes and generate fresh ones for new nodes.
+            # For Qwen3 models embed_query prepends an instruction prefix;
+            # replicate that here so we can use the batched embed_documents path.
+            if embedding_service.is_qwen3 and _embed_texts:
+                _prefixed = [
+                    embedding_service.query_instruction + t for t in _embed_texts
+                ]
+            else:
+                _prefixed = _embed_texts
+
+            _vectors = embedding_service.embed_documents(_prefixed) if _prefixed else []
+            node_embeddings: dict[str, list[float]] = dict(zip(_embed_keys, _vectors))
+
+            # Resolve or assign stable IDs: batch-look up Qdrant for ALL unique names
+            # in a single query, then assign fresh UUIDs to whichever aren't found.
+            # seen_in_batch deduplicates within this extraction — the same entity
+            # name can appear more than once in a single note's extraction result,
+            # and Qdrant won't have it yet for the first occurrence, so without this
+            # both occurrences would mint independent UUIDs.
+            _unique_names: list[str] = list(
+                dict.fromkeys(
+                    normalize_name(n.name)
+                    for n in extraction.nodes
+                    if normalize_name(n.name)
+                )
+            )
+            _batch_id_map: dict[str, str | None] = (
+                qdrant_service.find_node_ids_by_names(_unique_names)
+                if _unique_names
+                else {}
+            )
+
             node_data = []
+            seen_in_batch: dict[str, str] = {}  # norm_name → assigned_id
             for node in extraction.nodes:
                 norm_name = normalize_name(node.name)
                 if not norm_name:
                     continue
-                existing_id = qdrant_service.find_node_id_by_name(norm_name)
+                if norm_name in seen_in_batch:
+                    # Same entity appeared twice in this extraction — reuse the
+                    # first-assigned ID and skip appending a duplicate entry.
+                    logger.debug(
+                        f"  [Ontology] node '{norm_name}' — duplicate within batch, "
+                        f"reusing id={seen_in_batch[norm_name]}"
+                    )
+                    continue
+                existing_id = _batch_id_map.get(norm_name)
                 is_new = existing_id is None
                 assigned_id = existing_id or f"node_{str(uuid.uuid4())}"
-                node_data.append({
-                    "id": assigned_id,
-                    "name": norm_name,
-                    "type": (node.type or "thing").lower().strip(),
-                    "embedding": node_embeddings.get(norm_name),
-                    "is_new": is_new,
-                })
+                seen_in_batch[norm_name] = assigned_id
+                node_type = ((node.type or "").strip().lower()) or "thing"
+                node_data.append(
+                    {
+                        "id": assigned_id,
+                        "name": norm_name,
+                        "type": node_type,
+                        "embedding": node_embeddings.get(norm_name),
+                        "is_new": is_new,
+                    }
+                )
                 logger.info(
-                    f"  [Ontology] node '{norm_name}' type='{(node.type or 'thing').lower()}' "
+                    f"  [Ontology] node '{norm_name}' type='{node_type}' "
                     f"id={assigned_id} ({'NEW' if is_new else 'EXISTING'})"
                 )
 
             # Build name→ID map for relationship creation below
             name_to_id: dict[str, str] = {d["name"]: d["id"] for d in node_data}
-            logger.info(f"[Ontology] {len(node_data)} nodes resolved ({sum(1 for d in node_data if not qdrant_service.find_node_id_by_name(d['name']) is not None)} new) — writing to Neo4j")
+            _new_count = sum(1 for d in node_data if d["is_new"])
+            logger.info(
+                f"[Ontology] {len(node_data)} nodes resolved ({_new_count} new) — writing to Kuzu"
+            )
 
-            # Write bare structural nodes to Neo4j (id only — no content)
+            # Write bare structural nodes to Kuzu (id only — no content)
             query_nodes = """
-            MERGE (note:Indexable {id: $note_id})
+            MERGE (note:Node {id: $note_id}) ON CREATE SET note.kind = 'note'
             WITH note
             UNWIND $data AS item
-            MERGE (n:Indexable {id: item.id})
+            MERGE (n:Node {id: item.id}) ON CREATE SET n.kind = 'indexable'
             MERGE (note)-[r:REFERENCES]->(n)
             SET r.note_id = $note_id,
                 r.is_active = true
@@ -329,25 +407,6 @@ class IngestionWorkflow:
                 graph_service.execute_query(
                     query_nodes,
                     {"data": [{"id": d["id"]} for d in node_data], "note_id": note_id},
-                )
-
-                self._detect_and_create_similarities(
-                    nodes=[
-                        {
-                            "name": d["name"],
-                            "entity_type": d["type"],
-                            "context": next(
-                                (n.isolated_context for n in extraction.nodes
-                                 if normalize_name(n.name) == d["name"]),
-                                "",
-                            ),
-                            "embedding": d["embedding"],
-                            "node_id": d["id"],
-                        }
-                        for d in node_data
-                    ],
-                    note_id=note_id,
-                    node_label="Indexable",
                 )
 
                 # Seed Qdrant node_cores stubs for NEW nodes so that
@@ -361,7 +420,6 @@ class IngestionWorkflow:
                             node_id=d["id"],
                             name=d["name"],
                             node_type=d["type"],
-                            description="",
                             description_vector=d["embedding"],
                         )
                 logger.info(
@@ -377,6 +435,40 @@ class IngestionWorkflow:
 
             # All nodes are :Indexable — no type mapping needed
 
+            # Pre-collect all relationship endpoint names that aren't already in
+            # name_to_id (i.e. they reference nodes from previous ingestion runs)
+            # and batch-resolve them in one Qdrant query instead of one per rel.
+            _rel_missing_names: set[str] = set()
+            for _rel in extraction.relationships:
+                if not _rel.source_name or not _rel.target_name:
+                    continue
+                _sn = _rel.source_name.lower().strip()
+                _tn = _rel.target_name.lower().strip()
+                if _sn and _sn not in name_to_id:
+                    _rel_missing_names.add(_sn)
+                if _tn and _tn not in name_to_id:
+                    _rel_missing_names.add(_tn)
+            _rel_fallback_ids: dict[str, str | None] = (
+                qdrant_service.find_node_ids_by_names(list(_rel_missing_names))
+                if _rel_missing_names
+                else {}
+            )
+            logger.debug(
+                f"[Relationship] Batch-resolved {len(_rel_missing_names)} fallback name(s) "
+                f"({sum(1 for v in _rel_fallback_ids.values() if v)} found)"
+            )
+
+            # Collect all graph results first; batch-embed the new/evolved NL texts afterwards.
+            _qdrant_rel_pending: list[tuple[dict, str, str, str]] = (
+                []
+            )  # (result, nl_text, src_id, tgt_id)
+
+            # Diagnostics counters for end-of-note summary log.
+            _rel_total = len(extraction.relationships)
+            _rel_written = 0
+            _rel_skip_no_name = 0
+            _rel_skip_no_source = 0
+            _rel_skip_no_target = 0
             for rel in extraction.relationships:
                 try:
                     # Validate required fields
@@ -385,6 +477,7 @@ class IngestionWorkflow:
                             f"[Relationship] Skipping - missing source or target name: "
                             f"{rel.source_name} -> {rel.target_name}"
                         )
+                        _rel_skip_no_name += 1
                         continue
 
                     # Default to "relates_to" if no relationship type provided
@@ -398,6 +491,19 @@ class IngestionWorkflow:
                             f"defaulting to 'relates_to'"
                         )
 
+                    # Strip entity name tokens from the predicate.
+                    # LLMs sometimes embed the object into the verb, e.g.
+                    # "plays_corliss_archer" → should be just "plays".
+                    cleaned_rel_type = clean_rel_type(
+                        rel_type, rel.source_name, rel.target_name
+                    )
+                    if cleaned_rel_type != rel_type:
+                        logger.debug(
+                            f"[Relationship] Predicate cleaned: '{rel_type}' → '{cleaned_rel_type}' "
+                            f"({rel.source_name} → {rel.target_name})"
+                        )
+                        rel_type = cleaned_rel_type
+
                     source_label = "Indexable"
                     target_label = "Indexable"
 
@@ -406,15 +512,15 @@ class IngestionWorkflow:
                     target_name_normalized = rel.target_name.lower().strip()
 
                     # Look up IDs from the name_to_id map (built from node_data above)
-                    # falling back to Qdrant for nodes not created in this ingestion pass.
+                    # falling back to the pre-batched Qdrant results for cross-run nodes.
                     src_node_id = (
                         name_to_id.get(source_name_normalized)
-                        or qdrant_service.find_node_id_by_name(source_name_normalized)
+                        or _rel_fallback_ids.get(source_name_normalized)
                         or ""
                     )
                     tgt_node_id = (
                         name_to_id.get(target_name_normalized)
-                        or qdrant_service.find_node_id_by_name(target_name_normalized)
+                        or _rel_fallback_ids.get(target_name_normalized)
                         or ""
                     )
 
@@ -423,19 +529,21 @@ class IngestionWorkflow:
                             f"  [Ontology] Relationship skipped — source '{source_name_normalized}' "
                             f"not found in name_to_id or Qdrant"
                         )
+                        _rel_skip_no_source += 1
                         continue
                     if not tgt_node_id:
                         logger.warning(
                             f"  [Ontology] Relationship skipped — target '{target_name_normalized}' "
                             f"not found in name_to_id or Qdrant"
                         )
+                        _rel_skip_no_target += 1
                         continue
 
                     logger.debug(
                         f"  [Ontology] Creating rel: '{source_name_normalized}' "
                         f"--[{rel_type}]--> '{target_name_normalized}' "
                         f"(strength={rel.strength}, confidence={rel.confidence}, relevance={rel.relevance}) "
-                        f"NL: '{(rel.natural_language or '')[:80]}'"
+                        f"NL: '{(rel.natural_language or '')}'"
                     )
 
                     # Create or update relationship with bi-temporal support
@@ -448,37 +556,36 @@ class IngestionWorkflow:
                         confidence=rel.confidence,
                         strength=rel.strength,
                         relevance=rel.relevance,
-                        natural_language=rel.natural_language or "",
+                        natural_language=(rel.natural_language or "").replace("_", " "),
                         note_id=note_id,
                         source_id=src_node_id,
                         target_id=tgt_node_id,
                     )
 
-                    # Write relationship to Qdrant node_relationships on new/evolved rels.
-                    if result.get("action") in ("created", "evolved") and src_node_id and tgt_node_id:
-                        from app.services.embedding import embedding_service as _emb
-
+                    # Queue new/evolved rels for batch Qdrant embedding below.
+                    if (
+                        result.get("action") in ("created", "evolved")
+                        and src_node_id
+                        and tgt_node_id
+                    ):
                         nl_text = result.get("natural_language") or (
                             f"{source_name_normalized} "
                             f"{rel_type.replace('_', ' ')} "
                             f"{target_name_normalized}"
                         )
-                        nl_vector = _emb.embed_documents([nl_text])[0]
-                        qdrant_service.upsert_node_relationship(
-                            relationship_id=result["relationship_id"],
-                            natural_language=nl_text,
-                            nl_vector=nl_vector,
-                            source_node_id=src_node_id,
-                            target_node_id=tgt_node_id,
-                        )
-                        logger.debug(
-                            f"  [Ontology] Qdrant rel written: '{nl_text[:100]}'"
+                        # Ensure natural language never contains underscores —
+                        # edge type strings use snake_case internally but NL
+                        # should always use spaces.
+                        nl_text = nl_text.replace("_", " ")
+                        _qdrant_rel_pending.append(
+                            (result, nl_text, src_node_id, tgt_node_id)
                         )
 
                     logger.info(
                         f"  [Ontology] Rel {result['action'].upper()}: "
                         f"'{source_name_normalized}' --[{rel_type}]--> '{target_name_normalized}'"
                     )
+                    _rel_written += 1
 
                 except Exception as e:
                     logger.error(
@@ -487,212 +594,43 @@ class IngestionWorkflow:
                     )
                     continue
 
-        return title
+            # Batch-embed all new/evolved relationship NL texts in one round-trip.
+            if _qdrant_rel_pending:
+                from app.services.embedding import embedding_service as _emb
 
-    def _detect_and_create_similarities(
-        self,
-        nodes: list,
-        note_id: str,
-        node_label: str = "Indexable",
-        entity_embeddings: dict = None,
-        min_confidence: float = 0.8,
-        cosine_threshold: float = 0.70,
-    ):
-        """
-        4-gate similarity detection run after nodes are stored.
+                _nl_batch = [item[1] for item in _qdrant_rel_pending]
+                _nl_vectors = _emb.embed_documents(_nl_batch)
+                for (result, nl_text, src_node_id, tgt_node_id), nl_vector in zip(
+                    _qdrant_rel_pending, _nl_vectors
+                ):
+                    qdrant_service.upsert_node_relationship(
+                        relationship_id=result["relationship_id"],
+                        natural_language=nl_text,
+                        nl_vector=nl_vector,
+                        source_node_id=src_node_id,
+                        target_node_id=tgt_node_id,
+                    )
+                    logger.debug(f"  [Ontology] Qdrant rel written: '{nl_text}'")
 
-        Gate 1 — name similarity  : find_similar_entities (name containment / token overlap)
-        Gate 2 — type match       : built into find_similar_entities query
-        Gate 3 — embedding cosine : ≥ 0.60 between new node and candidate embeddings
-        Gate 4 — LLM verification : detect_similarity returns (has_relationship, confidence, rel_type)
-
-        On success writes a typed relationship such as IS_SHORTENED_TITLE or IS_CANONICAL_NAME_VARIANT.
-
-        Args:
-            nodes           : Either extraction entity objects (with .name/.type/.isolated_context)
-                              OR dicts with keys: name, entity_type, context, embedding
-            note_id         : Note being ingested (written to similarity relationship)
-            node_label      : Neo4j label to operate on (Entity, Task, Persona, Concept, Reference)
-            entity_embeddings: Legacy {normalised_name: vector} dict — used when nodes are objects
-            min_confidence  : Gate 4 minimum confidence threshold
-        """
-        import math
-
-        from app.services.llm import llm_service
-
-        def _cosine(a: list[float], b: list[float]) -> float:
-            if not a or not b or len(a) != len(b):
-                return 0.0
-            dot = sum(x * y for x, y in zip(a, b))
-            mag_a = math.sqrt(sum(x * x for x in a))
-            mag_b = math.sqrt(sum(x * x for x in b))
-            if mag_a == 0 or mag_b == 0:
-                return 0.0
-            return dot / (mag_a * mag_b)
-
-        def normalize_name(name: str) -> str:
-            if not name:
-                return ""
-            return name.lstrip("#").strip().lower()
-
-        # Normalize input to dicts regardless of whether objects or dicts were passed
-        def _to_dict(n) -> dict:
-            if isinstance(n, dict):
-                return n
-            # Legacy entity object path
-            raw_name = normalize_name(getattr(n, "name", ""))
-            return {
-                "name": raw_name,
-                "entity_type": getattr(n, "type", ""),
-                "context": getattr(n, "isolated_context", "") or "",
-                "embedding": (entity_embeddings or {}).get(raw_name),
-            }
-
-        # Skip single-word names — too many false positives
-        candidates = [
-            _to_dict(n)
-            for n in nodes
-            if len(
-                normalize_name(
-                    n.get("name", "") if isinstance(n, dict) else getattr(n, "name", "")
-                ).split()
+            # Emit a compact per-note relationship summary for observability.
+            _rel_skip_total = (
+                _rel_skip_no_name + _rel_skip_no_source + _rel_skip_no_target
             )
-            >= 2
-        ]
+            logger.info(
+                f"[Relationship] note_id={note_id} total={_rel_total} "
+                f"written={_rel_written} skipped={_rel_skip_total} "
+                f"(no_name={_rel_skip_no_name} "
+                f"no_source={_rel_skip_no_source} "
+                f"no_target={_rel_skip_no_target})"
+            )
 
-        if not candidates:
-            return
-
-        logger.info(
-            f"[Similarity] Checking {len(candidates)} {node_label} nodes for potential similarities..."
-        )
-
-        for node in candidates:
-            entity_name = normalize_name(node["name"])
-            entity_type = node.get("entity_type", "")
-            entity_vec = node.get("embedding")
-            entity_context = node.get("context", "")
-
-            try:
-                potential_aliases = graph_service.find_similar_entities(
-                    entity_name=entity_name,
-                    entity_type=entity_type,
-                    limit=10,
-                    node_label=node_label,
-                )
-
-                if not potential_aliases:
-                    continue
-
-                existing_aliases = {
-                    a["name"]
-                    for a in graph_service.get_similar_entities(
-                        entity_name, node_label=node_label
-                    )
-                }
-
-                gate3_survivors = []
-                for potential in potential_aliases:
-                    potential_name = potential.get("name", "")
-                    if not potential_name or potential_name in existing_aliases:
-                        continue
-
-                    candidate_vec = potential.get("embedding")
-                    if entity_vec and candidate_vec:
-                        sim = _cosine(entity_vec, candidate_vec)
-                        if sim < cosine_threshold:
-                            logger.debug(
-                                f"[Similarity] Gate3 fail: '{entity_name}' <-> "
-                                f"'{potential_name}' cosine={sim:.3f}"
-                            )
-                            continue
-                        logger.debug(
-                            f"[Similarity] Gate3 pass: '{entity_name}' <-> "
-                            f"'{potential_name}' cosine={sim:.3f}"
-                        )
-                    gate3_survivors.append(potential)
-
-                if not gate3_survivors:
-                    continue
-
-                logger.info(
-                    f"[Similarity] {len(gate3_survivors)} gate-3 survivors for "
-                    f"'{entity_name}': {[p['name'] for p in gate3_survivors]}"
-                )
-
-                entity_facts = ""
-                # Use the node_id from the dict if present (populated from name_to_id),
-                # otherwise fall back to Qdrant name lookup.
-                _enid = node.get("node_id") or qdrant_service.find_node_id_by_name(entity_name)
-                if _enid:
-                    _content = qdrant_service.get_node_content_by_id(_enid)
-                    if _content:
-                        facts_raw = _content.get("facts") or []
-                        entity_facts = " ".join(facts_raw) if isinstance(facts_raw, list) else (facts_raw or "")
-
-                for potential in gate3_survivors:
-                    potential_name = potential.get("name", "")
-                    potential_summary = potential.get("summary", "") or ""
-                    potential_facts = potential.get("facts", "") or ""
-                    # Enrich candidate with Qdrant content if not already present
-                    _pot_node_id = potential.get("node_id")
-                    if _pot_node_id and not potential_summary and not potential_facts:
-                        _pot_content = qdrant_service.get_node_content_by_id(_pot_node_id)
-                        if _pot_content:
-                            potential_summary = _pot_content.get("description", "") or ""
-                            facts_raw = _pot_content.get("facts") or []
-                            potential_facts = " ".join(facts_raw) if isinstance(facts_raw, list) else (facts_raw or "")
-
-                    is_same, confidence, rel_type = llm_service.detect_similarity(
-                        name1=entity_name,
-                        name2=potential_name,
-                        context1=entity_context,
-                        context2=potential_summary,
-                        facts1=entity_facts,
-                        facts2=potential_facts,
-                    )
-
-                    if is_same and confidence >= min_confidence:
-                        rel_sentence = (
-                            f"{entity_name} {(rel_type or 'RELATED_TO').lower().replace('_', ' ')} {potential_name}."
-                        )
-                        _src_id = qdrant_service.find_node_id_by_name(entity_name) or ""
-                        _tgt_id = qdrant_service.find_node_id_by_name(potential_name) or ""
-                        graph_service.create_or_update_relationship(
-                            source_name=entity_name,
-                            source_label=node_label,
-                            target_name=potential_name,
-                            target_label=node_label,
-                            relationship_type=rel_type or "RELATED_TO",
-                            confidence=round(confidence * 10, 1),
-                            strength=5.0,
-                            relevance=5.0,
-                            natural_language=rel_sentence,
-                            note_id=note_id,
-                            source_id=_src_id,
-                            target_id=_tgt_id,
-                        )
-                        logger.info(
-                            f"[Similarity] RELATIONSHIP CREATED: '{entity_name}' "
-                            f"-[{rel_type}]-> '{potential_name}' confidence={confidence:.2f}"
-                        )
-                    else:
-                        logger.debug(
-                            f"[Similarity] Rejected: '{entity_name}' <-> '{potential_name}' "
-                            f"(has_rel={is_same}, confidence={confidence:.2f})"
-                        )
-
-            except Exception as e:
-                logger.warning(
-                    f"[Similarity] Failed to check similarity for '{entity_name}': {e}"
-                )
-                continue
+        return title
 
     async def _queue_leiden_recompute_if_due(self, note_id: str) -> None:
         rows = graph_service.execute_query(
             """
-            MATCH (:Indexable {id: $note_id})-[*1]-(n:Indexable)
-            WHERE NOT n:Note AND NOT n:Community AND n.id IS NOT NULL
+            MATCH (:Node {id: $note_id})-[*1]-(n:Node)
+            WHERE n.kind = 'indexable' AND n.id IS NOT NULL
             RETURN DISTINCT n.id AS node_id
             """,
             {"note_id": note_id},
@@ -701,18 +639,29 @@ class IngestionWorkflow:
         if not node_ids:
             return
 
-        _, queue_size = await ingestion_tracker.queue_nodes_for_community_recompute(node_ids)
+        _, queue_size = await ingestion_tracker.queue_nodes_for_community_recompute(
+            node_ids
+        )
         logger.info(
             f"[Community] Queued {len(node_ids)} node IDs for Leiden recompute "
-            f"(queue size: {queue_size}) — IDs: {node_ids[:10]}{'...' if len(node_ids) > 10 else ''}"
+            f"(queue size: {queue_size}) — IDs: {node_ids}{'...' if len(node_ids) > 10 else ''}"
         )
 
     async def _update_neighborhoods(self, nodes, new_content: str):
         """
-        Refreshes the summaries of all nodes affected by this note.
-        Parallelizes updates to reduce total latency.
+        Refreshes isolated contexts for all nodes affected by this note.
+        Runs with concurrency=4 and uses entity-level locks to prevent races
+        when multiple ingestion runs touch the same node.
+
+        Groups by node name so each unique node is processed once per ingestion run.
+        No description/facts/questions are generated here — only isolated contexts
+        are accumulated and embedded.
         """
-        tasks_list = []
+        # Group unique contexts per node name. Dedup by first 200 chars to catch
+        # LLM hallucinations that repeat the same sentence with trivial differences.
+        name_to_contexts: dict[str, list[str]] = {}
+        name_to_type: dict[str, str] = {}
+        name_ctx_seen: dict[str, set[str]] = {}
 
         for node in nodes or []:
             name = (node.name or "").lstrip("#").strip().lower()
@@ -720,109 +669,147 @@ class IngestionWorkflow:
                 continue
             context = getattr(node, "isolated_context", "") or new_content
             ntype = (getattr(node, "type", "") or "").lower().strip() or "thing"
-            tasks_list.append(self._update_node_summary("Indexable", name, context, node_type=ntype))
+            ctx_key = (context or "").strip()
+            if name not in name_to_contexts:
+                name_to_contexts[name] = []
+                name_to_type[name] = ntype
+                name_ctx_seen[name] = set()
+            if ctx_key and ctx_key not in name_ctx_seen[name]:
+                name_ctx_seen[name].add(ctx_key)
+                name_to_contexts[name].append(context)
 
-        if tasks_list:
-            logger.info(f"[Neighborhood] Updating {len(tasks_list)} node summaries in parallel…")
-            await asyncio.gather(*tasks_list)
-            logger.info(f"[Neighborhood] {len(tasks_list)} node summaries update complete.")
+        nodes_to_update = [
+            (name, ctxs, name_to_type[name]) for name, ctxs in name_to_contexts.items()
+        ]
+
+        if nodes_to_update:
+            _sem = asyncio.Semaphore(4)
+
+            async def _run_summary(name, new_contexts, ntype):
+                async with _sem:
+                    await self._update_node_summary(
+                        "Indexable", name, new_contexts, node_type=ntype
+                    )
+
+            logger.info(
+                f"[Neighborhood] Updating {len(nodes_to_update)} unique node summaries "
+                f"(concurrency=4)…"
+            )
+            await asyncio.gather(
+                *[_run_summary(n, c, t) for n, c, t in nodes_to_update]
+            )
+            logger.info(
+                f"[Neighborhood] {len(nodes_to_update)} node context updates complete."
+            )
 
     async def _update_node_summary(
         self,
         label: str,
         name: str,
-        isolated_context: str,
+        new_contexts: list[str],
         identifier_key: str = "name",
         node_type: str = "",
     ):
         """
-        Updates a node's summary by accumulating ALL isolated contexts.
+        Updates a node by accumulating isolated contexts only.
 
-        APPROACH:
-        1. Append new isolated_context to node's isolated_contexts list
-        2. Generate fresh summary from ALL accumulated contexts
-        3. Store both the list (for raw context retrieval) and summary (for distilled retrieval)
-
-        This allows A/B testing: raw contexts vs LLM summaries.
+        This path intentionally does NOT generate description/facts/questions.
+        Ingestion stores verbatim isolated contexts and their embeddings, and keeps
+        structural nodes + relationships in the graph.
 
         Args:
             label: Node label (Entity, Concept, Task, etc.)
             name: Node identifier
-            isolated_context: Pre-isolated context from LLM extraction (already filtered)
+            new_contexts: Contexts extracted for this node in the current ingestion run
             identifier_key: Property to match on (name, description, trait, title)
         """
         async with entity_lock_manager.get_lock(label, name):
             loop = asyncio.get_running_loop()
 
-            # 1. Get node_id from Qdrant (name is authoritative there), not from Neo4j.
+            # 1. Resolve node_id. Qdrant is the primary lookup, but if it misses
+            # while Kuzu already has a structural node with this name, reuse that
+            # existing graph ID to avoid minting duplicate same-name nodes.
             def _get_existing():
                 return qdrant_service.find_node_id_by_name(name)
 
             node_id: str | None = await loop.run_in_executor(None, _get_existing)
             existing_contexts: list[str] = []
 
-            existing_facts_set: set[str] = set()
-            existing_questions_set: set[str] = set()
-
             if node_id:
-                # Fetch existing isolated_contexts, facts, and questions from Qdrant
+                # Fetch existing isolated_contexts from Qdrant
                 def _get_qdrant_contexts():
                     _content = qdrant_service.get_node_content_by_id(node_id)
                     return _content or {}
 
-                _existing_content = await loop.run_in_executor(None, _get_qdrant_contexts)
+                _existing_content = await loop.run_in_executor(
+                    None, _get_qdrant_contexts
+                )
                 existing_contexts = _existing_content.get("isolated_contexts", [])
-                existing_facts_set = set(_existing_content.get("facts", []))
-                existing_questions_set = set(_existing_content.get("potential_questions", []))
                 logger.info(
                     f"  [NodeSummary] '{name}' EXISTING id={node_id} "
-                    f"— {len(existing_contexts)} prior context(s), "
-                    f"{len(existing_facts_set)} facts, {len(existing_questions_set)} questions fetched from Qdrant"
+                    f"— {len(existing_contexts)} prior context(s) fetched from Qdrant"
                 )
             else:
-                # New node — mint an ID and ensure the structural node exists in Neo4j
-                node_id = f"node_{str(uuid.uuid4())}"
-                logger.info(
-                    f"  [NodeSummary] '{name}' NEW id={node_id} — minting and writing structural Neo4j node"
-                )
 
-                def _merge_node():
-                    graph_service.execute_query(
-                        f"MERGE (n:{label} {{id: $node_id}})",
-                        {"node_id": node_id},
+                def _find_existing_graph_id():
+                    _matches = graph_service.find_nodes_by_name([name], fuzzy=False)
+                    _candidates = [
+                        m.get("node_id")
+                        for m in _matches
+                        if (
+                            m.get("node_id")
+                            and (m.get("labels") or [""])[0] == "indexable"
+                        )
+                    ]
+                    if not _candidates:
+                        return None
+                    return sorted(_candidates)[0]
+
+                _graph_existing_id = await loop.run_in_executor(
+                    None, _find_existing_graph_id
+                )
+                if _graph_existing_id:
+                    node_id = _graph_existing_id
+                    logger.warning(
+                        f"  [NodeSummary] '{name}' missing in Qdrant but present in Kuzu "
+                        f"(id={node_id}) — reusing existing graph ID to prevent duplicate node creation"
+                    )
+                else:
+                    # Truly new node — mint an ID and ensure structural Kuzu node exists
+                    node_id = f"node_{str(uuid.uuid4())}"
+                    logger.info(
+                        f"  [NodeSummary] '{name}' NEW id={node_id} — minting and writing structural Kuzu node"
                     )
 
-                await loop.run_in_executor(None, _merge_node)
+                    def _merge_node():
+                        graph_service.execute_query(
+                            "MERGE (n:Node {id: $node_id}) ON CREATE SET n.kind = 'indexable' SET n.name = $name, n.type = $type",
+                            {
+                                "node_id": node_id,
+                                "name": name,
+                                "type": node_type or "unknown",
+                            },
+                        )
 
-            # 2. Append new context to list
-            existing_contexts.append(isolated_context)
+                    await loop.run_in_executor(None, _merge_node)
+
+            # 2. Append all new contexts that aren't already stored (dedup against existing).
+            # Collecting all of them before the LLM call means one summary generation
+            # per ingestion run regardless of how many contexts this node received.
+            _existing_stripped = {c.strip() for c in existing_contexts if c}
+            _contexts_to_add: list[str] = []
+            for _nc in new_contexts or []:
+                _nc_stripped = _nc.strip() if _nc else ""
+                if _nc_stripped and _nc_stripped not in _existing_stripped:
+                    existing_contexts.append(_nc)
+                    _existing_stripped.add(_nc_stripped)
+                    _contexts_to_add.append(_nc)
             logger.debug(
-                f"  [NodeSummary] '{name}' context count after append: {len(existing_contexts)}"
+                f"  [NodeSummary] '{name}' context count after append: {len(existing_contexts)} "
+                f"({len(_contexts_to_add)} new, {len(new_contexts or []) - len(_contexts_to_add)} duplicate(s) skipped)"
             )
 
-            # 3. Generate description from ALL contexts joined together
-            all_contexts_text = "\n\n".join(existing_contexts)
-            logger.info(
-                f"  [NodeSummary] '{name}' calling LLM to generate description from "
-                f"{len(existing_contexts)} context(s) ({len(all_contexts_text)} total chars)"
-            )
-
-            summary_data = await llm_service.generate_entity_summary_async(
-                all_contexts_text,
-                name,
-                label,
-            )
-            description = summary_data["description"]
-            logger.info(
-                f"  [NodeSummary] '{name}' description generated: {len(description or '')} chars"
-            )
-            logger.debug(
-                f"  [NodeSummary] '{name}' description preview: {(description or '')[:160]}..."
-            )
-
-            # Fetch the actual LLM-assigned semantic type for this node.
-            # For existing nodes, read from Qdrant. For new nodes, use the type
-            # supplied by the caller (from extraction output), defaulting to "thing".
+            # 3. Resolve semantic node type from Qdrant (or fall back to caller-supplied type)
             def _get_node_type():
                 _content = qdrant_service.get_node_content_by_id(node_id)
                 if _content and _content.get("type"):
@@ -830,190 +817,87 @@ class IngestionWorkflow:
                 return (node_type or "thing").lower().strip() or "thing"
 
             _node_type_val = await loop.run_in_executor(None, _get_node_type)
-
             node_type = _node_type_val
 
-            # Extract atomic facts as proposition sentences
-            def _extract_facts():
-                return llm_service.extract_atomic_facts(all_contexts_text, name, label)
-
-            facts_list: list[str] = await loop.run_in_executor(None, _extract_facts)
-            import json as _json
-
-            facts_json = _json.dumps(facts_list) if facts_list else "[]"
             logger.info(
-                f"  [NodeSummary] '{name}' extracted {len(facts_list)} atomic fact(s)"
-            )
-            for _fi, _fact in enumerate(facts_list or []):
-                logger.debug(f"    [NodeSummary] fact[{_fi}]: {_fact}")
-
-            # Generate potential questions
-            def _gen_questions():
-                return llm_service.generate_potential_questions(
-                    name=name,
-                    node_type=node_type,
-                    description=description,
-                    facts_list=facts_list or [],
-                )
-
-            potential_questions: list[str] = await loop.run_in_executor(
-                None, _gen_questions
-            )
-            logger.info(
-                f"  [NodeSummary] '{name}' generated {len(potential_questions)} potential question(s)"
-            )
-            for _qi, _q in enumerate(potential_questions or []):
-                logger.debug(f"    [NodeSummary] question[{_qi}]: {_q}")
-
-            # Merge new facts with existing ones — union, deduplicated by lowercased text.
-            # This ensures re-ingestion never loses facts from prior ingestions.
-            if existing_facts_set:
-                _existing_lower = {f.lower() for f in existing_facts_set}
-                _merged_facts = list(existing_facts_set)
-                for _f in facts_list:
-                    if _f.strip() and _f.strip().lower() not in _existing_lower:
-                        _merged_facts.append(_f.strip())
-                        _existing_lower.add(_f.strip().lower())
-                facts_list = _merged_facts
-                logger.info(
-                    f"  [NodeSummary] '{name}' facts after merge: {len(facts_list)} total "
-                    f"({len(existing_facts_set)} prior + new)"
-                )
-
-            # Merge new questions with existing ones — same dedup strategy.
-            if existing_questions_set:
-                _existing_q_lower = {q.lower() for q in existing_questions_set}
-                _merged_questions = list(existing_questions_set)
-                for _q in potential_questions:
-                    if _q.strip() and _q.strip().lower() not in _existing_q_lower:
-                        _merged_questions.append(_q.strip())
-                        _existing_q_lower.add(_q.strip().lower())
-                potential_questions = _merged_questions
-                logger.info(
-                    f"  [NodeSummary] '{name}' questions after merge: {len(potential_questions)} total "
-                    f"({len(existing_questions_set)} prior + new)"
-                )
-
-            logger.info(
-                f"  [NodeSummary] '{name}' generating embeddings for description + "
-                f"{len(facts_list or [])} facts + {len(potential_questions)} questions + "
-                f"{len(existing_contexts)} contexts"
+                f"  [NodeSummary] '{name}' generating embeddings for "
+                f"{len(_contexts_to_add)} new isolated context(s)"
             )
 
             # 4. Generate embeddings for Qdrant writes
             from app.services.embedding import embedding_service
 
             def _generate_embeddings():
-                # Embed description for node_cores
-                desc_vector = embedding_service.embed_documents([description])[0]
-
-                # Embed each proposition fact sentence
-                fact_items = []
-                for fact_sentence in facts_list or []:
-                    vec = embedding_service.embed_documents([fact_sentence])[0]
-                    fact_items.append({"content": fact_sentence, "vector": vec})
-
-                # Embed each potential question
-                question_items = []
-                for q in potential_questions:
-                    vec = embedding_service.embed_documents([q])[0]
-                    question_items.append({"content": q, "vector": vec})
-
-                # Embed each isolated context
-                context_items = []
-                for ctx in existing_contexts:
-                    if ctx and ctx.strip():
-                        vec = embedding_service.embed_documents([ctx])[0]
-                        context_items.append({"content": ctx, "vector": vec})
-
-                return (
-                    desc_vector,
-                    fact_items,
-                    question_items,
-                    context_items,
+                # Embed only new isolated contexts (existing are already persisted).
+                _new_ctx_texts = [c for c in _contexts_to_add if c and c.strip()]
+                vectors = (
+                    embedding_service.embed_documents(_new_ctx_texts)
+                    if _new_ctx_texts
+                    else []
                 )
 
-            (
-                desc_vector,
-                fact_items,
-                question_items,
-                context_items,
-            ) = await loop.run_in_executor(None, _generate_embeddings)
+                new_ctx_pairs: list[tuple[str, list[float]]] = []
+                for t, v in zip(_new_ctx_texts, vectors):
+                    new_ctx_pairs.append((t, v))
+
+                return new_ctx_pairs
+
+            new_ctx_pairs = await loop.run_in_executor(None, _generate_embeddings)
             logger.debug(
                 f"  [NodeSummary] '{name}' embeddings generated: "
-                f"desc=1, facts={len(fact_items)}, questions={len(question_items)}, contexts={len(context_items)}"
+                f"new_ctx={len(new_ctx_pairs)}"
             )
 
-            # 5. Ensure the Neo4j structural node exists with this ID and carry
+            # 5. Ensure the Kuzu structural node exists with this ID and carry
             # name + type so the graph endpoint never needs Qdrant for display labels.
             def _save_update():
                 graph_service.execute_query(
-                    f"MERGE (n:{label} {{id: $node_id}}) SET n.name = $name, n.type = $type",
+                    "MERGE (n:Node {id: $node_id}) ON CREATE SET n.kind = 'indexable' SET n.name = $name, n.type = $type",
                     {"node_id": node_id, "name": name, "type": node_type or "unknown"},
                 )
 
             await loop.run_in_executor(None, _save_update)
-            logger.debug(f"  [NodeSummary] '{name}' Neo4j structural MERGE done")
+            logger.debug(f"  [NodeSummary] '{name}' Kuzu structural MERGE done")
 
-            # 6. Write to Qdrant (description → node_cores; items → sub-collections)
+            # 6. Write to Qdrant (append new contexts).
             def _write_qdrant():
-                qdrant_service.upsert_node_core(
-                    node_id=node_id,
-                    name=name,
-                    node_type=node_type,
-                    description=description,
-                    description_vector=desc_vector,
-                )
-                qdrant_service.upsert_node_items(
-                    collection_name=settings.QDRANT_COLLECTION_NODE_FACTS,
-                    node_id=node_id,
-                    items=fact_items,
-                )
-                qdrant_service.upsert_node_items(
-                    collection_name=settings.QDRANT_COLLECTION_NODE_QUESTIONS,
-                    node_id=node_id,
-                    items=question_items,
-                )
-                qdrant_service.upsert_node_items(
-                    collection_name=settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
-                    node_id=node_id,
-                    items=context_items,
-                )
+                # Append each new context — existing ones stay in Qdrant untouched
+                for _ctx_text, _ctx_vector in new_ctx_pairs:
+                    qdrant_service.append_node_item(
+                        collection_name=settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
+                        node_id=node_id,
+                        content=_ctx_text,
+                        vector=_ctx_vector,
+                    )
 
             await loop.run_in_executor(None, _write_qdrant)
             logger.info(
                 f"  [NodeSummary] '{name}' Qdrant write complete — "
-                f"node_cores(1) + facts({len(fact_items)}) + "
-                f"questions({len(question_items)}) + contexts({len(context_items)})"
+                f"ctx_appended({len(new_ctx_pairs)})"
             )
 
-            # 7. Write to Elasticsearch
+            # 7. Write to Typesense
             def _write_es():
-                # Fetch relationship NL sentences from Qdrant (not Neo4j)
+                # Fetch relationship NL sentences from Qdrant (not Kuzu)
                 rel_qdrant = qdrant_service.get_relationships_for_node_ids([node_id])
                 rel_nl = " ".join(
-                    r.get("natural_language", "") for r in rel_qdrant if r.get("natural_language")
+                    r.get("natural_language", "")
+                    for r in rel_qdrant
+                    if r.get("natural_language")
                 )
-                facts_text = " ".join(facts_list or [])
-                questions_text = " ".join(potential_questions)
                 contexts_text = " ".join(
                     ctx for ctx in existing_contexts if ctx and ctx.strip()
                 )
-                elasticsearch_service.index_node(
+                typesense_service.index_node(
                     node_id=node_id,
                     name=name,
                     node_type=node_type,
-                    description=description,
-                    facts_text=facts_text,
-                    questions_text=questions_text,
                     isolated_contexts_text=contexts_text,
                     relationship_natural_language=rel_nl,
                 )
 
             await loop.run_in_executor(None, _write_es)
-            logger.info(
-                f"  [NodeSummary] '{name}' Elasticsearch index complete"
-            )
+            logger.info(f"  [NodeSummary] '{name}' Typesense index complete")
 
             logger.info(
                 f"  [NodeSummary] ✓ COMPLETE: '{name}' (type='{node_type}', id={node_id})"
@@ -1040,25 +924,129 @@ class IngestionWorkflow:
         return name, summary
 
     @staticmethod
+    def _is_generic_community_name(name: str | None) -> bool:
+        """Heuristic guardrail for low-quality community names.
+
+        Rejects template-like names that are not useful to end users.
+        """
+        if not name:
+            return True
+
+        normalized = re.sub(r"\s+", " ", name.strip()).lower()
+        if not normalized:
+            return True
+
+        if re.fullmatch(r"community\s+l\d+[-\s]?\d+", normalized):
+            return True
+        if normalized.startswith("community "):
+            return True
+
+        banned_phrases = (
+            "isolated conceptual node cluster",
+            "isolated conceptual cluster",
+            "isolated conceptual fragment",
+            "isolated conceptual echo",
+            "isolated conceptual echoes",
+            "isolated conceptual anomaly",
+            "isolated conceptual collection",
+            "isolated conceptual core",
+            "isolated node community",
+            "isolated node cluster",
+            "isolated core node cluster",
+            "isolated single node community",
+            "isolated concept",
+            "potential anomaly",
+            "initial state",
+            "provisional",
+            "minimal connection",
+        )
+        if any(phrase in normalized for phrase in banned_phrases):
+            return True
+
+        # Names made only of generic words are not user-friendly.
+        generic_tokens = {
+            "isolated",
+            "conceptual",
+            "node",
+            "nodes",
+            "cluster",
+            "community",
+            "core",
+            "collection",
+            "fragment",
+            "echo",
+            "echoes",
+            "anomaly",
+            "pair",
+            "transient",
+            # Additional filler words the LLM uses for empty/thin clusters:
+            "temporal",
+            "reflection",
+            "reflections",
+            "potential",
+            "seeds",
+            "seed",
+            "observation",
+            "observations",
+            "silent",
+            "silence",
+            "unresolved",
+            "statistical",
+            "minimal",
+            "interest",
+            "inquiry",
+            "shadow",
+            "shadows",
+            "whisper",
+            "whispers",
+            "remnant",
+            "remnants",
+            "trace",
+            "traces",
+            "fleeting",
+            "ephemeral",
+            "abstract",
+            "nascent",
+            "liminal",
+        }
+        words = [w for w in re.split(r"[^a-z0-9]+", normalized) if w]
+        if words and all(w in generic_tokens for w in words):
+            return True
+
+        return False
+
+    @staticmethod
+    def _derive_fallback_community_name(member_rows: list[dict]) -> str:
+        """Create a readable deterministic fallback from member names."""
+        member_names = [row.get("name") for row in member_rows if row.get("name")]
+        if not member_names:
+            return "Related knowledge topics"
+        if len(member_names) == 1:
+            return f"About {member_names[0]}"
+        if len(member_names) == 2:
+            return f"{member_names[0]} and {member_names[1]}"
+        return f"{member_names[0]} and related topics"
+
+    @staticmethod
     def _format_member_context(rows: list[dict]) -> str:
         """Format member node rows into a bulleted context string for LLM prompts."""
-        lines = [
-            f"- {row.get('name')} ({(row.get('labels') or ['Node'])[0]}): "
-            f"{row.get('description') or ''}"
-            for row in rows
-            if row.get("description")
-        ]
-        if not lines:
-            lines = [
-                f"- {row.get('name')} ({(row.get('labels') or ['Node'])[0]})"
-                for row in rows
-            ]
+        lines = []
+        for row in rows:
+            name = row.get("name", "")
+            label = (row.get("labels") or ["Node"])[0]
+            contexts = row.get("isolated_contexts") or []
+            if contexts:
+                context_text = " | ".join(contexts)
+                lines.append(f"- {name} ({label}): {context_text}")
+            else:
+                lines.append(f"- {name} ({label})")
         return "\n".join(lines)
 
     def _build_community_summary(
         self,
         member_rows: list[dict],
         community_level: int,
+        strict_naming: bool = False,
     ) -> tuple[str | None, str | None]:
         """Generate a community name and summary in a single LLM call.
 
@@ -1069,18 +1057,27 @@ class IngestionWorkflow:
         """
         context = self._format_member_context(member_rows)
         prompt = (
-            "These knowledge-graph nodes form a community discovered by graph clustering.\n\n"
-            f"Community level: {community_level}\n"
-            f"Members ({len(member_rows)} total):\n{context}\n\n"
-            "Give this community:\n"
-            "1. A short descriptive name (3-8 words)\n"
-            "2. A thorough summary covering what connects the members, key themes, "
-            "notable relationships, and any important patterns or distinctions. "
-            "Write as many sentences as needed — do not artificially constrain length.\n\n"
-            "Reply in EXACTLY this format:\n"
+            "The following entities are closely related based on how they appear across a knowledge graph.\n\n"
+            f"Cluster level: {community_level}  [L2 = most fine-grained → L1 = mid-level → L0 = broadest]\n"
+            f"Entities ({len(member_rows)} total):\n{context}\n\n"
+            "Generate:\n"
+            "1. A short descriptive name that captures what ties these entities together\n"
+            "2. A thorough summary covering the key themes, notable connections, relationships, and any "
+            "meaningful patterns or distinctions among these entities. Write as many sentences as needed.\n\n"
+            "Name rules:\n"
+            "- Use plain, natural language\n"
+            "- Anchor the name in concrete topics drawn from the entities themselves\n"
+            "- Do NOT use meta-labels like 'Node Cluster', 'Isolated Group', 'Cluster L2-14', or any variant\n"
+            "- Do NOT use the words isolated / node / cluster / community / group as the central theme\n\n"
+            "Reply in EXACTLY this format — no preamble, no trailing text:\n"
             "NAME: <name>\n"
             "SUMMARY: <summary>"
         )
+        if strict_naming:
+            prompt += (
+                "\n\nThis is a retry because the previous name was too generic. "
+                "The NAME must be specific and user-facing."
+            )
         raw = llm_service.reason(prompt) or ""
         return self._parse_name_summary(raw)
 
@@ -1088,6 +1085,7 @@ class IngestionWorkflow:
         self,
         child_community_rows: list[dict],
         community_level: int,
+        strict_naming: bool = False,
     ) -> tuple[str | None, str | None]:
         """Generate a community name and summary by rolling up from child community summaries.
 
@@ -1104,21 +1102,29 @@ class IngestionWorkflow:
         if not context:
             return None, None
         prompt = (
-            "You are summarizing a high-level knowledge-graph community.\n\n"
-            f"Community level: {community_level} (higher level = more specific; "
-            "lower level = broader and more abstract)\n\n"
-            f"The following are summaries of {len(child_community_rows)} sub-communities "
-            "that together make up this parent community:\n\n"
+            f"The following are descriptions of {len(child_community_rows)} related groups "
+            "that together form a broader connected topic.\n\n"
+            f"Cluster level: {community_level}  [L2 = most fine-grained → L1 = mid-level → L0 = broadest]\n\n"
+            "Groups:\n"
             f"{context}\n\n"
-            "Synthesize a unified description for this parent community:\n"
-            "1. A short descriptive name (3-8 words) capturing the overarching theme\n"
-            "2. A thorough summary covering the overarching themes, what connects all "
-            "sub-communities, major patterns, and the big-picture significance. "
-            "Write as many sentences as needed.\n\n"
-            "Reply in EXACTLY this format:\n"
+            "Synthesize:\n"
+            "1. A short descriptive name capturing the overarching theme across all groups\n"
+            "2. A thorough summary covering the shared themes, what connects the groups, major patterns, "
+            "and the big-picture significance. Write as many sentences as needed.\n\n"
+            "Name rules:\n"
+            "- Use plain, natural language\n"
+            "- Anchor the name in concrete topics drawn from the group descriptions\n"
+            "- Do NOT use meta-labels like 'Node Cluster', 'Isolated Group', or any variant\n"
+            "- Do NOT use the words isolated / node / cluster / community / group as the central theme\n\n"
+            "Reply in EXACTLY this format — no preamble, no trailing text:\n"
             "NAME: <name>\n"
             "SUMMARY: <summary>"
         )
+        if strict_naming:
+            prompt += (
+                "\n\nThis is a retry because the previous name was too generic. "
+                "The NAME must be specific and user-facing."
+            )
         raw = llm_service.reason(prompt) or ""
         return self._parse_name_summary(raw)
 
@@ -1128,231 +1134,284 @@ class IngestionWorkflow:
         Cooperative cancellation: checks ``ingestion_tracker.cancel_recompute`` between every
         cluster summary.  When set, the run exits early (returning the count built so far) so a
         pending ingestion can proceed.  The tracker resets the flag and reschedules the full run
-        after the next 2-minute idle window.
+        after the next idle window.
         """
-        import igraph as ig
-        import leidenalg
+        from app.services.embedding import embedding_service
 
         from app.services.embedding import embedding_service
         from app.services.ingestion_tracker import ingestion_tracker as _tracker
 
-        logger.info(
-            f"\n{'='*70}\n"
-            f"[Community] Starting full Leiden community recompute\n"
-            f"{'='*70}"
-        )
+        global _community_run_seq, _community_run_active_seq, _community_run_running
 
-        nodes = graph_service.get_indexable_nodes_for_communities()
-        if not nodes:
-            logger.warning("[Community] No indexable nodes found — aborting Leiden recompute.")
-            return 0
+        # Register this as the newest requested run. If another run is active, request
+        # cancellation and wait for handoff. Only the newest request is allowed to start.
+        with _community_run_state_lock:
+            _community_run_seq += 1
+            requested_seq = _community_run_seq
+            had_active_run = _community_run_running
+            active_seq = _community_run_active_seq
+            if had_active_run:
+                _tracker.cancel_recompute.set()
 
-        logger.info(f"[Community] {len(nodes)} indexable nodes fetched from Neo4j")
-
-        # Enrich structural node rows with content from Qdrant (description, facts)
-        _node_ids_for_leiden = [n["node_id"] for n in nodes if n.get("node_id")]
-        if _node_ids_for_leiden:
-            _qdrant_content_map = qdrant_service.get_nodes_content_by_ids(_node_ids_for_leiden)
-            for n in nodes:
-                _nid = n.get("node_id")
-                if _nid and _nid in _qdrant_content_map:
-                    _c = _qdrant_content_map[_nid]
-                    n["description"] = _c.get("description", "")
-                    n["facts"] = _c.get("facts", [])
-            _enriched = sum(1 for n in nodes if n.get("description"))
+        if had_active_run:
             logger.info(
-                f"[Community] Qdrant content enrichment: {_enriched}/{len(nodes)} nodes "
-                f"enriched with description"
+                "[Community] New recompute requested while run "
+                f"#{active_seq} is active — signalling cancel and waiting for handoff."
             )
 
-        edges = graph_service.get_weighted_relationships_for_communities()
-        logger.info(
-            f"[Community] {len(edges)} weighted edges fetched from Neo4j for igraph"
-        )
-        old_community_ids = graph_service.clear_all_communities()
-        logger.info(
-            f"[Community] Cleared {len(old_community_ids)} old community nodes "
-            f"(Neo4j + Qdrant + ES)"
-        )
-        for old_community_id in old_community_ids:
-            qdrant_service.delete_node(old_community_id)
-            elasticsearch_service.delete_node(old_community_id)
-
-        node_ids = [node["node_id"] for node in nodes]
-        node_lookup = {node["node_id"]: node for node in nodes}
-        node_index = {node_id: idx for idx, node_id in enumerate(node_ids)}
-
-        graph = ig.Graph()
-        graph.add_vertices(len(node_ids))
-        graph.vs["name"] = node_ids
-
-        edge_list = []
-        weights = []
-        for edge in edges:
-            source_node_id = edge.get("source_node_id")
-            target_node_id = edge.get("target_node_id")
-            if source_node_id not in node_index or target_node_id not in node_index:
-                continue
-            edge_list.append((node_index[source_node_id], node_index[target_node_id]))
-            weights.append(float(edge.get("weight") or 1.0))
-
-        if edge_list:
-            graph.add_edges(edge_list)
-            if weights:
-                graph.es["weight"] = weights
-
-        logger.info(
-            f"[Community] igraph built: {graph.vcount()} vertices, {graph.ecount()} edges "
-            f"({len(edge_list)} weighted edges added)"
-        )
-
-        # Process L2 first (most specific), then L1, then L0.
-        # L1 summaries roll up from L2 child community summaries.
-        # L0 summaries roll up from L1 child community summaries.
-        # This guarantees every community has a real LLM description, not a placeholder.
-        resolutions = [
-            (2, 0.01),    # Mid — 50-100 communities, specific topics
-            (1, 0.001),   # Broad — 10-20 communities, major topic clusters
-            (0, 0.0001),  # Very broad — 3-5 massive communities, highest level themes
-        ]
-        logger.info(f"[Community] Running CPMVertexPartition at {len(resolutions)} resolution levels (L2→L1→L0)")
-
-        level_assignments: dict[str, dict[int, str]] = {}  # node_id → {level → community_id}
-        # Track summaries and names as we build L2 → L1 → L0 so higher levels can roll up
-        community_summaries: dict[str, str] = {}   # community_id → summary text
-        community_names: dict[str, str] = {}       # community_id → display name
-        created = 0
-
-        for community_level, resolution in resolutions:
-            if graph.ecount() > 0:
-                partition = leidenalg.find_partition(
-                    graph,
-                    leidenalg.CPMVertexPartition,
-                    weights=weights,
-                    resolution_parameter=resolution,
-                )
-                membership = partition.membership
-                cluster_map: dict[int, list[str]] = {}
-                for idx, cluster_id in enumerate(membership):
-                    cluster_map.setdefault(cluster_id, []).append(node_ids[idx])
-                clusters = list(cluster_map.values())
-            else:
-                clusters = [[node_id] for node_id in node_ids]
-
-            logger.info(
-                f"[Community] Leiden level {community_level} (resolution={resolution}) produced "
-                f"{len(clusters)} clusters | sizes: min={min(len(c) for c in clusters)}, "
-                f"max={max(len(c) for c in clusters)}, "
-                f"avg={sum(len(c) for c in clusters)/len(clusters):.1f}"
-            )
-
-            # Determine which child level to roll up from for L0/L1
-            child_level = community_level + 1  # L1→L2, L0→L1
-
-            for cluster_index, member_node_ids in enumerate(clusters):
-                # Yield to a pending ingestion if one has arrived.
-                if _tracker.cancel_recompute.is_set():
+        while True:
+            with _community_run_state_lock:
+                if requested_seq != _community_run_seq:
                     logger.info(
-                        f"[Community] Recompute cancelled at L{community_level} "
-                        f"cluster {cluster_index + 1}/{len(clusters)} — "
-                        "ingestion arrived; will restart after next idle window."
+                        "[Community] Recompute request superseded by a newer request "
+                        f"(request #{requested_seq}) — skipping."
                     )
-                    return created
+                    return 0
+                if not _community_run_running:
+                    _community_run_running = True
+                    _community_run_active_seq = requested_seq
+                    break
+            time.sleep(0.25)
+
+        # Start with a clean cancellation state for this newly claimed run.
+        _tracker.cancel_recompute.clear()
+        # If ingestion became active during claim handoff, preserve the cancel signal.
+        if _tracker.has_active_ingestions():
+            _tracker.cancel_recompute.set()
+
+        try:
+            logger.info(
+                f"\n{'='*70}\n"
+                f"[Community] Starting full Leiden community recompute\n"
+                f"{'='*70}"
+            )
+
+            nodes = graph_service.get_indexable_nodes_for_communities()
+            if not nodes:
+                logger.warning(
+                    "[Community] No indexable nodes found — aborting Leiden recompute."
+                )
+                return 0
+
+            logger.info(f"[Community] {len(nodes)} indexable nodes fetched from Kuzu")
+
+            # Enrich structural node rows with content from Qdrant (description, facts)
+            _node_ids_for_leiden = [n["node_id"] for n in nodes if n.get("node_id")]
+            if _node_ids_for_leiden:
+                _qdrant_content_map = qdrant_service.get_nodes_content_by_ids(
+                    _node_ids_for_leiden
+                )
+                for n in nodes:
+                    _nid = n.get("node_id")
+                    if _nid and _nid in _qdrant_content_map:
+                        _c = _qdrant_content_map[_nid]
+                        n["isolated_contexts"] = _c.get("isolated_contexts", [])
+                _enriched = sum(1 for n in nodes if n.get("isolated_contexts"))
+                logger.info(
+                    f"[Community] Qdrant content enrichment: {_enriched}/{len(nodes)} nodes "
+                    f"enriched with isolated contexts"
+                )
+
+            old_community_ids = graph_service.clear_all_communities()
+            logger.info(
+                f"[Community] Cleared {len(old_community_ids)} old community nodes "
+                f"(Kuzu + Qdrant + Typesense)"
+            )
+            for old_community_id in old_community_ids:
+                qdrant_service.delete_node(old_community_id)
+                typesense_service.delete_node(old_community_id)
+
+            node_ids = [node["node_id"] for node in nodes]
+            node_lookup = {node["node_id"]: node for node in nodes}
+
+            # ─── True hierarchical community building ─────────────────────────────
+            # All three levels use embedding similarity clustering (agglomerative,
+            # cosine distance, average linkage) with progressively looser thresholds:
+            #   L2 (finest):  distance_threshold=0.25  — only closely related entities
+            #   L1 (mid):     distance_threshold=0.50  — moderate thematic overlap
+            #   L0 (broadest):distance_threshold=0.75  — broad topic grouping
+            # L2 clusters all entities. L1 clusters L2 communities. L0 clusters L1 communities.
+            # ──────────────────────────────────────────────────────────────────────
+            level_assignments: dict[str, dict[int, str]] = (
+                {}
+            )  # entity_node_id → {level → community_id}
+            community_summaries: dict[str, str] = {}  # community_id → summary text
+            community_names: dict[str, str] = {}  # community_id → display name
+            community_entity_members: dict[str, list[str]] = (
+                {}
+            )  # community_id → entity node IDs
+            created = 0
+
+            # ── Local helpers ────────────────────────────────────────────────────
+
+            def _embedding_cluster(
+                item_ids: list[str],
+                item_texts: list[str],
+                distance_threshold: float = 0.35,
+            ) -> list[list[str]]:
+                """Cluster items by embedding cosine similarity.
+
+                Uses agglomerative clustering with average linkage on cosine distance.
+                distance_threshold=0.35 means items need cosine similarity ≥ ~0.65
+                to be grouped together. No need to pre-specify cluster count.
+                """
+                import numpy as np
+                from sklearn.cluster import AgglomerativeClustering
+
+                if not item_ids:
+                    return []
+                if len(item_ids) == 1:
+                    return [list(item_ids)]
+
+                # Embed all texts in one batched call.
+                vectors = embedding_service.embed_documents(item_texts)
+                arr = np.array(vectors, dtype=np.float32)
+
+                # L2-normalise so cosine distance = 1 − cosine_similarity.
+                norms = np.linalg.norm(arr, axis=1, keepdims=True)
+                norms[norms == 0] = 1.0
+                arr /= norms
+
+                clustering = AgglomerativeClustering(
+                    n_clusters=None,
+                    distance_threshold=distance_threshold,
+                    metric="cosine",
+                    linkage="average",
+                )
+                labels = clustering.fit_predict(arr)
+
+                clusters: dict[int, list[str]] = {}
+                for item_id, label in zip(item_ids, labels):
+                    clusters.setdefault(int(label), []).append(item_id)
+                return list(clusters.values())
+
+            def _commit_community(
+                community_level: int,
+                member_entity_ids: list[str],
+                rollup_rows: list[dict],
+                cluster_label: str,
+            ) -> str | None:
+                """Summarise, name, and persist one community node.
+
+                ``rollup_rows`` is non-empty for L1/L0 (summaries of child communities +
+                orphan descriptions).  Empty list triggers direct node-description
+                summarisation (L2).  Returns the new community_id, or None if skipped.
+                """
+                nonlocal created
+
+                if not member_entity_ids:
+                    return None
+                if len(member_entity_ids) == 1:
+                    logger.debug(
+                        f"[Community] Skipping {cluster_label}: singleton entity cluster "
+                        f"({node_lookup.get(member_entity_ids[0], {}).get('name', member_entity_ids[0])})"
+                    )
+                    return None
+                if rollup_rows and len(rollup_rows) == 1:
+                    logger.debug(
+                        f"[Community] Skipping {cluster_label}: only 1 rollup input "
+                        f"('{rollup_rows[0].get('name', '?')}')"
+                    )
+                    return None
 
                 member_rows = [
-                    node_lookup[node_id]
-                    for node_id in member_node_ids
-                    if node_id in node_lookup
+                    node_lookup[nid] for nid in member_entity_ids if nid in node_lookup
                 ]
-                if not member_rows:
-                    continue
-
-                logger.info(
-                    f"[Community] Summarizing L{community_level} cluster "
-                    f"{cluster_index + 1}/{len(clusters)} ({len(member_rows)} members)"
-                )
+                name: str | None = None
+                summary: str | None = None
                 try:
-                    if community_level == 2:
-                        # L2: summarize directly from member node descriptions
-                        name, summary = self._build_community_summary(member_rows, community_level)
+                    if not rollup_rows:
+                        name, summary = self._build_community_summary(
+                            member_rows, community_level
+                        )
                     else:
-                        # L1/L0: roll up from child community summaries
-                        child_community_ids = {
-                            level_assignments[nid].get(child_level)
-                            for nid in member_node_ids
-                            if nid in level_assignments and level_assignments[nid].get(child_level)
-                        }
-                        child_rows = [
-                            {"name": community_names.get(cid, cid), "summary": community_summaries[cid]}
-                            for cid in child_community_ids
-                            if cid in community_summaries
-                        ]
-                        if child_rows:
-                            logger.info(
-                                f"[Community] L{community_level} cluster {cluster_index + 1}: "
-                                f"rolling up from {len(child_rows)} child L{child_level} summaries"
-                            )
-                            name, summary = self._build_rollup_summary(child_rows, community_level)
-                        else:
-                            # Fallback: no child summaries available (e.g. first run edge case)
-                            logger.warning(
-                                f"[Community] L{community_level} cluster {cluster_index + 1}: "
-                                "no child summaries found — falling back to member node descriptions"
-                            )
-                            name, summary = self._build_community_summary(member_rows, community_level)
+                        name, summary = self._build_rollup_summary(
+                            rollup_rows, community_level
+                        )
                 except Exception as _summ_err:
                     logger.warning(
-                        f"[Community] Skipping L{community_level} cluster "
-                        f"{cluster_index + 1} — summary failed: {_summ_err}"
+                        f"[Community] Summary failed for {cluster_label}: {_summ_err}"
                     )
-                    name, summary = None, None
+                    return None
+
+                # Reject generic names and retry up to 2 times.
+                for retry_idx in range(2):
+                    if name and not self._is_generic_community_name(name):
+                        break
+                    if _tracker.cancel_recompute.is_set():
+                        return None
+                    logger.warning(
+                        f"[Community] {cluster_label}: rejecting generic name "
+                        f"'{name or '(empty)'}' (retry {retry_idx + 1}/2)"
+                    )
+                    try:
+                        if rollup_rows:
+                            rn, rs = self._build_rollup_summary(
+                                rollup_rows, community_level, strict_naming=True
+                            )
+                        else:
+                            rn, rs = self._build_community_summary(
+                                member_rows, community_level, strict_naming=True
+                            )
+                        if rn:
+                            name = rn
+                        if rs:
+                            summary = rs
+                    except Exception as _retry_err:
+                        logger.warning(
+                            f"[Community] {cluster_label}: name retry failed: {_retry_err}"
+                        )
 
                 if not name:
-                    name = f"Community L{community_level}-{cluster_index + 1}"
+                    name = self._derive_fallback_community_name(member_rows)
+                elif self._is_generic_community_name(name):
+                    logger.warning(
+                        f"[Community] {cluster_label}: using fallback name after generic output '{name}'"
+                    )
+                    name = self._derive_fallback_community_name(member_rows)
                 if not summary:
-                    summary = f"Community at level {community_level} containing {len(member_node_ids)} related nodes."
+                    summary = (
+                        f"Community at level {community_level} containing "
+                        f"{len(member_entity_ids)} related nodes."
+                    )
 
-                themes = [row.get("name") for row in member_rows[:5] if row.get("name")]
-                # Communities only get a description per plan — no potential_questions.
                 community_id = f"community_l{community_level}_{uuid.uuid4().hex}"
-                updated_at = datetime.utcnow().isoformat()
 
                 graph_service.create_leiden_community(
                     community_id=community_id,
                     community_level=community_level,
                     name=name,
                     summary=summary,
-                    member_node_ids=member_node_ids,
+                    member_node_ids=member_entity_ids,
                 )
                 logger.debug(
-                    f"  [Community] Neo4j community node created: '{name}' id={community_id}"
+                    f"  [Community] Kuzu community node created: '{name}' id={community_id}"
                 )
 
-                elasticsearch_service.index_node(
+                typesense_service.index_node(
                     node_id=community_id,
                     name=name,
                     node_type="community",
-                    description=summary,
                     community_level=community_level,
                 )
-                logger.debug(
-                    f"  [Community] ES indexed community: '{name}'"
-                )
 
-                # Write community membership NL sentences to Qdrant node_relationships
-                # flagged is_community_rel=True so they are bulk-deleted on next recompute.
+                # Write membership NL sentences to Qdrant (flagged is_community_rel=True).
                 try:
                     _nl_texts = [
                         f"{node_lookup.get(nid, {}).get('name') or nid} is a member of the '{name}' community."
-                        for nid in member_node_ids
+                        for nid in member_entity_ids
                         if nid in node_lookup
                     ]
-                    _nl_vectors = embedding_service.embed_documents(_nl_texts) if _nl_texts else []
-                    _nl_written = 0
+                    _nl_vectors = (
+                        embedding_service.embed_documents(_nl_texts)
+                        if _nl_texts
+                        else []
+                    )
+                    _valid_nids = [
+                        nid for nid in member_entity_ids if nid in node_lookup
+                    ]
                     for nid, nl_text, nl_vec in zip(
-                        [n for n in member_node_ids if n in node_lookup],
-                        _nl_texts,
-                        _nl_vectors,
+                        _valid_nids, _nl_texts, _nl_vectors
                     ):
                         qdrant_service.upsert_node_relationship(
                             relationship_id=f"community_rel_{community_id}_{nid}",
@@ -1362,76 +1421,267 @@ class IngestionWorkflow:
                             target_node_id=community_id,
                             is_community_rel=True,
                         )
-                        _nl_written += 1
                     logger.debug(
-                        f"  [Community] Qdrant membership NL sentences written: {_nl_written} "
+                        f"  [Community] Qdrant NL sentences written: {len(_nl_texts)} "
                         f"for community '{name}'"
                     )
                 except Exception as _rel_err:
-                    logger.warning(f"[Community] Membership NL write failed for {community_id}: {_rel_err}")
+                    logger.warning(
+                        f"[Community] Membership NL write failed for {community_id}: {_rel_err}"
+                    )
 
                 logger.info(
                     f"  [Community] ✓ Created L{community_level} community '{name}' "
-                    f"(id={community_id}, {len(member_node_ids)} members)"
+                    f"(id={community_id}, {len(member_entity_ids)} members)"
                 )
                 graph_service.set_node_community_membership(
-                    member_node_ids, community_id, community_level
+                    member_entity_ids, community_id, community_level
                 )
-                for node_id in member_node_ids:
-                    level_assignments.setdefault(node_id, {})[community_level] = community_id
-
-                # Record summary + name so higher-level passes can roll up from them
+                for nid in member_entity_ids:
+                    level_assignments.setdefault(nid, {})[
+                        community_level
+                    ] = community_id
                 community_summaries[community_id] = summary
                 community_names[community_id] = name
-
+                community_entity_members[community_id] = list(member_entity_ids)
                 created += 1
+                return community_id
 
-        from app.services.embedding import embedding_service
-
-        # Refresh ES relationship_natural_language for nodes whose membership changed.
-        # Community fields are no longer stored on regular nodes — only the NL sentence
-        # written above carries that signal for retrieval.
-        for node_id in level_assignments:
-            payload = graph_service.get_node_storage_payload(node_id)
-            if not payload:
-                continue
-            description = payload.get("description") or ""
-            if not description:
-                continue
-            relationship_nl = payload.get("relationship_natural_language") or []
-            elasticsearch_service.update_node_community(
-                node_id=node_id,
-                description=description,
-                relationship_natural_language=" ".join(
-                    sentence for sentence in relationship_nl if sentence
-                ),
-            )
-
-        # ── Compute & store 3D positions for the new layout ──────────────────
-        try:
-            from app.utils.graph_layout import compute_spring_layout_3d
-
-            # After Leiden has created communities, rerun spring layout so
-            # community nodes are pulled into the correct positions by their members.
-            spring_node_ids, spring_edges = graph_service.get_all_node_ids_and_edges()
-            positions = compute_spring_layout_3d(spring_node_ids, spring_edges)
-            graph_service.store_node_positions(positions)
+            # ─── Level 2: embedding cluster on raw entity nodes ────────────────────
+            l2_entity_texts: list[str] = []
+            for _nid in node_ids:
+                _n = node_lookup[_nid]
+                _ctxs = " | ".join(_n.get("isolated_contexts") or [])
+                l2_entity_texts.append(
+                    f"{_n.get('name') or _nid}: {_ctxs}"
+                    if _ctxs
+                    else (_n.get("name") or _nid)
+                )
             logger.info(
-                f"[Community] Spring layout recomputed after Leiden: "
-                f"{len(positions)} nodes, {len(spring_edges)} edges"
+                f"[Community] Embedding {len(node_ids)} entities for L2 similarity clustering"
             )
-        except Exception as _layout_err:
-            logger.warning(f"[Community] 3D layout computation failed (non-fatal): {_layout_err}")
+            l2_clusters = _embedding_cluster(
+                node_ids, l2_entity_texts, distance_threshold=0.25
+            )
+            logger.info(
+                f"[Community] L2 embedding clusters: {len(l2_clusters)} clusters | "
+                f"sizes: min={min(len(c) for c in l2_clusters)}, "
+                f"max={max(len(c) for c in l2_clusters)}, "
+                f"avg={sum(len(c) for c in l2_clusters) / len(l2_clusters):.1f}"
+            )
 
-        logger.info(
-            f"\n{'='*70}\n"
-            f"[Community] Leiden recompute COMPLETE: {created} community nodes rebuilt\n"
-            f"  Nodes in graph: {len(node_ids)}\n"
-            f"  Edges in graph: {len(edge_list)}\n"
-            f"  Levels: {[f'L{level}' for level, _ in resolutions]}\n"
-            f"{'='*70}"
-        )
-        return created
+            entity_to_l2: dict[str, str] = {}  # entity_node_id → L2 community_id
+            l2_community_ids: list[str] = []
+            for cluster_index, member_node_ids in enumerate(l2_clusters):
+                if _tracker.cancel_recompute.is_set():
+                    logger.info(
+                        f"[Community] Recompute cancelled at L2 cluster "
+                        f"{cluster_index + 1}/{len(l2_clusters)} — "
+                        "ingestion/newer run arrived; will restart after next idle window."
+                    )
+                    return created
+                logger.info(
+                    f"[Community] Summarising L2 cluster {cluster_index + 1}/{len(l2_clusters)} "
+                    f"({len(member_node_ids)} members)"
+                )
+                cid = _commit_community(
+                    2,
+                    member_node_ids,
+                    [],
+                    f"L2 cluster {cluster_index + 1}/{len(l2_clusters)}",
+                )
+                if cid:
+                    l2_community_ids.append(cid)
+                    for nid in member_node_ids:
+                        entity_to_l2[nid] = cid
+
+            l2_orphan_ids = [nid for nid in node_ids if nid not in entity_to_l2]
+            logger.info(
+                f"[Community] L2 complete: {len(l2_community_ids)} communities, "
+                f"{len(l2_orphan_ids)} orphan entity nodes"
+            )
+
+            # ─── Level 1: embedding cluster on L2 communities only ─────────────
+            # Orphan entities (not in any L2 community) are excluded — they weren't
+            # clusterable at L2 and would only bloat higher levels.
+            l1_super_ids = l2_community_ids
+            l1_super_texts: list[str] = [
+                (
+                    f"{community_names.get(_sid, _sid)}: {community_summaries[_sid]}"
+                    if _sid in community_summaries
+                    else _sid
+                )
+                for _sid in l1_super_ids
+            ]
+            logger.info(
+                f"[Community] Embedding {len(l1_super_ids)} L2 communities for L1 similarity clustering"
+            )
+            l1_clusters = _embedding_cluster(l1_super_ids, l1_super_texts)
+            logger.info(
+                f"[Community] L1 embedding clusters: {len(l1_clusters)} clusters"
+            )
+
+            entity_to_l1: dict[str, str] = {}
+            l1_community_ids: list[str] = []
+            for cluster_index, super_cluster in enumerate(l1_clusters):
+                if _tracker.cancel_recompute.is_set():
+                    logger.info(
+                        f"[Community] Recompute cancelled at L1 cluster "
+                        f"{cluster_index + 1}/{len(l1_clusters)} — "
+                        "ingestion/newer run arrived; will restart after next idle window."
+                    )
+                    return created
+
+                # Resolve super-nodes → entity IDs and build rollup inputs.
+                l1_member_entity_ids: list[str] = []
+                l1_rollup_rows: list[dict] = []
+                for super_id in super_cluster:
+                    if super_id in community_entity_members:
+                        # L2 community: expand to its entity members.
+                        l1_member_entity_ids.extend(community_entity_members[super_id])
+                        if super_id in community_summaries:
+                            l1_rollup_rows.append(
+                                {
+                                    "name": community_names[super_id],
+                                    "summary": community_summaries[super_id],
+                                }
+                            )
+
+                logger.info(
+                    f"[Community] Summarising L1 cluster {cluster_index + 1}/{len(l1_clusters)} "
+                    f"({len(l1_member_entity_ids)} entity members from {len(super_cluster)} super-nodes)"
+                )
+                cid = _commit_community(
+                    1,
+                    l1_member_entity_ids,
+                    l1_rollup_rows,
+                    f"L1 cluster {cluster_index + 1}/{len(l1_clusters)}",
+                )
+                if cid:
+                    l1_community_ids.append(cid)
+                    for nid in l1_member_entity_ids:
+                        entity_to_l1[nid] = cid
+
+            logger.info(f"[Community] L1 complete: {len(l1_community_ids)} communities")
+
+            # ─── Level 0: embedding cluster on L1 communities only ─────────────────
+            # Only L1 communities feed L0 — unabsorbed L2s and orphan entities are
+            # excluded to keep the hierarchy a true compression at each level.
+            l0_super_ids = l1_community_ids
+            l0_super_texts: list[str] = [
+                (
+                    f"{community_names.get(_sid, _sid)}: {community_summaries[_sid]}"
+                    if _sid in community_summaries
+                    else _sid
+                )
+                for _sid in l0_super_ids
+            ]
+            logger.info(
+                f"[Community] Embedding {len(l0_super_ids)} L1 communities for L0 similarity clustering"
+            )
+            l0_clusters = _embedding_cluster(
+                l0_super_ids, l0_super_texts, distance_threshold=0.75
+            )
+            logger.info(
+                f"[Community] L0 embedding clusters: {len(l0_clusters)} clusters"
+            )
+
+            for cluster_index, super_cluster in enumerate(l0_clusters):
+                if _tracker.cancel_recompute.is_set():
+                    logger.info(
+                        f"[Community] Recompute cancelled at L0 cluster "
+                        f"{cluster_index + 1}/{len(l0_clusters)} — "
+                        "ingestion/newer run arrived; will restart after next idle window."
+                    )
+                    return created
+
+                l0_member_entity_ids: list[str] = []
+                l0_rollup_rows: list[dict] = []
+                for super_id in super_cluster:
+                    if super_id in community_entity_members:
+                        # L1 community: expand to its entity members.
+                        l0_member_entity_ids.extend(community_entity_members[super_id])
+                        if super_id in community_summaries:
+                            l0_rollup_rows.append(
+                                {
+                                    "name": community_names[super_id],
+                                    "summary": community_summaries[super_id],
+                                }
+                            )
+                    elif super_id in node_lookup:
+                        # Orphan entity node: contribute directly.
+                        l0_member_entity_ids.append(super_id)
+                        _n = node_lookup[super_id]
+                        l0_rollup_rows.append(
+                            {
+                                "name": _n.get("name") or super_id,
+                                "summary": (
+                                    f"A {_n.get('type', 'node')} named {_n.get('name') or super_id}."
+                                ),
+                            }
+                        )
+
+                logger.info(
+                    f"[Community] Summarising L0 cluster {cluster_index + 1}/{len(l0_clusters)} "
+                    f"({len(l0_member_entity_ids)} entity members from {len(super_cluster)} super-nodes)"
+                )
+                _commit_community(
+                    0,
+                    l0_member_entity_ids,
+                    l0_rollup_rows,
+                    f"L0 cluster {cluster_index + 1}/{len(l0_clusters)}",
+                )
+
+            # Refresh ES relationship_natural_language for nodes whose membership changed.
+            # Community fields are no longer stored on regular nodes — only the NL sentence
+            # written above carries that signal for retrieval.
+            for node_id in level_assignments:
+                payload = graph_service.get_node_storage_payload(node_id)
+                if not payload:
+                    continue
+                relationship_nl = payload.get("relationship_natural_language") or []
+                typesense_service.update_node_community(
+                    node_id=node_id,
+                    relationship_natural_language=" ".join(
+                        sentence for sentence in relationship_nl if sentence
+                    ),
+                    name=payload.get("name") or "",
+                )
+
+            # ── Compute & store 3D positions for the new layout ──────────────────
+            try:
+                from app.utils.graph_layout import compute_spring_layout_3d
+
+                # After Leiden has created communities, rerun spring layout so
+                # community nodes are pulled into the correct positions by their members.
+                spring_node_ids, spring_edges = (
+                    graph_service.get_all_node_ids_and_edges()
+                )
+                positions = compute_spring_layout_3d(spring_node_ids, spring_edges)
+                graph_service.store_node_positions(positions)
+                logger.info(
+                    f"[Community] Spring layout recomputed after Leiden: "
+                    f"{len(positions)} nodes, {len(spring_edges)} edges"
+                )
+            except Exception as _layout_err:
+                logger.warning(
+                    f"[Community] 3D layout computation failed (non-fatal): {_layout_err}"
+                )
+
+            logger.info(
+                f"\n{'='*70}\n"
+                f"[Community] Embedding recompute COMPLETE: {created} community nodes rebuilt\n"
+                f"  Entities: {len(node_ids)}\n"
+                f"  Levels: L2 → L1 → L0 (embedding similarity hierarchy)\n"
+                f"{'='*70}"
+            )
+            return created
+        finally:
+            # Always release single-flight ownership so a newer queued request can proceed.
+            with _community_run_state_lock:
+                if _community_run_active_seq == requested_seq:
+                    _community_run_running = False
+                    _community_run_active_seq = 0
 
 
 ingestion_workflow = IngestionWorkflow()

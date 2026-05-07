@@ -117,7 +117,7 @@ Query Input
 - ❌ Removed: Per-sub-query LLM instruction generation
 - ✅ Pipeline: `retrieve_with_self_correction` agentic loop (same as `gemma3:4b` looping run)
 - ✅ Graph: Same 990-note Looping Approach ingestion graph used in the Gemma looping run
-- ⚠️ Each agentic loop hop now calls Gemini API — compounding API latency across hops
+- Each agentic loop hop now calls Gemini API — compounding API latency across hops
 
 ---
 
@@ -208,7 +208,7 @@ Response Time Distribution:
 
 | Time | Question (truncated) |
 |---|---|
-| **1800.0s** ⚠️ | "What is the middle name of the actress who plays Bobbi Bacha in..." |
+| **1800.0s** | "What is the middle name of the actress who plays Bobbi Bacha in..." |
 | 416.8s | "This singer of A Rather Blustery Day also voiced what hedgehog?" |
 | 324.5s | "What is the name of the executive producer of the film that has a score..." |
 | 264.5s | "Which dog's ancestors include Gordon and Irish Setters: the Manchester..." |

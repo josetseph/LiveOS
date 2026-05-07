@@ -10,12 +10,12 @@ from app.core.log import get_logger
 logger = get_logger("IngestionTracker")
 
 # Trigger Leiden recompute this many seconds after ALL ingestions have completed.
-COMMUNITY_IDLE_SECONDS = 300  # 5 minutes
+COMMUNITY_IDLE_SECONDS = 120 # 2 minutes
 
 
 class IngestionTrackerService:
     """
-    Tracks ingestions and triggers a full Leiden recompute 2 minutes after the last ingestion.
+    Tracks ingestions and triggers a full Leiden recompute 5 minutes after the last ingestion.
     If a new ingestion arrives while community detection is in progress, the running recompute
     is signalled to stop early so the system prioritises ingestion throughput.
     """
@@ -42,6 +42,10 @@ class IngestionTrackerService:
             f"[IngestionTracker] Ingestion completed at {self.last_ingestion_time}"
         )
 
+    def has_active_ingestions(self) -> bool:
+        """Thread-safe enough read helper for worker threads."""
+        return self._active_ingestion_count > 0
+
     async def begin_ingestion(self) -> None:
         """
         Call at the START of every ingestion pipeline.
@@ -54,9 +58,21 @@ class IngestionTrackerService:
             if self._debounce_task and not self._debounce_task.done():
                 self._debounce_task.cancel()
                 self._debounce_task = None
+
+            # Immediate preemption signal: request cancellation as soon as ingestion starts
+            # so any in-flight recompute path can stop cooperatively.
+            self.cancel_recompute.set()
+
+            # Keep a specific info log when tracker-known recompute is running.
+            recompute_running = self._community_recompute_running
         logger.info(
             f"[IngestionTracker] Ingestion started — active: {active}, community timer cancelled"
         )
+        if recompute_running:
+            logger.info(
+                "[IngestionTracker] Ingestion started while recompute is running — "
+                "signalling immediate cancellation."
+            )
 
     async def end_ingestion(self, callback: Callable) -> None:
         """
@@ -67,9 +83,7 @@ class IngestionTrackerService:
         async with self._lock:
             self._active_ingestion_count = max(0, self._active_ingestion_count - 1)
             active = self._active_ingestion_count
-        logger.info(
-            f"[IngestionTracker] Ingestion ended — active: {active}"
-        )
+        logger.info(f"[IngestionTracker] Ingestion ended — active: {active}")
         if active == 0 and not self._community_recompute_running:
             logger.info(
                 f"[IngestionTracker] All ingestions complete — starting "
@@ -116,12 +130,12 @@ class IngestionTrackerService:
                 f"({COMMUNITY_IDLE_SECONDS}s idle trigger)"
             )
         try:
-            loop = asyncio.get_event_loop()
-            self._debounce_task = loop.create_task(
-                self._debounce_recompute(callback)
-            )
+            loop = asyncio.get_running_loop()
+            self._debounce_task = loop.create_task(self._debounce_recompute(callback))
         except RuntimeError:
-            logger.warning("[IngestionTracker] No running event loop; recompute timer not started.")
+            logger.warning(
+                "[IngestionTracker] No running event loop; recompute timer not started."
+            )
 
     async def _debounce_recompute(self, callback: Callable) -> None:
         try:
@@ -156,7 +170,9 @@ class IngestionTrackerService:
         try:
             await asyncio.to_thread(callback)
         except Exception as e:
-            logger.error(f"[IngestionTracker] Leiden recompute failed: {e}", exc_info=True)
+            logger.error(
+                f"[IngestionTracker] Leiden recompute failed: {e}", exc_info=True
+            )
         else:
             cancelled_early = self.cancel_recompute.is_set()
         finally:
@@ -167,7 +183,7 @@ class IngestionTrackerService:
             # trigger doesn't skip the "no pending nodes" gate.
             async with self._lock:
                 self._recompute_needed = True
-                should_reschedule = (self._active_ingestion_count == 0)
+                should_reschedule = self._active_ingestion_count == 0
             if should_reschedule:
                 logger.info(
                     f"[IngestionTracker] Recompute exited early; no active ingestions — "

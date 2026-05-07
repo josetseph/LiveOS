@@ -8,8 +8,9 @@ Respects global LOG_LEVEL from settings.
 
 import logging
 import sys
-from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
 from app.core.config import settings
 
 # Create logs directory
@@ -31,7 +32,6 @@ COMPONENT_LOG_FILES = {
     "RetrievalService": "retrieval.log",
     "GraphService": "graph.log",
     "LLMService": "llm.log",
-    "SimilarityScript": "similarity_detection.log",
     "uvicorn.access": "api.log",
     "uvicorn.error": "api.log",
     "MultimediaService": "multimedia.log",
@@ -40,12 +40,11 @@ COMPONENT_LOG_FILES = {
     "DatabaseService": "database.log",
     "ResetIndex": "system.log",
     "InitDB": "system.log",
-    "Neo4jVerification": "tests.log",
     "RelationshipTest": "tests.log",
     "SummaryVerification": "tests.log",
     # Storage / search infrastructure
     "QdrantService": "qdrant.log",
-    "ElasticsearchService": "elasticsearch.log",
+    "TypesenseService": "typesense.log",
     # Retrieval sub-services
     "RerankerService": "reranker.log",
     "TavilyService": "retrieval.log",
@@ -122,12 +121,11 @@ def setup_logging():
         )  # Ensure errors also go to errors.log via this logger
 
     # Third-party noise reduction
-    calm_loggers = ["httpx", "httpcore", "neo4j", "asyncio", "urllib3", "multipart"]
+    calm_loggers = ["httpx", "httpcore", "asyncio", "urllib3", "multipart"]
     for name in calm_loggers:
         logging.getLogger(name).setLevel(logging.WARNING)
 
     logging.info(f"Logging initialized at level {log_level_str} | Logs dir: {LOGS_DIR}")
-    print(f"✅ Logging initialized at level {log_level_str}")
 
 
 def get_logger(name: str) -> logging.Logger:

@@ -1,7 +1,23 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
-import { Send, User, Loader2, Sparkles, Database, Network, Cpu, X, FileText, ExternalLink, Trash2, ThumbsUp, ThumbsDown } from "lucide-react";
+import {
+  Send,
+  User,
+  Loader2,
+  Sparkles,
+  Database,
+  Network,
+  Cpu,
+  X,
+  FileText,
+  ExternalLink,
+  Trash2,
+  ThumbsUp,
+  ThumbsDown,
+  Search,
+  Layers,
+} from "lucide-react";
 import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
@@ -37,7 +53,9 @@ export default function ChatPage() {
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [greeting, setGreeting] = useState("Hello!");
-  const [feedbackGiven, setFeedbackGiven] = useState<Record<string, "up" | "down">>({});
+  const [feedbackGiven, setFeedbackGiven] = useState<
+    Record<string, "up" | "down">
+  >({});
 
   useEffect(() => {
     const hour = new Date().getHours();
@@ -60,7 +78,9 @@ export default function ChatPage() {
     if (savedMessages) {
       try {
         const parsed = JSON.parse(savedMessages);
-        setMessages(parsed.map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) })));
+        setMessages(
+          parsed.map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) })),
+        );
       } catch (error) {
         console.error("Error loading chat messages:", error);
       }
@@ -114,9 +134,9 @@ export default function ChatPage() {
 
   const handleNoteReference = async (noteId: string) => {
     try {
-      console.log('Fetching note with ID:', noteId);
+      console.log("Fetching note with ID:", noteId);
       const fullNote = await api.getNote(noteId);
-      console.log('Note fetched:', fullNote);
+      console.log("Note fetched:", fullNote);
       setPreviewNote({
         id: fullNote.id,
         title: fullNote.title || "Untitled",
@@ -130,7 +150,7 @@ export default function ChatPage() {
   const handleFileClick = (url: string, filename: string) => {
     const lowerUrl = url.toLowerCase();
     let type: FilePreview["type"] = "other";
-    
+
     if (lowerUrl.match(/\.(jpg|jpeg|png|webp|gif)$/)) {
       type = "image";
     } else if (lowerUrl.endsWith(".pdf")) {
@@ -138,7 +158,7 @@ export default function ChatPage() {
     } else if (lowerUrl.match(/\.(webm|m4a|mp3|wav|ogg|mp4)$/)) {
       type = "audio";
     }
-    
+
     setFilePreview({ url, filename, type });
   };
 
@@ -149,9 +169,15 @@ export default function ChatPage() {
     }
   };
 
-  const handleFeedback = async (assistantMessage: Message, rating: "up" | "down") => {
+  const handleFeedback = async (
+    assistantMessage: Message,
+    rating: "up" | "down",
+  ) => {
     const msgIndex = messages.findIndex((m) => m.id === assistantMessage.id);
-    const userMsg = messages.slice(0, msgIndex).reverse().find((m) => m.role === "user");
+    const userMsg = messages
+      .slice(0, msgIndex)
+      .reverse()
+      .find((m) => m.role === "user");
     if (!userMsg) return;
 
     setFeedbackGiven((prev) => ({ ...prev, [assistantMessage.id]: rating }));
@@ -186,7 +212,13 @@ export default function ChatPage() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-linear-to-br from-purple-500 to-pink-500">
-                <Image src="/logo-black-background.png" alt="LiveOS" width={96} height={96} className="h-24 w-24 object-contain" />
+                <Image
+                  src="/logo-black-background.png"
+                  alt="LiveOS"
+                  width={96}
+                  height={96}
+                  className="h-24 w-24 object-contain"
+                />
               </div>
               <div>
                 <h1 className="text-xl font-bold text-white">LiveOS</h1>
@@ -209,7 +241,15 @@ export default function ChatPage() {
               </div>
               <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
                 <Network className="h-3 w-3 text-blue-400" />
-                <span className="text-xs text-white/70">Neo4j</span>
+                <span className="text-xs text-white/70">Kuzu</span>
+              </div>
+              <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
+                <Layers className="h-3 w-3 text-cyan-400" />
+                <span className="text-xs text-white/70">Qdrant</span>
+              </div>
+              <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
+                <Search className="h-3 w-3 text-yellow-400" />
+                <span className="text-xs text-white/70">Typesense</span>
               </div>
               <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
                 <Cpu className="h-3 w-3 text-orange-400" />
@@ -257,7 +297,7 @@ export default function ChatPage() {
                     exit={{ opacity: 0 }}
                     className={cn(
                       "flex gap-4",
-                      message.role === "user" ? "justify-end" : "justify-start"
+                      message.role === "user" ? "justify-end" : "justify-start",
                     )}
                   >
                     {message.role === "assistant" && (
@@ -270,46 +310,73 @@ export default function ChatPage() {
                         "max-w-[80%] rounded-2xl px-4 py-3",
                         message.role === "user"
                           ? "bg-linear-to-br from-purple-500 to-pink-500 text-white"
-                          : "border border-white/10 bg-white/5 text-white backdrop-blur-xl"
+                          : "border border-white/10 bg-white/5 text-white backdrop-blur-xl",
                       )}
                     >
                       {message.role === "assistant" ? (
                         <>
                           {(() => {
                             // Check if message contains References section (### References or References:)
-                            const refMatch = message.content.match(/###?\s*References[:\s]*\n([\s\S]+?)$/i);
+                            const refMatch = message.content.match(
+                              /###?\s*References[:\s]*\n([\s\S]+?)$/i,
+                            );
                             if (refMatch) {
-                              const beforeRefs = message.content.substring(0, refMatch.index);
+                              const beforeRefs = message.content.substring(
+                                0,
+                                refMatch.index,
+                              );
                               const refsList = refMatch[1];
                               const titles = refsList
-                                .split('\n')
-                                .map(t => t.trim())
-                                .filter(t => t && !t.match(/^[\*\s]*$/));
-                              
+                                .split("\n")
+                                .map((t) => t.trim())
+                                .filter((t) => t && !t.match(/^[\*\s]*$/));
+
                               return (
                                 <>
                                   <div className="prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:my-2 prose-p:leading-relaxed prose-p:text-white/90 prose-strong:text-white prose-em:text-white/90 prose-a:text-purple-400 prose-code:text-pink-400 prose-ul:text-white/90 prose-ol:text-white/90 prose-li:text-white/90">
-                                    <ReactMarkdown 
+                                    <ReactMarkdown
                                       remarkPlugins={[remarkGfm]}
                                       components={{
-                                        a: ({ node, children, href, ...props }) => {
-                                          const text = children?.toString() || "";
-                                          
+                                        a: ({
+                                          node,
+                                          children,
+                                          href,
+                                          ...props
+                                        }) => {
+                                          const text =
+                                            children?.toString() || "";
+
                                           // Check if this is a file link
-                                          if (href && (text.startsWith("📎") || text.startsWith("🎤"))) {
-                                            const filename = text.replace(/^[📎🎤]\s*/, "");
+                                          if (
+                                            href &&
+                                            (text.startsWith("📎") ||
+                                              text.startsWith("🎤"))
+                                          ) {
+                                            const filename = text.replace(
+                                              /^[📎🎤]\s*/,
+                                              "",
+                                            );
                                             return (
                                               <button
-                                                onClick={() => handleFileClick(href, filename)}
+                                                onClick={() =>
+                                                  handleFileClick(
+                                                    href,
+                                                    filename,
+                                                  )
+                                                }
                                                 className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
                                               >
                                                 {text}
                                               </button>
                                             );
                                           }
-                                          
+
                                           // Regular links
-                                          return <a href={href} {...props}>{children}</a>;
+                                          return (
+                                            <a href={href} {...props}>
+                                              {children}
+                                            </a>
+                                          );
                                         },
                                       }}
                                     >
@@ -317,21 +384,30 @@ export default function ChatPage() {
                                     </ReactMarkdown>
                                   </div>
                                   <div className="mt-4 pt-3 border-t border-white/10">
-                                    <p className="text-sm font-semibold text-white/60 mb-2">References:</p>
+                                    <p className="text-sm font-semibold text-white/60 mb-2">
+                                      References:
+                                    </p>
                                     <div className="flex flex-wrap gap-2">
                                       {titles.map((title, i) => {
                                         // Extract note ID from markdown link format: - [Title](/notes/id)
-                                        const linkMatch = title.match(/\[([^\]]+)\]\(\/notes\/([^)]+)\)/);
+                                        const linkMatch = title.match(
+                                          /\[([^\]]+)\]\(\/notes\/([^)]+)\)/,
+                                        );
                                         if (!linkMatch) return null;
-                                        
+
                                         const noteTitle = linkMatch[1];
                                         const noteId = linkMatch[2];
-                                        
+
                                         return (
                                           <button
                                             key={i}
                                             onClick={() => {
-                                              console.log('Clicked note:', noteTitle, 'ID:', noteId);
+                                              console.log(
+                                                "Clicked note:",
+                                                noteTitle,
+                                                "ID:",
+                                                noteId,
+                                              );
                                               handleNoteReference(noteId);
                                             }}
                                             className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
@@ -346,31 +422,44 @@ export default function ChatPage() {
                                 </>
                               );
                             }
-                            
+
                             // No references, just render markdown normally
                             return (
                               <div className="prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:my-2 prose-p:leading-relaxed prose-p:text-white/90 prose-strong:text-white prose-em:text-white/90 prose-a:text-purple-400 prose-code:text-pink-400 prose-ul:text-white/90 prose-ol:text-white/90 prose-li:text-white/90">
-                                <ReactMarkdown 
+                                <ReactMarkdown
                                   remarkPlugins={[remarkGfm]}
                                   components={{
                                     a: ({ node, children, href, ...props }) => {
                                       const text = children?.toString() || "";
-                                      
+
                                       // Check if this is a file link
-                                      if (href && (text.startsWith("📎") || text.startsWith("🎤"))) {
-                                        const filename = text.replace(/^[📎🎤]\s*/, "");
+                                      if (
+                                        href &&
+                                        (text.startsWith("📎") ||
+                                          text.startsWith("🎤"))
+                                      ) {
+                                        const filename = text.replace(
+                                          /^[📎🎤]\s*/,
+                                          "",
+                                        );
                                         return (
                                           <button
-                                            onClick={() => handleFileClick(href, filename)}
+                                            onClick={() =>
+                                              handleFileClick(href, filename)
+                                            }
                                             className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
                                           >
                                             {text}
                                           </button>
                                         );
                                       }
-                                      
+
                                       // Regular links
-                                      return <a href={href} {...props}>{children}</a>;
+                                      return (
+                                        <a href={href} {...props}>
+                                          {children}
+                                        </a>
+                                      );
                                     },
                                   }}
                                 >
@@ -387,11 +476,15 @@ export default function ChatPage() {
                         <div className="mt-3 flex items-center gap-2 border-t border-white/10 pt-2">
                           {feedbackGiven[message.id] ? (
                             <span className="text-xs text-white/40">
-                              {feedbackGiven[message.id] === "up" ? "👍 Thanks!" : "👎 Noted"}
+                              {feedbackGiven[message.id] === "up"
+                                ? "👍 Thanks!"
+                                : "👎 Noted"}
                             </span>
                           ) : (
                             <>
-                              <span className="text-xs text-white/40">Helpful?</span>
+                              <span className="text-xs text-white/40">
+                                Helpful?
+                              </span>
                               <button
                                 onClick={() => handleFeedback(message, "up")}
                                 className="flex h-6 w-6 items-center justify-center rounded-md text-white/40 transition-all hover:bg-white/10 hover:text-green-400"
@@ -469,7 +562,7 @@ export default function ChatPage() {
             <span>•</span>
             <span className="font-medium text-pink-400">Qwen3 Embedding</span>
             <span>•</span>
-            <span className="font-medium text-emerald-400">Paddle OCR</span>
+            <span className="font-medium text-emerald-400">Qwen3 Reranker</span>
             <span>•</span>
             <span className="font-medium text-teal-400">Florence 2</span>
             <span>•</span>
@@ -500,7 +593,9 @@ export default function ChatPage() {
                   <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-linear-to-br from-purple-500 to-pink-500">
                     <FileText className="h-5 w-5 text-white" />
                   </div>
-                  <h2 className="text-xl font-bold text-white">{previewNote.title}</h2>
+                  <h2 className="text-xl font-bold text-white">
+                    {previewNote.title}
+                  </h2>
                 </div>
                 <button
                   onClick={() => setPreviewNote(null)}
@@ -513,12 +608,15 @@ export default function ChatPage() {
               </div>
               <div className="max-h-[calc(80vh-80px)] overflow-y-auto p-6">
                 <div className="prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-4xl prose-h1:mt-6 prose-h1:mb-4 prose-h2:text-3xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-2xl prose-h3:mt-4 prose-h3:mb-3 prose-h4:text-xl prose-h4:mt-3 prose-h4:mb-2 prose-p:leading-relaxed prose-p:text-white/90 prose-p:my-3 prose-strong:text-white prose-strong:font-bold prose-em:text-white/90 prose-em:italic prose-a:text-purple-400 prose-a:underline hover:prose-a:text-purple-300 prose-code:text-pink-400 prose-code:bg-white/10 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:before:content-[''] prose-code:after:content-[''] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-l-4 prose-blockquote:border-purple-500/50 prose-blockquote:text-white/80 prose-blockquote:pl-4 prose-blockquote:italic prose-ul:text-white/90 prose-ul:my-3 prose-ol:text-white/90 prose-ol:my-3 prose-li:text-white/90 prose-li:my-1">
-                  <ReactMarkdown 
+                  <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     components={{
                       a: ({ node, children, href, ...props }) => {
                         const text = children?.toString() || "";
-                        if (href && (text.startsWith("📎") || text.startsWith("🎤"))) {
+                        if (
+                          href &&
+                          (text.startsWith("📎") || text.startsWith("🎤"))
+                        ) {
                           const filename = text.replace(/^[📎🎤]\s*/, "");
                           return (
                             <button
@@ -529,25 +627,53 @@ export default function ChatPage() {
                             </button>
                           );
                         }
-                        return <a href={href} {...props}>{children}</a>;
+                        return (
+                          <a href={href} {...props}>
+                            {children}
+                          </a>
+                        );
                       },
                       h1: ({ node, children, ...props }) => (
-                        <h1 className="text-4xl font-bold text-white mt-6 mb-4" {...props}>{children}</h1>
+                        <h1
+                          className="text-4xl font-bold text-white mt-6 mb-4"
+                          {...props}
+                        >
+                          {children}
+                        </h1>
                       ),
                       h2: ({ node, children, ...props }) => (
-                        <h2 className="text-3xl font-bold text-white mt-5 mb-3" {...props}>{children}</h2>
+                        <h2
+                          className="text-3xl font-bold text-white mt-5 mb-3"
+                          {...props}
+                        >
+                          {children}
+                        </h2>
                       ),
                       h3: ({ node, children, ...props }) => (
-                        <h3 className="text-2xl font-bold text-white mt-4 mb-3" {...props}>{children}</h3>
+                        <h3
+                          className="text-2xl font-bold text-white mt-4 mb-3"
+                          {...props}
+                        >
+                          {children}
+                        </h3>
                       ),
                       h4: ({ node, children, ...props }) => (
-                        <h4 className="text-xl font-bold text-white mt-3 mb-2" {...props}>{children}</h4>
+                        <h4
+                          className="text-xl font-bold text-white mt-3 mb-2"
+                          {...props}
+                        >
+                          {children}
+                        </h4>
                       ),
                       strong: ({ node, children, ...props }) => (
-                        <strong className="font-bold text-white" {...props}>{children}</strong>
+                        <strong className="font-bold text-white" {...props}>
+                          {children}
+                        </strong>
                       ),
                       em: ({ node, children, ...props }) => (
-                        <em className="italic text-white/90" {...props}>{children}</em>
+                        <em className="italic text-white/90" {...props}>
+                          {children}
+                        </em>
                       ),
                     }}
                   >
@@ -582,7 +708,9 @@ export default function ChatPage() {
                   <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-linear-to-br from-purple-500 to-pink-500">
                     <FileText className="h-5 w-5 text-white" />
                   </div>
-                  <h2 className="text-lg font-semibold text-white">{filePreview.filename}</h2>
+                  <h2 className="text-lg font-semibold text-white">
+                    {filePreview.filename}
+                  </h2>
                 </div>
                 <div className="flex items-center gap-2">
                   <a
@@ -623,7 +751,11 @@ export default function ChatPage() {
                 )}
                 {filePreview.type === "audio" && (
                   <div className="flex min-h-50 items-center justify-center">
-                    <audio controls src={filePreview.url} className="w-full max-w-2xl">
+                    <audio
+                      controls
+                      src={filePreview.url}
+                      className="w-full max-w-2xl"
+                    >
                       Your browser does not support the audio element.
                     </audio>
                   </div>

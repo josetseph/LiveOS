@@ -1,37 +1,11 @@
 import os
-from langchain_openai import OpenAIEmbeddings
-from openai import OpenAI
+
 from app.core.config import settings
 from app.core.log import get_logger
+from langchain_openai import OpenAIEmbeddings
+from openai import OpenAI
 
 logger = get_logger("LLMService")
-
-
-def compute_cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
-    """
-    Compute cosine similarity between two vectors.
-
-    Args:
-        vec1: First vector
-        vec2: Second vector
-
-    Returns:
-        Cosine similarity score (0 to 1)
-    """
-    import math
-
-    # Dot product
-    dot_product = sum(a * b for a, b in zip(vec1, vec2))
-
-    # Magnitudes
-    mag1 = math.sqrt(sum(a * a for a in vec1))
-    mag2 = math.sqrt(sum(b * b for b in vec2))
-
-    # Avoid division by zero
-    if mag1 == 0 or mag2 == 0:
-        return 0.0
-
-    return dot_product / (mag1 * mag2)
 
 
 class EmbeddingService:

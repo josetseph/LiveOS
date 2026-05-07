@@ -1,7 +1,7 @@
-from botocore.client import Config
 from aioboto3 import session as aioboto3_session
 from app.core.config import settings
 from app.core.log import get_logger
+from botocore.client import Config
 
 # Initialize logging
 logger = get_logger("BucketStorage")
@@ -89,47 +89,6 @@ def get_files(folder_slash_filename: str):
     cloud_front_domain = settings.FILES_URL  # CloudFront domain
     url = f"{cloud_front_domain}/{folder_slash_filename}"
     return url  # Return the CloudFront URL
-
-
-async def generate_presigned_upload_url(
-    file_key: str, file_type: str, expires_in: int = 3600
-):
-    """
-    Generate a pre-signed URL for direct file upload to S3/R2.
-    This allows frontend to upload directly to S3, bypassing the API server.
-
-    Parameters:
-    file_key (str): The path and file name for S3 (key).
-    file_type (str): The MIME type of the file.
-    expires_in (int): URL expiration time in seconds (default: 1 hour).
-
-    Returns:
-    dict: Contains the pre-signed URL and metadata.
-    """
-    logger.info(f"Generating pre-signed upload URL for: {file_key}")
-    try:
-        async with await s3_client() as client:  # type: ignore
-            presigned_url = await client.generate_presigned_url(
-                "put_object",
-                Params={
-                    "Bucket": settings.BUCKET_NAME,
-                    "Key": file_key,
-                    "ContentType": file_type,
-                },
-                ExpiresIn=expires_in,
-            )
-
-            logger.info(f"Successfully generated pre-signed URL for: {file_key}")
-            return {
-                "upload_url": presigned_url,
-                "file_key": file_key,
-                "file_type": file_type,
-                "expires_in": expires_in,
-                "method": "PUT",
-            }
-    except Exception as e:
-        logger.error(f"Error generating pre-signed URL for {file_key}: {e}")
-        return {"error": str(e)}
 
 
 async def send_files_multipart(file, file_key, file_type, part_size=MAX_FILE_SIZE):

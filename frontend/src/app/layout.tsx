@@ -16,8 +16,16 @@ export const metadata: Metadata = {
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "any" },
-      { url: "/logo-black-background.png", sizes: "192x192", type: "image/png" },
-      { url: "/logo-black-background.png", sizes: "512x512", type: "image/png" },
+      {
+        url: "/logo-black-background.png",
+        sizes: "192x192",
+        type: "image/png",
+      },
+      {
+        url: "/logo-black-background.png",
+        sizes: "512x512",
+        type: "image/png",
+      },
     ],
     apple: "/logo-black-background.png",
     shortcut: "/favicon.ico",
@@ -40,9 +48,7 @@ export default function RootLayout({
         <CustomCursor />
         <GrainOverlay />
         <Sidebar />
-        <main className="ml-20 min-h-screen">
-          {children}
-        </main>
+        <main className="ml-20 min-h-screen">{children}</main>
       </body>
     </html>
   );

@@ -1,9 +1,10 @@
 import os
+
 import torch
-from PIL import Image
-from transformers import AutoProcessor, AutoModelForCausalLM, AutoModelForSpeechSeq2Seq
 from app.core.config import settings
 from app.core.log import get_logger
+from PIL import Image
+from transformers import AutoModelForCausalLM, AutoModelForSpeechSeq2Seq, AutoProcessor
 
 logger = get_logger("MultimediaService")
 
@@ -40,8 +41,9 @@ class MultimediaService:
         Helper: If path is a URL, download it to a temporary file.
         Returns the local filepath.
         """
-        import requests
         import tempfile
+
+        import requests
 
         if not path_or_url.startswith("http"):
             return path_or_url

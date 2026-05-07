@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from app.core.config import settings
+from app.core.log import get_logger
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     FieldCondition,
@@ -12,9 +14,6 @@ from qdrant_client.models import (
     MatchValue,
     PointStruct,
 )
-
-from app.core.config import settings
-from app.core.log import get_logger
 
 logger = get_logger("QdrantService")
 
@@ -35,10 +34,13 @@ class QdrantService:
 
     @property
     def collections(self) -> list[str]:
+        # node_cores is intentionally excluded from vector search:
+        # entity nodes are ingested with empty descriptions, so their
+        # vectors carry no payload content and only add noise to retrieval.
+        # node_cores is still used for ID/name resolution (find_node_id_by_name,
+        # get_nodes_content_by_ids) — just not for similarity search.
+        # Community nodes are found via the dedicated community search step.
         return [
-            settings.QDRANT_COLLECTION_NODE_CORES,
-            settings.QDRANT_COLLECTION_NODE_FACTS,
-            settings.QDRANT_COLLECTION_NODE_QUESTIONS,
             settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS,
             settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
         ]
@@ -116,7 +118,8 @@ class QdrantService:
             return []
 
         return [
-            {"score": point.score, "payload": point.payload or {}} for point in result.points
+            {"score": point.score, "payload": point.payload or {}}
+            for point in result.points
         ]
 
     # ── Write helpers ──────────────────────────────────────────────────────────
@@ -126,8 +129,8 @@ class QdrantService:
         node_id: str,
         name: str,
         node_type: str,
-        description: str,
         description_vector: list[float],
+        description: str = "",
         community_level: int | None = None,
         extra_payload: dict[str, Any] | None = None,
     ) -> None:
@@ -144,8 +147,9 @@ class QdrantService:
             "node_id": node_id,
             "name": name,
             "type": node_type,
-            "description": description,
         }
+        if description:
+            payload["description"] = description
         if community_level is not None:
             payload["community_level"] = community_level
         if extra_payload:
@@ -217,6 +221,36 @@ class QdrantService:
                 f"Qdrant upsert_node_items failed for {collection_name}/{node_id}: {exc}"
             )
 
+    def append_node_item(
+        self,
+        collection_name: str,
+        node_id: str,
+        content: str,
+        vector: list[float],
+    ) -> None:
+        """Append a single new item to a sub-item collection without touching existing points.
+
+        Used for isolated_contexts so we never re-embed prior contexts — only the new one.
+        """
+        if not self.is_available() or not self.client:
+            return
+        try:
+            point_id = str(uuid.uuid4())
+            self.client.upsert(
+                collection_name=collection_name,
+                points=[
+                    PointStruct(
+                        id=point_id,
+                        vector=vector,
+                        payload={"parent_node_id": node_id, "content": content},
+                    )
+                ],
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Qdrant append_node_item failed for {collection_name}/{node_id}: {exc}"
+            )
+
     def upsert_node_relationship(
         self,
         relationship_id: str,
@@ -275,7 +309,9 @@ class QdrantService:
                 with_payload=True,
             )
         except Exception as exc:
-            logger.debug(f"Qdrant get_node_content_by_id core failed for {node_id}: {exc}")
+            logger.debug(
+                f"Qdrant get_node_content_by_id core failed for {node_id}: {exc}"
+            )
             return None
 
         if not cores:
@@ -286,7 +322,11 @@ class QdrantService:
         def _scroll_contents(collection: str) -> list[str]:
             try:
                 scroll_filter = Filter(
-                    must=[FieldCondition(key="parent_node_id", match=MatchValue(value=node_id))]
+                    must=[
+                        FieldCondition(
+                            key="parent_node_id", match=MatchValue(value=node_id)
+                        )
+                    ]
                 )
                 items: list[str] = []
                 offset = None
@@ -316,9 +356,9 @@ class QdrantService:
             "type": core_payload.get("type", ""),
             "description": core_payload.get("description", ""),
             "community_level": core_payload.get("community_level"),
-            "facts": _scroll_contents(settings.QDRANT_COLLECTION_NODE_FACTS),
-            "potential_questions": _scroll_contents(settings.QDRANT_COLLECTION_NODE_QUESTIONS),
-            "isolated_contexts": _scroll_contents(settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS),
+            "isolated_contexts": _scroll_contents(
+                settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS
+            ),
         }
 
     def get_nodes_content_by_ids(self, node_ids: list[str]) -> dict[str, dict]:
@@ -349,7 +389,11 @@ class QdrantService:
         def _bulk_scroll(collection: str) -> dict[str, list[str]]:
             try:
                 scroll_filter = Filter(
-                    must=[FieldCondition(key="parent_node_id", match=MatchAny(any=node_ids))]
+                    must=[
+                        FieldCondition(
+                            key="parent_node_id", match=MatchAny(any=node_ids)
+                        )
+                    ]
                 )
                 result: dict[str, list[str]] = {}
                 offset = None
@@ -375,14 +419,12 @@ class QdrantService:
                 logger.debug(f"Qdrant bulk scroll failed for {collection}: {exc}")
                 return {}
 
-        facts_by_id = _bulk_scroll(settings.QDRANT_COLLECTION_NODE_FACTS)
-        questions_by_id = _bulk_scroll(settings.QDRANT_COLLECTION_NODE_QUESTIONS)
         contexts_by_id = _bulk_scroll(settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS)
 
         result: dict[str, dict] = {}
         for nid in node_ids:
             core = cores_by_nodeid.get(nid)
-            if not core and nid not in facts_by_id and nid not in questions_by_id and nid not in contexts_by_id:
+            if not core and nid not in contexts_by_id:
                 continue
             result[nid] = {
                 "node_id": nid,
@@ -390,8 +432,6 @@ class QdrantService:
                 "type": (core or {}).get("type", ""),
                 "description": (core or {}).get("description", ""),
                 "community_level": (core or {}).get("community_level"),
-                "facts": facts_by_id.get(nid, []),
-                "potential_questions": questions_by_id.get(nid, []),
                 "isolated_contexts": contexts_by_id.get(nid, []),
             }
         return result
@@ -411,7 +451,11 @@ class QdrantService:
                 results, next_offset = self.client.scroll(
                     collection_name=settings.QDRANT_COLLECTION_NODE_CORES,
                     scroll_filter=Filter(
-                        must=[FieldCondition(key="type", match=MatchValue(value="community"))]
+                        must=[
+                            FieldCondition(
+                                key="type", match=MatchValue(value="community")
+                            )
+                        ]
                     ),
                     limit=500,
                     offset=offset,
@@ -419,12 +463,14 @@ class QdrantService:
                 )
                 for point in results:
                     p = point.payload or {}
-                    rows.append({
-                        "community_id": p.get("node_id"),
-                        "community_level": p.get("community_level"),
-                        "name": p.get("name"),
-                        "description": p.get("description"),
-                    })
+                    rows.append(
+                        {
+                            "community_id": p.get("node_id"),
+                            "community_level": p.get("community_level"),
+                            "name": p.get("name"),
+                            "description": p.get("description"),
+                        }
+                    )
                 if next_offset is None:
                     break
                 offset = next_offset
@@ -487,6 +533,61 @@ class QdrantService:
             logger.debug(f"[Qdrant] find_node_id_by_name failed for '{name}': {exc}")
             return None
 
+    def find_node_ids_by_names(self, names: list[str]) -> dict[str, str | None]:
+        """Batch-resolve node names to stable node_ids in a single Qdrant scroll.
+
+        Returns a dict mapping each normalized name to its node_id (or None if not found).
+        Uses a single OR-filter scroll instead of one query per name.
+        """
+        if not self.is_available() or not self.client or not names:
+            return {}
+        normalized = [n.lower().strip() for n in names if n and n.strip()]
+        if not normalized:
+            return {}
+        result_map: dict[str, str | None] = {n: None for n in normalized}
+        try:
+            # Page through all matches so duplicates do not starve out other names
+            # under a fixed limit. Stop early once all requested names are resolved.
+            _scroll_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="name",
+                        match=MatchAny(any=normalized),
+                    )
+                ]
+            )
+            offset = None
+            while True:
+                results, next_offset = self.client.scroll(
+                    collection_name=settings.QDRANT_COLLECTION_NODE_CORES,
+                    scroll_filter=_scroll_filter,
+                    limit=500,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in results:
+                    payload = point.payload or {}
+                    node_name = (payload.get("name") or "").lower().strip()
+                    node_id = payload.get("node_id")
+                    # Keep first non-empty mapping per name for deterministic behavior.
+                    if (
+                        node_name
+                        and node_id
+                        and node_name in result_map
+                        and result_map[node_name] is None
+                    ):
+                        result_map[node_name] = node_id
+
+                if all(v is not None for v in result_map.values()):
+                    break
+                if next_offset is None:
+                    break
+                offset = next_offset
+        except Exception as exc:
+            logger.debug(f"[Qdrant] find_node_ids_by_names failed: {exc}")
+        return result_map
+
     def get_relationships_for_node_ids(self, node_ids: list[str]) -> list[dict]:
         """Fetch all relationship points from node_relationships where source or target is in node_ids.
 
@@ -518,11 +619,13 @@ class QdrantService:
                     )
                     for point in points:
                         payload = point.payload or {}
-                        results.append({
-                            "natural_language": payload.get("natural_language", ""),
-                            "source_node_id": payload.get("source_node_id", ""),
-                            "target_node_id": payload.get("target_node_id", ""),
-                        })
+                        results.append(
+                            {
+                                "natural_language": payload.get("natural_language", ""),
+                                "source_node_id": payload.get("source_node_id", ""),
+                                "target_node_id": payload.get("target_node_id", ""),
+                            }
+                        )
                     if next_offset is None:
                         break
                     offset = next_offset
@@ -549,11 +652,7 @@ class QdrantService:
                 collection_name=settings.QDRANT_COLLECTION_NODE_CORES,
                 points_selector=[str(uuid.uuid5(uuid.NAMESPACE_OID, node_id))],
             )
-            for collection_name in (
-                settings.QDRANT_COLLECTION_NODE_FACTS,
-                settings.QDRANT_COLLECTION_NODE_QUESTIONS,
-                settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
-            ):
+            for collection_name in (settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,):
                 self.client.delete(
                     collection_name=collection_name,
                     points_selector=FilterSelector(

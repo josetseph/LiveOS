@@ -3,8 +3,8 @@ Relationship Schema for Knowledge Graph
 Defines universal relationship types supporting any-to-any node connections
 """
 
-from typing import List, Dict, Set
 from enum import Enum
+from typing import Dict, List, Set
 
 
 class RelationshipType(str, Enum):

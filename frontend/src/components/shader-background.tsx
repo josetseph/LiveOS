@@ -45,9 +45,7 @@ export function ShaderBackground() {
         this.size = Math.random() * 5 + 3;
         this.speedX = (Math.random() - 0.5) * 0.5;
         this.speedY = (Math.random() - 0.5) * 0.5;
-        this.color = `rgba(${
-          Math.floor(Math.random() * 100) + 100
-        }, ${
+        this.color = `rgba(${Math.floor(Math.random() * 100) + 100}, ${
           Math.floor(Math.random() * 100) + 150
         }, ${
           Math.floor(Math.random() * 55) + 200
@@ -141,8 +139,10 @@ function CSSGradientBackground() {
     let animationId: number;
     const animate = () => {
       // Smooth interpolation
-      currentPos.current.x += (mousePos.current.x - currentPos.current.x) * 0.05;
-      currentPos.current.y += (mousePos.current.y - currentPos.current.y) * 0.05;
+      currentPos.current.x +=
+        (mousePos.current.x - currentPos.current.x) * 0.05;
+      currentPos.current.y +=
+        (mousePos.current.y - currentPos.current.y) * 0.05;
 
       const { x, y } = currentPos.current;
 
@@ -153,7 +153,7 @@ function CSSGradientBackground() {
         0,
         canvas.width * x,
         canvas.height * y,
-        Math.max(canvas.width, canvas.height) * 0.8
+        Math.max(canvas.width, canvas.height) * 0.8,
       );
 
       // Blue to orange gradient

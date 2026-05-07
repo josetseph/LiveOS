@@ -5,6 +5,7 @@ Called by retrieval.py when FALLBACK_MODE="web" and the local knowledge graph
 could not produce a satisfactory answer. Results are returned as context dicts
 in the same shape as local retrieval docs so the synthesis step is unchanged.
 """
+
 from __future__ import annotations
 
 from app.core.config import settings
@@ -37,7 +38,9 @@ async def web_search(query: str, max_results: int = 5) -> list[dict]:
     try:
         from tavily import TavilyClient  # type: ignore[import]
     except ImportError:
-        logger.error("[Tavily] tavily-python package not installed. Run: pip install tavily-python")
+        logger.error(
+            "[Tavily] tavily-python package not installed. Run: pip install tavily-python"
+        )
         return []
 
     try:
@@ -49,7 +52,9 @@ async def web_search(query: str, max_results: int = 5) -> list[dict]:
             include_answer=False,
         )
         results: list[dict] = response.get("results", [])
-        logger.info(f"[Tavily] Web search returned {len(results)} result(s) for: {query!r}")
+        logger.info(
+            f"[Tavily] Web search returned {len(results)} result(s) for: {query!r}"
+        )
     except Exception as exc:
         logger.warning(f"[Tavily] Web search failed: {exc}")
         return []
@@ -59,7 +64,7 @@ async def web_search(query: str, max_results: int = 5) -> list[dict]:
         title = r.get("title", "Web Result")
         url = r.get("url", "")
         content = r.get("content", "")
-        snippet = content[:800] if content else title
+        snippet = content if content else title
 
         docs.append(
             {

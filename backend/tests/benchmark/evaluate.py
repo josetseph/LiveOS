@@ -235,11 +235,7 @@ async def fetch_note_title_map(base_url: str) -> dict[str, str]:
             response = await client.get(f"{base_url}/api/v1/notes")
             response.raise_for_status()
             notes = response.json()
-            return {
-                n["id"]: (n.get("title") or "")
-                for n in notes
-                if n.get("id")
-            }
+            return {n["id"]: (n.get("title") or "") for n in notes if n.get("id")}
         except Exception as e:
             print(f"Warning: could not fetch note title map: {e}")
             return {}
@@ -342,7 +338,9 @@ async def evaluate_single(
         result.error = "Empty answer returned from API"
         return result
 
-    contexts, titles, note_ids = extract_contexts_from_response(response, note_title_map)
+    contexts, titles, note_ids = extract_contexts_from_response(
+        response, note_title_map
+    )
     result.retrieved_contexts = contexts
     result.retrieved_note_titles = titles
     result.retrieved_note_ids = note_ids
@@ -396,9 +394,9 @@ async def evaluate_single(
 
     if verbose:
         print(f"\n{'='*60}")
-        print(f"Q: {question[:100]}...")
+        print(f"Q: {question}...")
         print(f"Expected: {expected_answer}")
-        print(f"Actual: {actual_answer[:200]}...")
+        print(f"Actual: {actual_answer}...")
         print(f"Exact Match: {result.exact_match} | Fuzzy: {result.fuzzy_match}")
         print(f"Retrieved {len(titles)} notes")
 
@@ -518,10 +516,10 @@ def print_report(metrics: dict, results: list[EvaluationResult]):
     failures = [r for r in results if not r.fuzzy_match and r.error is None]
     if failures:
         print(f"\n❌ SAMPLE FAILURES ({len(failures)} total):")
-        for r in failures[:3]:
-            print(f"\n   Q: {r.question[:80]}...")
+        for r in failures:
+            print(f"\n   Q: {r.question}...")
             print(f"   Expected: {r.expected_answer}")
-            print(f"   Got: {r.actual_answer[:100]}...")
+            print(f"   Got: {r.actual_answer}...")
 
     print("\n" + "=" * 70)
 
@@ -572,7 +570,9 @@ def main():
 
     if not manifest_path.exists():
         print(f"❌ Manifest not found: {manifest_path}")
-        print(f"   Run prepare_dataset.py --dataset {args.dataset} first to ingest notes")
+        print(
+            f"   Run prepare_dataset.py --dataset {args.dataset} first to ingest notes"
+        )
         return
 
     # Run evaluation

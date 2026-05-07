@@ -1,13 +1,12 @@
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from tenacity import retry, stop_after_attempt, wait_fixed
+from app.core.config import settings
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
-
-from app.core.config import settings
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 
 @retry(stop=stop_after_attempt(10), wait=wait_fixed(2))
@@ -22,8 +21,6 @@ def init_qdrant() -> None:
     existing = {c.name for c in client.get_collections().collections}
     collections = [
         settings.QDRANT_COLLECTION_NODE_CORES,
-        settings.QDRANT_COLLECTION_NODE_FACTS,
-        settings.QDRANT_COLLECTION_NODE_QUESTIONS,
         settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS,
         settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
     ]

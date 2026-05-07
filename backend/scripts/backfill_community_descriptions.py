@@ -22,9 +22,9 @@ Options
 """
 
 import argparse
-import sys
-import os
 import logging
+import os
+import sys
 
 # ── path setup ──────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,13 +36,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+from app.services.embedding import embedding_service
 # ── imports ──────────────────────────────────────────────────────────────────
 from app.services.graph import graph_service
-from app.services.qdrant_service import qdrant_service
-from app.services.elasticsearch_service import elasticsearch_service
 from app.services.llm import llm_service
-from app.services.embedding import embedding_service
-
+from app.services.qdrant_service import qdrant_service
+from app.services.typesense_service import typesense_service
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -174,7 +173,7 @@ def update_community(
     new_summary: str,
     dry_run: bool,
 ) -> None:
-    """Write the updated description back to Qdrant and Elasticsearch."""
+    """Write the updated description back to Qdrant and Typesense."""
     name = new_name or current_name or f"Community L{community_level}"
 
     if dry_run:
@@ -194,11 +193,10 @@ def update_community(
             description_vector=description_vector,
             community_level=community_level,
         )
-        elasticsearch_service.index_node(
+        typesense_service.index_node(
             node_id=community_id,
             name=name,
             node_type="community",
-            description=new_summary,
             community_level=community_level,
         )
         logger.info(f"  ✓ Updated {community_id[:40]}… → '{name[:50]}'")
@@ -262,7 +260,7 @@ def main() -> None:
             continue
 
         current_name = community.get("name") or f"Community L1-{idx}"
-        logger.info(f"[L1 {idx}/{len(l1_to_update)}] {current_name} ({community_id[:30]}…)")
+        logger.info(f"[L1 {idx}/{len(l1_to_update)}] {current_name} ({community_id30]}…)")
 
         child_rows = get_child_community_rows(
             community_id=community_id,

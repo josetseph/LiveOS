@@ -9,23 +9,18 @@ until PGPASSWORD=liveos_password psql -h postgres -U liveos -d liveos_brain -c '
   sleep 1
 done
 
-echo "⏳ Waiting for Neo4j..."
-until curl -f http://neo4j:7474 > /dev/null 2>&1; do
-  sleep 1
-done
-
 echo "⏳ Waiting for MinIO..."
-until curl -f http://minio:9000/minio/health/live > /dev/null 2>&1; do
+until curl -sf http://minio:9000/minio/health/live > /dev/null 2>&1; do
   sleep 1
 done
 
 echo "⏳ Waiting for Qdrant..."
-until curl -f http://qdrant:6333/health > /dev/null 2>&1; do
+until curl -sf http://qdrant:6333/health > /dev/null 2>&1; do
   sleep 1
 done
 
-echo "⏳ Waiting for Elasticsearch..."
-until curl -f http://elasticsearch:9200 > /dev/null 2>&1; do
+echo "⏳ Waiting for Typesense..."
+until curl -sf http://typesense:8108/health > /dev/null 2>&1; do
   sleep 1
 done
 

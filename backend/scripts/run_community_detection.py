@@ -5,8 +5,8 @@ Usage (from backend/ with venv active):
     python scripts/run_community_detection.py
 """
 
-import sys
 import os
+import sys
 
 # Make sure the backend package is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,6 +15,7 @@ os.environ.setdefault("ENV", "development")
 
 # Initialize logging before importing any app modules so file handlers are attached.
 from app.core.log import setup_logging  # noqa: E402
+
 setup_logging()
 
 from app.workflows.ingestion import ingestion_workflow  # noqa: E402

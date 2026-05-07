@@ -1,5 +1,6 @@
+from typing import Any, List, Optional
+
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import List, Optional, Any
 
 
 class Node(BaseModel):
@@ -7,7 +8,6 @@ class Node(BaseModel):
 
     name: str = ""
     type: str = "thing"
-    description: str = ""
     isolated_context: str = ""
 
     @model_validator(mode="before")
@@ -21,9 +21,6 @@ class Node(BaseModel):
         # title → name (reference drift)
         if "title" in data and "name" not in data:
             data["name"] = data["title"]
-        # definition → description
-        if "definition" in data and "description" not in data:
-            data["description"] = data["definition"]
         # evidence_quote / context → isolated_context
         if "evidence_quote" in data and "isolated_context" not in data:
             data["isolated_context"] = data.pop("evidence_quote")
@@ -55,6 +52,27 @@ class ExtractedRelationship(BaseModel):
     natural_language: str = ""
     context: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_keys(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        # New prompt format uses entity1/entity2/description/direction
+        if "entity1" in data and "source_name" not in data:
+            data["source_name"] = data["entity1"]
+        if "entity2" in data and "target_name" not in data:
+            data["target_name"] = data["entity2"]
+        if "description" in data:
+            desc = str(data["description"])
+            if "natural_language" not in data:
+                data["natural_language"] = desc
+            if "relationship_type" not in data:
+                import re as _re
+
+                rt = _re.sub(r"[^a-z0-9 ]", "", desc.lower()).strip()
+                data["relationship_type"] = "_".join(rt.split()) or "relates_to"
+        return data
+
     @field_validator("*", mode="before")
     @classmethod
     def handle_none(cls, v: Any, info) -> Any:
@@ -70,8 +88,12 @@ class ExtractedRelationship(BaseModel):
         score_fields = ("confidence", "strength", "relevance")
         if info.field_name in score_fields and isinstance(v, str):
             score_map = {
-                "very high": 9.0, "high": 8.0, "medium": 6.0,
-                "moderate": 6.0, "low": 4.0, "very low": 2.0,
+                "very high": 9.0,
+                "high": 8.0,
+                "medium": 6.0,
+                "moderate": 6.0,
+                "low": 4.0,
+                "very low": 2.0,
             }
             mapped = score_map.get(v.lower().strip())
             if mapped is not None:
@@ -97,10 +119,10 @@ class ExtractedRelationship(BaseModel):
 
 
 class Extraction(BaseModel):
-    domain: str = "Personal"
     nodes: List[Node] = Field(default_factory=list)
     relationships: List[ExtractedRelationship] = Field(default_factory=list)
     sentiment: str = "Neutral"
+    title: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -115,6 +137,18 @@ class Extraction(BaseModel):
             # [{"name": "X", "relationships": [...]}, ...]
             # Hoist any relationships embedded inside each node dict.
             if isinstance(data, list):
+                # Handle "list of two lists" format: [[nodes...], [rels...]]
+                # Some models (e.g. Ollama/gemma3) wrap the response as a
+                # top-level array where index 0 = node dicts, index 1 = rel dicts.
+                if data and isinstance(data[0], list):
+                    nodes_raw = [item for item in data[0] if isinstance(item, dict)]
+                    rels_raw = (
+                        [item for item in data[1] if isinstance(item, dict)]
+                        if len(data) > 1 and isinstance(data[1], list)
+                        else []
+                    )
+                    return {"nodes": nodes_raw, "relationships": rels_raw}
+
                 hoisted_rels: list = []
                 clean_nodes: list = []
                 for item in data:
@@ -138,7 +172,9 @@ class Extraction(BaseModel):
         # Unwrap {"data": {...}} or {"result": {...}} wrapper
         for outer_key in ("data", "result"):
             outer = data.get(outer_key)
-            if isinstance(outer, dict) and ("nodes" in outer or "relationships" in outer or "entities" in outer):
+            if isinstance(outer, dict) and (
+                "nodes" in outer or "relationships" in outer or "entities" in outer
+            ):
                 data = outer
                 break
 
@@ -151,7 +187,14 @@ class Extraction(BaseModel):
         result: dict = {}
 
         # Relationship key aliases: relationships / edges / links / connections / graph_edges
-        for rel_key in ("relationships", "edges", "links", "connections", "graph_edges", "edge_list"):
+        for rel_key in (
+            "relationships",
+            "edges",
+            "links",
+            "connections",
+            "graph_edges",
+            "edge_list",
+        ):
             if rel_key in norm and "relationships" not in result:
                 result["relationships"] = norm[rel_key]
                 break
@@ -162,17 +205,21 @@ class Extraction(BaseModel):
                 result["nodes"] = norm[node_key]
                 break
 
-        # domain / sentiment pass through directly
-        for field in ("domain", "domain_categorization", "sentiment"):
-            if field in norm:
-                v = norm[field]
-                real_key = "domain" if field == "domain_categorization" else field
-                result[real_key] = v
+        # sentiment pass through directly
+        result["sentiment"] = norm.get("sentiment", "Neutral")
 
         # Coerce legacy multi-list format → nodes
         legacy_nodes: list = list(result.get("nodes") or [])
-        for legacy_key in ("entities", "concepts", "tasks", "persona_traits",
-                           "persona", "traits", "references", "external_references"):
+        for legacy_key in (
+            "entities",
+            "concepts",
+            "tasks",
+            "persona_traits",
+            "persona",
+            "traits",
+            "references",
+            "external_references",
+        ):
             items = norm.get(legacy_key)
             if not items or not isinstance(items, list):
                 continue
@@ -191,12 +238,26 @@ class Extraction(BaseModel):
 
         # Pass through any remaining unknown keys
         _consumed = {
-            "entities", "concepts", "tasks", "persona_traits",
-            "persona", "traits", "references", "external_references",
-            "domain_categorization", "summary", "quote",
-            "edges", "links", "connections", "graph_edges", "edge_list",
-            "node_list", "graph_nodes", "elements",
-            "data", "result",
+            "entities",
+            "concepts",
+            "tasks",
+            "persona_traits",
+            "persona",
+            "traits",
+            "references",
+            "external_references",
+            "summary",
+            "quote",
+            "edges",
+            "links",
+            "connections",
+            "graph_edges",
+            "edge_list",
+            "node_list",
+            "graph_nodes",
+            "elements",
+            "data",
+            "result",
         }
         for k, v in norm.items():
             if k not in result and k not in _consumed:
@@ -212,7 +273,11 @@ class Extraction(BaseModel):
         if info.field_name == "nodes":
             # Coerce plain strings → minimal node dicts so Node validation doesn't crash
             return [
-                {"name": item.strip()} if isinstance(item, str) and item.strip() else item
+                (
+                    {"name": item.strip()}
+                    if isinstance(item, str) and item.strip()
+                    else item
+                )
                 for item in v
             ]
         return v

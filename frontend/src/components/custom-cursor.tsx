@@ -5,47 +5,32 @@ import { useEffect, useRef } from "react";
 export function CustomCursor() {
   const outerRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
-  const positionRef = useRef({ x: 0, y: 0 });
-  const targetPositionRef = useRef({ x: 0, y: 0 });
   const isPointerRef = useRef(false);
 
   useEffect(() => {
-    let animationFrameId: number;
-
-    const lerp = (start: number, end: number, factor: number) => {
-      return start + (end - start) * factor;
-    };
-
-    const updateCursor = () => {
-      positionRef.current.x = lerp(positionRef.current.x, targetPositionRef.current.x, 0.15);
-      positionRef.current.y = lerp(positionRef.current.y, targetPositionRef.current.y, 0.15);
-
-      if (outerRef.current && innerRef.current) {
-        const scale = isPointerRef.current ? 1.5 : 1;
-        const innerScale = isPointerRef.current ? 0.5 : 1;
-
-        outerRef.current.style.transform = `translate3d(${positionRef.current.x}px, ${positionRef.current.y}px, 0) translate(-50%, -50%) scale(${scale})`;
-        innerRef.current.style.transform = `translate3d(${positionRef.current.x}px, ${positionRef.current.y}px, 0) translate(-50%, -50%) scale(${innerScale})`;
-      }
-
-      animationFrameId = requestAnimationFrame(updateCursor);
-    };
-
     const handleMouseMove = (e: MouseEvent) => {
-      targetPositionRef.current = { x: e.clientX, y: e.clientY };
+      const x = e.clientX;
+      const y = e.clientY;
 
       const target = e.target as HTMLElement;
       isPointerRef.current =
-        window.getComputedStyle(target).cursor === "pointer" || target.tagName === "BUTTON" || target.tagName === "A";
+        window.getComputedStyle(target).cursor === "pointer" ||
+        target.tagName === "BUTTON" ||
+        target.tagName === "A";
+
+      const scale = isPointerRef.current ? 1.5 : 1;
+      const innerScale = isPointerRef.current ? 0.5 : 1;
+
+      if (outerRef.current) {
+        outerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%) scale(${scale})`;
+      }
+      if (innerRef.current) {
+        innerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%) scale(${innerScale})`;
+      }
     };
 
     window.addEventListener("mousemove", handleMouseMove, { passive: true });
-    animationFrameId = requestAnimationFrame(updateCursor);
-
-    return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      cancelAnimationFrame(animationFrameId);
-    };
+    return () => window.removeEventListener("mousemove", handleMouseMove);
   }, []);
 
   return (

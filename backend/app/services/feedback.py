@@ -2,12 +2,11 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.log import get_logger
 from app.models.feedback import Feedback
 from app.models.note import Note
 from app.schemas.feedback import FeedbackCreate
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = get_logger("FeedbackService")
 
@@ -93,7 +92,8 @@ class FeedbackService:
 
         # Find nodes extracted from the feedback note.
         extracted_query = """
-        MATCH (note:Indexable {id: $note_id, type: 'note'})-[:REFERENCES]->(n:Indexable)
+        MATCH (note:Node {id: $note_id})-[:REFERENCES]->(n:Node)
+        WHERE note.kind = 'note'
         RETURN n.id AS id, n.name AS name
         """
         extracted = graph_service.execute_query(extracted_query, {"note_id": note_id})
@@ -103,8 +103,8 @@ class FeedbackService:
 
         # Look up target nodes by the IDs cited by the retrieval pipeline.
         target_query = """
-        MATCH (n:Indexable)
-        WHERE n.id IN $ids
+        MATCH (n:Node)
+        WHERE n.id IN $ids AND n.kind IN ['indexable', 'note']
         RETURN n.id AS id, n.name AS name
         """
         target_nodes = graph_service.execute_query(target_query, {"ids": node_ids_used})

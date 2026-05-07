@@ -1,7 +1,11 @@
-from app.services.retrieval import retrieval_service
-from app.services.llm import llm_service
-from app.core.log import get_logger
 import time
+
+from app.core.database import AsyncSessionLocal
+from app.core.log import get_logger
+from app.models.note import Note
+from app.services.llm import llm_service
+from app.services.retrieval import retrieval_service
+from sqlalchemy import select
 
 logger = get_logger("ChatWorkflow")
 
@@ -45,7 +49,7 @@ class ChatWorkflow:
                 doc_id = (
                     doc.get("original_obj", {}).get("name")
                     or doc.get("note_id")
-                    or doc.get("text", "")[:100]
+                    or doc.get("text", "")
                 )
                 if doc_id and doc_id not in seen_local:
                     deduped.append(doc)
@@ -56,17 +60,17 @@ class ChatWorkflow:
             trigger_reason: str,
         ) -> tuple[str | None, list[dict]]:
             logger.info(
-                f"[Chat] Triggering structured sub-question fallback ({trigger_reason})"
+                f"[Chat] Triggering iterative loop fallback ({trigger_reason})"
             )
             t_fb = time.perf_counter()
             fb_answer, fb_docs = (
-                await retrieval_service.retrieve_with_structured_subquestions(
+                await retrieval_service.retrieve_with_iterative_loop(
                     user_query,
                     top_k=50,
                 )
             )
             logger.info(
-                f"[Chat] Structured fallback: {len(fb_docs)} docs in "
+                f"[Chat] Iterative loop fallback: {len(fb_docs)} docs in "
                 f"{time.perf_counter() - t_fb:.2f}s"
             )
             return fb_answer, fb_docs
@@ -74,40 +78,39 @@ class ChatWorkflow:
         # Deduplicate docs
         unique_docs: list[dict] = _dedupe_docs(all_docs)
 
+        # Precision guard: the answer is already synthesised inside the pipeline.
+        # For references and returned context we only expose the highest-confidence
+        # docs so that irrelevant graph-expansion neighbours don't dilute precision.
+        # Sort by the rerank_score already attached by _apply_reranker_logging;
+        # unscored docs (expanded neighbours) fall to the bottom (score = 0).
+        MAX_CONTEXT_DOCS = 6
+        if len(unique_docs) > MAX_CONTEXT_DOCS:
+            unique_docs = sorted(
+                unique_docs,
+                key=lambda d: d.get("rerank_score", 0.0),
+                reverse=True,
+            )[:MAX_CONTEXT_DOCS]
+
         logger.info(f"[Chat] Unique docs: {len(unique_docs)}")
         if unique_docs:
             print(f"\n🔍 CONTEXT ({len(unique_docs)} docs):")
-            for i, doc in enumerate(unique_docs[:5]):
+            for i, doc in enumerate(unique_docs):
                 print(
                     f"  {i+1}. [{doc.get('original_obj',{}).get('name','?')}] "
-                    f"{_doc_passage(doc)[:150]}..."
+                    f"{_doc_passage(doc)}"
                 )
 
         # ── Answer assembly ──────────────────────────────────────────────────
+        # Do not synthesize from raw docs in chat workflow. The only valid answer
+        # synthesis is the structured final synthesis over sub-question results
+        # (pipeline final_answer / structured fallback fb_answer).
         answer = ""
-        if unique_docs:
-            # Keep loop retrieval for context discovery, but always run
-            # constrained synthesis so we still answer when loop control
-            # fails to emit a direct final answer.
-            answer_type = await llm_service.identify_answer_type(user_query)
-            logger.info(f"[Chat] Answer type: '{answer_type}'")
-
-            t_synth = time.perf_counter()
-            synthesized = await llm_service.synthesize(
-                unique_docs, user_query, answer_type=answer_type
+        if final_answer:
+            logger.info(
+                f"[Chat] Using pipeline answer directly (structured synthesis): "
+                f"'{final_answer}'"
             )
-            logger.info(f"[Chat] Synthesis: {time.perf_counter() - t_synth:.2f}s")
-
-            if synthesized and "FINAL:" in synthesized:
-                answer = (
-                    synthesized.split("FINAL:", 1)[1].strip().split("\n")[0].strip()
-                )
-            elif synthesized:
-                answer = synthesized.strip().split("\n")[0].strip()
-
-            if not answer and final_answer:
-                logger.info(f"[Chat] Falling back to loop answer: '{final_answer}'")
-                answer = final_answer
+            answer = final_answer
 
         if not answer:
             fallback_reason = "no loop context" if not unique_docs else "no loop answer"
@@ -117,30 +120,12 @@ class ChatWorkflow:
                 unique_docs = _dedupe_docs(unique_docs + fb_docs)
                 logger.info(f"[Chat] Fallback merged unique docs: {len(unique_docs)}")
 
-            # Prefer synthesis over full merged context so we do not rely
-            # on condensed per-step fallback answers.
-            if unique_docs:
-                answer_type = await llm_service.identify_answer_type(user_query)
-                logger.info(f"[Chat] Fallback answer type: '{answer_type}'")
-                t_synth_fb = time.perf_counter()
-                synthesized_fb = await llm_service.synthesize(
-                    unique_docs, user_query, answer_type=answer_type
-                )
-                logger.info(
-                    f"[Chat] Fallback synthesis: {time.perf_counter() - t_synth_fb:.2f}s"
-                )
-                if synthesized_fb and "FINAL:" in synthesized_fb:
-                    answer = (
-                        synthesized_fb.split("FINAL:", 1)[1]
-                        .strip()
-                        .split("\n")[0]
-                        .strip()
-                    )
-                elif synthesized_fb:
-                    answer = synthesized_fb.strip().split("\n")[0].strip()
-
-            if not answer and fb_answer:
-                logger.info("[Chat] Falling back to structured fallback direct answer.")
+            # The structured chain-of-reasoning answer is the most reliable signal.
+            # Raw synthesis over the fallback doc pool is unreliable for multi-hop
+            # questions and causes hallucinations (e.g. "Mistborn" instead of
+            # "Animorphs", "yes" instead of "no" for Laleli/Esma Sultan).
+            if fb_answer:
+                logger.info(f"[Chat] Using structured fallback answer: '{fb_answer}'")
                 answer = fb_answer
 
             if not answer:
@@ -153,8 +138,16 @@ class ChatWorkflow:
                     "[Chat] Both primary and fallback retrieval paths exhausted."
                 )
 
+        # Only cite notes from docs that the reranker individually scored.
+        # Graph-expansion docs are added after reranking and carry no rerank_score;
+        # their linked_notes are graph neighbours that were never verified as relevant
+        # to the question, so they inflate the reference list without adding precision.
+        for doc in unique_docs:
+            if "rerank_score" not in doc:
+                doc["linked_notes"] = []
+
         # Append references
-        references = self._extract_references(unique_docs)
+        references = await self._extract_references(unique_docs)
         if references:
             answer += "\n\n### References\n" + "\n".join(references)
 
@@ -169,72 +162,43 @@ class ChatWorkflow:
             "discovered_entities": {},
         }
 
-    async def _verify_candidates(
-        self,
-        docs: list[dict],
-        sub_question: str,
-        original_question: str,
-    ) -> list[dict]:
-        """Per-candidate YES/NO verification (benchmark v4/v5 core pattern).
-
-        For each retrieved doc, ask the LLM: does this passage explicitly
-        answer the sub-question (judged only by the passage, not prior knowledge)?
-        Candidates that fail are dropped so synthesis receives only relevant docs.
-        Both the sub-question AND the original question are provided as GOAL context
-        so the LLM can judge relevance at the right level of the chain.
-        """
-        verified: list[dict] = []
-        for doc in docs:
-            text = _doc_passage(doc)
-            if not text:
-                continue
-            check_prompt = (
-                f"GOAL: We are trying to answer: {original_question}\n\n"
-                f"SUB-QUESTION: To do that, we need to know: {sub_question}\n\n"
-                f"PASSAGE:\n{text}\n\n"
-                "Does this passage contain explicit text that answers the sub-question? "
-                "Judge ONLY by what is written in the passage — do NOT use outside knowledge. "
-                "Reply YES or NO only."
-            )
-            try:
-                ans = await llm_service.generate(
-                    check_prompt, temperature=0.0, max_tokens=10
-                )
-                if ans.strip().upper().startswith("YES"):
-                    verified.append(doc)
-            except Exception as e:
-                logger.debug(f"[Chat] YES/NO check failed: {e}")
-        return verified
-
-    def _extract_references(self, docs: list) -> list:
+    async def _extract_references(self, docs: list) -> list:
         """
         Extract unique note references from retrieved documents.
+        Looks up real titles from Postgres for any linked note that lacks a title
+        in the graph (note nodes in Neo4j don't store the title property).
         """
-        # Deduplicate references by Note ID
-        # Sources: 1) direct note_id on doc (recent notes), 2) linked_notes from graph nodes
-        seen_refs = set()
-        references = []
+        # Deduplicate references by Note ID from graph-node linked_notes.
+        seen_refs: set[str] = set()
+        id_to_title: dict[str, str | None] = {}
 
-        # Debug: Count how many docs have linked_notes
-        docs_with_notes = sum(1 for d in docs if d.get("linked_notes"))
-        total_linked = sum(len(d.get("linked_notes", [])) for d in docs)
-        logger.debug(
-            f"[Chat] Reference extraction: {docs_with_notes}/{len(docs)} docs have linked_notes, {total_linked} total notes"
-        )
-
+        # Collect all note IDs we'll need titles for
         for d in docs:
-            # Source 1: Direct note reference (from recent notes)
-            nid = d.get("note_id")
-            title = d.get("title") or "Untitled Note"
-            if nid and nid not in seen_refs:
-                references.append(f"- [{title}](/notes/{nid})")
-                seen_refs.add(nid)
-
-            # Source 2: Linked notes from graph nodes (evidence grounding)
             for linked_note in d.get("linked_notes", []):
                 lnid = linked_note.get("id")
-                ltitle = linked_note.get("title") or "Untitled Note"
+                if lnid:
+                    id_to_title.setdefault(lnid, linked_note.get("title"))
+
+        # Batch-fetch titles from Postgres for any note with a missing title
+        missing_ids = [nid for nid, t in id_to_title.items() if not t]
+        if missing_ids:
+            try:
+                async with AsyncSessionLocal() as session:
+                    rows = await session.execute(
+                        select(Note.id, Note.title).where(Note.id.in_(missing_ids))
+                    )
+                    for row_id, row_title in rows:
+                        if row_title:
+                            id_to_title[row_id] = row_title
+            except Exception as e:
+                logger.debug(f"[Chat] Note title lookup failed: {e}")
+
+        references = []
+        for d in docs:
+            for linked_note in d.get("linked_notes", []):
+                lnid = linked_note.get("id")
                 if lnid and lnid not in seen_refs:
+                    ltitle = id_to_title.get(lnid) or "Untitled Note"
                     references.append(f"- [{ltitle}](/notes/{lnid})")
                     seen_refs.add(lnid)
 

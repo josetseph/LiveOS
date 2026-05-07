@@ -1,16 +1,33 @@
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks
-from fastapi import Depends
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
 
 # Setup logging before any other imports
-from app.core.log import setup_logging, get_logger
+from app.core.log import get_logger, setup_logging
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 setup_logging()
 logger = get_logger("API")  # App logger; avoid uvicorn.access formatter expectations
+
+# ---------------------------------------------------------------------------
+# Request trace-ID context variable
+# ---------------------------------------------------------------------------
+
+# Stores the current request's trace_id for the duration of a request.
+# Use `request_trace_id.get()` in any async context to retrieve it.
+request_trace_id: ContextVar[str] = ContextVar("request_trace_id", default="")
+
 
 app = FastAPI(title="LiveOS Brain API", version="0.1.0")
 
@@ -24,6 +41,29 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def trace_id_middleware(request: Request, call_next):
+    """Attach a trace_id to every inbound request.
+
+    The trace_id is:
+      1. Read from the incoming X-Request-Id header if provided by the caller.
+      2. Generated as a new UUID4 otherwise.
+
+    The value is stored in a ContextVar so any logger that reads it can attach
+    it to structured log records without explicit passing. It is also returned
+    in the X-Request-Id response header so callers can correlate server-side
+    logs with their own traces.
+    """
+    trace_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    token = request_trace_id.set(trace_id)
+    try:
+        response: Response = await call_next(request)
+    finally:
+        request_trace_id.reset(token)
+    response.headers["X-Request-Id"] = trace_id
+    return response
+
+
 @app.on_event("startup")
 async def startup_event():
     logger.info("Application startup: LiveOS Brain API online")
@@ -34,7 +74,7 @@ async def upload_file(file: UploadFile = File(...)):
     """
     Upload a file to R2 Cloud Storage.
     """
-    from app.utils.bucket_storage import send_files, get_files
+    from app.utils.bucket_storage import get_files, send_files
 
     logger.info(f"Uploading file: {file.filename}")
 
@@ -59,6 +99,24 @@ async def upload_file(file: UploadFile = File(...)):
     }
 
 
+@app.delete("/api/v1/files/{file_key}")
+async def delete_file(file_key: str):
+    """
+    Delete an uploaded file from R2 Cloud Storage by its key.
+    The key is the UUID filename returned in the upload response (e.g. "abc123.pdf").
+    """
+    from app.utils.bucket_storage import delete_files
+
+    logger.info(f"Deleting file: {file_key}")
+    result = await delete_files(file_key)
+    if "error" in result:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=500, detail=result["error"])
+    logger.info(f"File deleted successfully: {file_key}")
+    return {"status": "deleted", "file_key": file_key}
+
+
 @app.get("/")
 async def root():
     logger.debug("Health check hit")
@@ -67,16 +125,14 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    # TODO: Check Neo4j connection here
-    return {"status": "healthy", "neo4j": "unknown"}
+    connected = graph_service.verify_connection()
+    return {"status": "healthy", "graph": "connected" if connected else "unavailable"}
 
 
-from app.schemas.extraction import NoteInput  # noqa: E402
 from app.core.database import get_db  # noqa: E402
 from app.models.note import Note  # noqa: E402
+from app.schemas.extraction import NoteInput  # noqa: E402
 from app.workflows.ingestion import ingestion_workflow  # noqa: E402
-
-
 from pydantic import BaseModel  # noqa: E402
 
 
@@ -84,9 +140,9 @@ class ChatInput(BaseModel):
     query: str
 
 
-from app.workflows.chat import chat_workflow  # noqa: E402
 from app.schemas.feedback import FeedbackCreate, FeedbackResponse  # noqa: E402
 from app.services.feedback import feedback_service  # noqa: E402
+from app.workflows.chat import chat_workflow  # noqa: E402
 
 
 @app.post("/api/v1/chat")
@@ -116,17 +172,13 @@ async def get_graph_summary():
     """
     Fetch top themes and nodes for the sidebar.
     """
-    query = """
-    MATCH (n:Indexable)
-    WHERE n.type <> 'note' AND n.description IS NOT NULL
-    RETURN n.name as name, n.type as type, n.description as description
-    LIMIT 10
-    """
-    with graph_service.driver.session() as session:
-        result = session.run(query)
-        nodes = [record.data() for record in result]
-
-    return {"themes": nodes}
+    rows = graph_service.execute_query("""
+        MATCH (n:Node)
+        WHERE n.kind IN ['indexable', 'note'] AND n.name IS NOT NULL
+        RETURN n.id AS node_id, n.name AS name, n.type AS type
+        LIMIT 10
+        """)
+    return {"themes": rows}
 
 
 @app.get("/api/v1/graph/visualization")
@@ -134,117 +186,7 @@ async def get_graph_visualization():
     """
     Fetch nodes and edges for 2D Force Graph.
     """
-
-    query = """
-    MATCH (n:Indexable)-[r]->(m:Indexable)
-    RETURN elementId(n) as source_id, 
-           COALESCE(n.name, n.description, n.title) as source_name, 
-           n.type as source_label,
-           n.id as source_uuid,
-           n.description as source_summary,
-           n.domain as source_domain,
-           n.description as source_description,
-           n.status as source_status,
-           n.created_at as source_created_at,
-           n.name as source_title,
-           elementId(m) as target_id, 
-           COALESCE(m.name, m.description, m.title) as target_name, 
-           m.type as target_label,
-           m.id as target_uuid,
-           m.description as target_summary,
-           m.domain as target_domain,
-           m.description as target_description,
-           m.status as target_status,
-           m.created_at as target_created_at,
-           m.name as target_title,
-           type(r) as type
-    
-    UNION
-    MATCH (n:Indexable)
-    WHERE NOT (n)--()
-    RETURN elementId(n) as source_id, 
-           COALESCE(n.name, n.description, n.title) as source_name, 
-           n.type as source_label,
-           n.id as source_uuid,
-           n.description as source_summary,
-           n.domain as source_domain,
-           n.description as source_description,
-           n.status as source_status,
-           n.created_at as source_created_at,
-           n.name as source_title,
-           NULL as target_id, 
-           NULL as target_name, 
-           NULL as target_label,
-           NULL as target_uuid,
-           NULL as target_summary,
-           NULL as target_domain,
-           NULL as target_description,
-           NULL as target_status,
-           NULL as target_created_at,
-           NULL as target_title,
-           NULL as type
-    
-    """
-
-    nodes = {}
-    links = []
-
-    with graph_service.driver.session() as session:
-        result = session.run(query)
-        for record in result:
-            s_id = str(record["source_id"])
-
-            # Skip if source has no useful label
-            if not record["source_label"]:
-                continue
-
-            name = record["source_name"]
-
-            if s_id not in nodes:
-                nodes[s_id] = {
-                    "id": s_id,
-                    "name": name or "Untitled",
-                    "group": record["source_label"],
-                    "uuid": record["source_uuid"],
-                    "summary": record["source_summary"],
-                    "domain": record["source_domain"],
-                    "description": record["source_description"],
-                    "status": record["source_status"],
-                    "created_at": (
-                        str(record["source_created_at"])
-                        if record["source_created_at"]
-                        else None
-                    ),
-                    "title": record["source_title"],
-                }
-
-            if record["target_id"] is not None:
-                t_id = str(record["target_id"])
-                t_name = record["target_name"]
-                if t_name and len(t_name) > 30:
-                    t_name = t_name[:30] + "..."
-
-                if t_id not in nodes:
-                    nodes[t_id] = {
-                        "id": t_id,
-                        "name": t_name or "Untitled",
-                        "group": record["target_label"],
-                        "uuid": record["target_uuid"],
-                        "summary": record["target_summary"],
-                        "domain": record["target_domain"],
-                        "description": record["target_description"],
-                        "status": record["target_status"],
-                        "created_at": (
-                            str(record["target_created_at"])
-                            if record["target_created_at"]
-                            else None
-                        ),
-                        "title": record["target_title"],
-                    }
-
-                links.append({"source": s_id, "target": t_id, "type": record["type"]})
-
-    return {"nodes": list(nodes.values()), "links": links}
+    return graph_service.get_full_graph()
 
 
 @app.get("/api/v1/graph/export")
@@ -289,12 +231,13 @@ async def graph_3d_full():
 @app.get("/api/v1/graph/3d/node/{node_id}")
 async def graph_3d_node_detail(node_id: str):
     """
-    Return full detail for a single Indexable node (description, facts, domain, status).
+    Return full detail for a single Indexable node (description, facts, status).
     Called on-demand when the user clicks a card in the 3D graph.
     """
     detail = graph_service.get_node_detail(node_id)
     if detail is None:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=404, detail="Node not found")
     return detail
 
@@ -591,20 +534,17 @@ async def update_note(
 @app.delete("/api/v1/notes/{note_id}")
 async def delete_note(note_id: str, db: AsyncSession = Depends(get_db)):
     """
-    Delete a note from Postgres AND Neo4j.
+    Delete a note from Postgres and the graph.
     """
     # 1. Delete from Postgres
     await db.execute(delete(Note).where(Note.id == note_id))
     await db.commit()
 
-    # 2. Delete from Bio/Graph (Neo4j)
-    # We can do this synchronously here as it's fast enough, or background it.
-    query = """
-    MATCH (n:Indexable {id: $id, type: 'note'})
-    DETACH DELETE n
-    """
-    with graph_service.driver.session() as session:
-        session.run(query, {"id": note_id})
+    # 2. Delete from graph
+    graph_service.execute_query(
+        "MATCH (n:Node {id: $id}) WHERE n.kind = 'note' DETACH DELETE n",
+        {"id": note_id},
+    )
 
     return {"status": "deleted", "id": note_id}
 
