@@ -34,13 +34,13 @@ class QdrantService:
 
     @property
     def collections(self) -> list[str]:
-        # node_cores is intentionally excluded from vector search:
-        # entity nodes are ingested with empty descriptions, so their
-        # vectors carry no payload content and only add noise to retrieval.
-        # node_cores is still used for ID/name resolution (find_node_id_by_name,
-        # get_nodes_content_by_ids) — just not for similarity search.
-        # Community nodes are found via the dedicated community search step.
+        # node_cores is included in vector search when nodes have a merged-context
+        # vector (written by _update_node_summary). The merged vector embeds all
+        # accumulated isolated contexts as a single passage, enabling multi-constraint
+        # queries to match whole-node content rather than one sentence at a time.
+        # Nodes without a merged vector simply don't appear in search results.
         return [
+            settings.QDRANT_COLLECTION_NODE_CORES,
             settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS,
             settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
         ]
@@ -314,11 +314,6 @@ class QdrantService:
             )
             return None
 
-        if not cores:
-            return None
-
-        core_payload = cores[0].payload or {}
-
         def _scroll_contents(collection: str) -> list[str]:
             try:
                 scroll_filter = Filter(
@@ -349,6 +344,26 @@ class QdrantService:
             except Exception as exc:
                 logger.debug(f"Qdrant scroll failed for {collection}/{node_id}: {exc}")
                 return []
+
+        if not cores:
+            # No node_cores entry, but isolated_contexts may still exist in the
+            # sub-item collection (e.g. node was written by _update_node_summary
+            # which never calls upsert_node_core). Return what we can.
+            isolated_only = _scroll_contents(
+                settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS
+            )
+            if not isolated_only:
+                return None
+            return {
+                "node_id": node_id,
+                "name": "",
+                "type": "",
+                "description": "",
+                "community_level": None,
+                "isolated_contexts": isolated_only,
+            }
+
+        core_payload = cores[0].payload or {}
 
         return {
             "node_id": node_id,

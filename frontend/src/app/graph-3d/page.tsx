@@ -1056,7 +1056,15 @@ export default function Graph3DPage() {
             </kbd>
           </button>
         ) : (
-          <>
+          <div
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                setSearchOpen(false);
+                setSearchQuery("");
+              }
+            }}
+            style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}
+          >
             <input
               ref={searchInputRef}
               autoFocus
@@ -1101,6 +1109,7 @@ export default function Graph3DPage() {
                 {searchResults.map((n: any, i: number) => (
                   <button
                     key={n.node_id ?? i}
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
                       flyToNode(n);
                       setSearchOpen(false);
@@ -1151,7 +1160,7 @@ export default function Graph3DPage() {
                 ))}
               </div>
             )}
-          </>
+          </div>
         )}
       </div>
 

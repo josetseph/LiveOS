@@ -29,8 +29,14 @@ class Settings(BaseSettings):
         "http://127.0.0.1:11434"  # LM Studio default: http://127.0.0.1:1234
     )
     LLM_API_KEY: str = "ollama"  # LM Studio default: "lm-studio"
-    LLM_MODEL: str = "gemma3:4b"  # LM Studio example: "google/gemma-3-4b"
-    LLM_KEEP_ALIVE: str = "20m"  # Keep model loaded for 20 minutes after last request
+    LLM_MODEL: str = "gemma4:latest"  # LM Studio example: "google/gemma-3-4b"
+    # Separate model for ingestion (extraction, entity reasoning). If None, falls back to LLM_MODEL.
+    # gemma3:4b works well for structured extraction; gemma4 is better for chat/retrieval.
+    INGESTION_LLM_MODEL: str | None = "gemma3:4b"
+    # Gemini-specific ingestion model override. If None, falls back to GEMINI_MODEL.
+    # e.g. use "gemini-2.0-flash" for ingestion vs "gemini-2.5-pro" for chat.
+    INGESTION_GEMINI_MODEL: str | None = None
+    LLM_KEEP_ALIVE: str = "10m"  # Keep model loaded for 20 minutes after last request
     # Response format for local JSON extraction ("text", "json_object", "auto").
     # LM Studio no longer accepts "json_object" (returns 400) — use "text".
     LLM_RESPONSE_FORMAT: str = "text"
@@ -49,6 +55,11 @@ class Settings(BaseSettings):
 
     # ── Retrieval / Pipeline Controls ────────────────────────────────────────
     VECTOR_SIMILARITY_THRESHOLD: float = 0.50
+    # When the reranker is enabled, vector hits above this score are passed to
+    # the reranker. Using the original natural-language question for embedding
+    # (not the reformulated sub-query) means 0.45 safely includes the target
+    # node while keeping the candidate pool small enough for fast reranking.
+    VECTOR_PRE_RERANK_THRESHOLD: float = 0.45
     COMMUNITY_RECOMPUTE_BATCH_SIZE: int = 100
     RERANKER_ENABLED: bool = True
     RERANKER_TOP_K: int = 10  # Candidates passed to LLM after reranking

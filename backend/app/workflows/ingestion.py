@@ -286,7 +286,9 @@ class IngestionWorkflow:
             title = extraction.title
             logger.info(f"[Ontology] Using extracted title: '{title}'")
         else:
-            title = llm_service.generate_title(content)
+            title = llm_service.generate_title(
+                content, model=llm_service._get_ingestion_model()
+            )
             logger.info(f"[Ontology] Generated title: '{title}'")
         # Base Note Node — structural node in Kuzu with kind='note'.
         query_note = """
@@ -399,8 +401,7 @@ class IngestionWorkflow:
             UNWIND $data AS item
             MERGE (n:Node {id: item.id}) ON CREATE SET n.kind = 'indexable'
             MERGE (note)-[r:REFERENCES]->(n)
-            SET r.note_id = $note_id,
-                r.is_active = true
+            SET r.note_id = $note_id
             """
 
             if node_data:
@@ -568,14 +569,14 @@ class IngestionWorkflow:
                         and src_node_id
                         and tgt_node_id
                     ):
-                        nl_text = result.get("natural_language") or (
-                            f"{source_name_normalized} "
-                            f"{rel_type.replace('_', ' ')} "
-                            f"{target_name_normalized}"
+                        # Fall back to just the predicate (not a full sentence)
+                        # so the stored NL never contains entity names that
+                        # would be doubled when _build_node_text wraps it with
+                        # "{name} {nl} {neighbour}".
+                        nl_text = result.get("natural_language") or rel_type.replace(
+                            "_", " "
                         )
-                        # Ensure natural language never contains underscores —
-                        # edge type strings use snake_case internally but NL
-                        # should always use spaces.
+                        # Ensure natural language never contains underscores.
                         nl_text = nl_text.replace("_", " ")
                         _qdrant_rel_pending.append(
                             (result, nl_text, src_node_id, tgt_node_id)
@@ -657,8 +658,7 @@ class IngestionWorkflow:
         No description/facts/questions are generated here — only isolated contexts
         are accumulated and embedded.
         """
-        # Group unique contexts per node name. Dedup by first 200 chars to catch
-        # LLM hallucinations that repeat the same sentence with trivial differences.
+        # Group unique contexts per node name.
         name_to_contexts: dict[str, list[str]] = {}
         name_to_type: dict[str, str] = {}
         name_ctx_seen: dict[str, set[str]] = {}
@@ -771,9 +771,26 @@ class IngestionWorkflow:
                 if _graph_existing_id:
                     node_id = _graph_existing_id
                     logger.warning(
-                        f"  [NodeSummary] '{name}' missing in Qdrant but present in Kuzu "
+                        f"  [NodeSummary] '{name}' missing in Qdrant node_cores but present in Kuzu "
                         f"(id={node_id}) — reusing existing graph ID to prevent duplicate node creation"
                     )
+
+                    # Fetch any existing isolated_contexts from Qdrant (the node may
+                    # have contexts in node_isolated_contexts even without a node_cores
+                    # entry). Without this, existing_contexts stays [] and the
+                    # subsequent Typesense upsert would silently wipe stored contexts.
+                    def _get_kuzu_node_contexts():
+                        content = qdrant_service.get_node_content_by_id(node_id)
+                        return (content or {}).get("isolated_contexts", [])
+
+                    existing_contexts = await loop.run_in_executor(
+                        None, _get_kuzu_node_contexts
+                    )
+                    if existing_contexts:
+                        logger.info(
+                            f"  [NodeSummary] '{name}' fetched {len(existing_contexts)} "
+                            f"prior context(s) via Kuzu ID fallback"
+                        )
                 else:
                     # Truly new node — mint an ID and ensure structural Kuzu node exists
                     node_id = f"node_{str(uuid.uuid4())}"
@@ -876,6 +893,33 @@ class IngestionWorkflow:
                 f"ctx_appended({len(new_ctx_pairs)})"
             )
 
+            # 6b. Write merged-context vector to node_cores.
+            # Joining all accumulated contexts into a single passage and embedding
+            # it lets vector search match multi-constraint queries against the full
+            # node content at once, rather than scoring each sentence in isolation.
+            # Documents are embedded without the query instruction prefix (asymmetric
+            # design required by Qwen3-Embedding).
+            merged_ctx_text = " ".join(c for c in existing_contexts if c and c.strip())
+            if merged_ctx_text:
+
+                def _write_node_core():
+                    from app.services.embedding import embedding_service
+
+                    merged_vec = embedding_service.embed_documents([merged_ctx_text])[0]
+                    qdrant_service.upsert_node_core(
+                        node_id=node_id,
+                        name=name,
+                        node_type=node_type,
+                        description_vector=merged_vec,
+                        description=merged_ctx_text,
+                    )
+
+                await loop.run_in_executor(None, _write_node_core)
+                logger.debug(
+                    f"  [NodeSummary] '{name}' node_cores merged vector written "
+                    f"({len(existing_contexts)} context(s) merged)"
+                )
+
             # 7. Write to Typesense
             def _write_es():
                 # Fetch relationship NL sentences from Qdrant (not Kuzu)
@@ -888,6 +932,20 @@ class IngestionWorkflow:
                 contexts_text = " ".join(
                     ctx for ctx in existing_contexts if ctx and ctx.strip()
                 )
+                # Defense-in-depth: if we somehow ended up with no contexts, fetch
+                # what Typesense already has so we don't wipe it with a blank upsert.
+                if not contexts_text:
+                    try:
+                        existing_ts = (
+                            typesense_service.client.collections[
+                                settings.TYPESENSE_COLLECTION_NAME
+                            ]
+                            .documents[node_id]
+                            .retrieve()
+                        )
+                        contexts_text = existing_ts.get("isolated_contexts", "")
+                    except Exception:
+                        pass
                 typesense_service.index_node(
                     node_id=node_id,
                     name=name,
@@ -1078,7 +1136,7 @@ class IngestionWorkflow:
                 "\n\nThis is a retry because the previous name was too generic. "
                 "The NAME must be specific and user-facing."
             )
-        raw = llm_service.reason(prompt) or ""
+        raw = llm_service.reason(prompt, model=llm_service._get_ingestion_model()) or ""
         return self._parse_name_summary(raw)
 
     def _build_rollup_summary(
@@ -1125,7 +1183,7 @@ class IngestionWorkflow:
                 "\n\nThis is a retry because the previous name was too generic. "
                 "The NAME must be specific and user-facing."
             )
-        raw = llm_service.reason(prompt) or ""
+        raw = llm_service.reason(prompt, model=llm_service._get_ingestion_model()) or ""
         return self._parse_name_summary(raw)
 
     def rebuild_leiden_communities(self) -> int:
@@ -1138,7 +1196,6 @@ class IngestionWorkflow:
         """
         from app.services.embedding import embedding_service
 
-        from app.services.embedding import embedding_service
         from app.services.ingestion_tracker import ingestion_tracker as _tracker
 
         global _community_run_seq, _community_run_active_seq, _community_run_running

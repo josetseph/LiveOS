@@ -37,6 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from app.services.embedding import embedding_service
+
 # ── imports ──────────────────────────────────────────────────────────────────
 from app.services.graph import graph_service
 from app.services.llm import llm_service
@@ -44,6 +45,7 @@ from app.services.qdrant_service import qdrant_service
 from app.services.typesense_service import typesense_service
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
 
 def _is_placeholder(description: str | None) -> bool:
     """Return True if this description is the auto-generated placeholder."""
@@ -145,10 +147,12 @@ def get_child_community_rows(
     for cid in child_ids:
         if child_cache and cid in child_cache:
             data = child_cache[cid]
-            result.append({
-                "name": data.get("name") or child_name_map.get(cid, cid),
-                "summary": data.get("description", ""),
-            })
+            result.append(
+                {
+                    "name": data.get("name") or child_name_map.get(cid, cid),
+                    "summary": data.get("description", ""),
+                }
+            )
         else:
             ids_to_fetch.append(cid)
 
@@ -157,10 +161,12 @@ def get_child_community_rows(
         content_map = qdrant_service.get_nodes_content_by_ids(ids_to_fetch)
         for cid in ids_to_fetch:
             data = content_map.get(cid, {})
-            result.append({
-                "name": data.get("name") or child_name_map.get(cid, cid),
-                "summary": data.get("description", ""),
-            })
+            result.append(
+                {
+                    "name": data.get("name") or child_name_map.get(cid, cid),
+                    "summary": data.get("description", ""),
+                }
+            )
 
     return result
 
@@ -206,9 +212,12 @@ def update_community(
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="No writes — preview only")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="No writes — preview only"
+    )
     parser.add_argument(
         "--force",
         action="store_true",
@@ -237,7 +246,10 @@ def main() -> None:
 
     # Pre-cache all L2 descriptions so child lookups don't need extra Qdrant calls
     l2_cache: dict[str, dict] = {
-        c["community_id"]: {"name": c.get("name", ""), "description": c.get("description", "")}
+        c["community_id"]: {
+            "name": c.get("name", ""),
+            "description": c.get("description", ""),
+        }
         for c in by_level.get(2, [])
         if c.get("community_id")
     }
@@ -246,10 +258,11 @@ def main() -> None:
     # --- PASS 1: L1 communities -------------------------------------------------
     l1_rows = by_level.get(1, [])
     l1_to_update = [
-        c for c in l1_rows
-        if args.force or _is_placeholder(c.get("description"))
+        c for c in l1_rows if args.force or _is_placeholder(c.get("description"))
     ]
-    logger.info(f"\nL1: {len(l1_to_update)} / {len(l1_rows)} communities need new descriptions")
+    logger.info(
+        f"\nL1: {len(l1_to_update)} / {len(l1_rows)} communities need new descriptions"
+    )
 
     # freshly_generated maps community_id → {name, description} so L0 can use them
     freshly_generated: dict[str, dict] = {}
@@ -260,7 +273,6 @@ def main() -> None:
             continue
 
         current_name = community.get("name") or f"Community L1-{idx}"
-        logger.info(f"[L1 {idx}/{len(l1_to_update)}] {current_name} ({community_id30]}…)")
 
         child_rows = get_child_community_rows(
             community_id=community_id,
@@ -268,7 +280,9 @@ def main() -> None:
             child_level=2,
             child_cache=l2_cache,
         )
-        real_child_rows = [r for r in child_rows if not _is_placeholder(r.get("summary"))]
+        real_child_rows = [
+            r for r in child_rows if not _is_placeholder(r.get("summary"))
+        ]
         logger.info(
             f"  Found {len(child_rows)} L2 children, "
             f"{len(real_child_rows)} have real descriptions"
@@ -301,10 +315,11 @@ def main() -> None:
     # --- PASS 2: L0 communities -------------------------------------------------
     l0_rows = by_level.get(0, [])
     l0_to_update = [
-        c for c in l0_rows
-        if args.force or _is_placeholder(c.get("description"))
+        c for c in l0_rows if args.force or _is_placeholder(c.get("description"))
     ]
-    logger.info(f"\nL0: {len(l0_to_update)} / {len(l0_rows)} communities need new descriptions")
+    logger.info(
+        f"\nL0: {len(l0_to_update)} / {len(l0_rows)} communities need new descriptions"
+    )
 
     for idx, community in enumerate(l0_to_update, 1):
         community_id = community.get("community_id") or community.get("node_id")
@@ -312,7 +327,9 @@ def main() -> None:
             continue
 
         current_name = community.get("name") or f"Community L0-{idx}"
-        logger.info(f"[L0 {idx}/{len(l0_to_update)}] {current_name} ({community_id[:30]}…)")
+        logger.info(
+            f"[L0 {idx}/{len(l0_to_update)}] {current_name} ({community_id[:30]}…)"
+        )
 
         child_rows = get_child_community_rows(
             community_id=community_id,
@@ -320,7 +337,9 @@ def main() -> None:
             child_level=1,
             child_cache=freshly_generated,
         )
-        real_child_rows = [r for r in child_rows if not _is_placeholder(r.get("summary"))]
+        real_child_rows = [
+            r for r in child_rows if not _is_placeholder(r.get("summary"))
+        ]
         logger.info(
             f"  Found {len(child_rows)} L1 children, "
             f"{len(real_child_rows)} have real descriptions"

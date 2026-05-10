@@ -7,6 +7,10 @@ tmp/
 .gemini/
 *.log
 
+# Always track Results folders (overrides *.log)
+!Results*/
+!Results*/**
+
 # Logs
 backend/logs/
 

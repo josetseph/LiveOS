@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import asyncio
+import html
 import json
 import os
 import re
@@ -365,24 +366,32 @@ async def evaluate_single(
     # Expected: ["Scott Derrickson.md", "Ed Wood.md"]
     # Retrieved: note IDs from linked_notes
     if expected_notes and (titles or note_ids):
-        # Build mapping from filename to note by checking if filename (without .md) appears in title
-        # E.g., "Scott Derrickson.md" → "Biography of Scott Derrickson" (match "scott derrickson")
-        expected_names = set()
-        for filename in expected_notes:
-            # Extract name from filename (remove .md and special chars)
-            name = filename.replace(".md", "").replace("_", " ").strip()
-            expected_names.add(normalize_answer(name))
+        # Build mapping from filename to note by checking if filename (without .md) appears in title.
+        # Use supporting_facts entity names if available — they are already clean Wikipedia
+        # article titles without filename extensions or underscores.
+        supporting_facts = test_case.get("supporting_facts", [])
+        if supporting_facts and isinstance(supporting_facts[0], str):
+            # Manifest already contains parsed clean names (e.g. ['Scott Derrickson', 'Ed Wood'])
+            raw_expected_names = supporting_facts
+        else:
+            # Fall back to required_notes filenames (strip .md / underscores)
+            raw_expected_names = [
+                fn.replace(".md", "").replace("_", " ").strip() for fn in expected_notes
+            ]
 
-        # Check if any retrieved title contains the expected name
+        # HTML-decode expected names so that manifest entities like "Tunnels &amp; Trolls"
+        # correctly match note titles containing "Tunnels & Trolls".
+        expected_names = set(html.unescape(name).lower() for name in raw_expected_names)
+
+        # Check if any retrieved title contains the expected name as a substring.
+        # Use only lowercase (not full normalize_answer) to avoid apostrophe mangling:
+        # "Derrickson's Career..." lowercased contains "scott derrickson" as a prefix.
+        # Also HTML-decode retrieved titles for symmetry.
         retrieved_matches = set()
         for title in titles:
-            title_normalized = normalize_answer(title)
+            title_lower = html.unescape(title).lower()
             for expected_name in expected_names:
-                # Fuzzy match: if most of expected words are in title
-                expected_words = set(expected_name.split())
-                title_words = set(title_normalized.split())
-                # Match if 75%+ of expected words appear in title
-                if len(expected_words & title_words) / len(expected_words) >= 0.75:
+                if expected_name in title_lower:
                     retrieved_matches.add(expected_name)
                     break
 

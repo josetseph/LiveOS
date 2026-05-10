@@ -8,6 +8,7 @@ class Node(BaseModel):
 
     name: str = ""
     type: str = "thing"
+    type_reasoning: str = ""
     isolated_context: str = ""
 
     @model_validator(mode="before")
@@ -44,6 +45,7 @@ class ExtractedRelationship(BaseModel):
     source_name: str = ""
     target_name: str = ""
     relationship_type: str = "relates_to"
+    reasoning: str = ""
     # All three scores on the 1–10 scale (plan-aligned).
     # edge_weight = (strength × 0.5) + (confidence × 0.3) + (relevance × 0.2)
     strength: float = 5.0

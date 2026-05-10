@@ -5,7 +5,7 @@ Covers:
   - get_related_nodes depth=1 (fast path, never touches variable-length syntax)
   - get_related_nodes depth>1 (fixed path, no all() predicate in WHERE)
   - find_paths_between_nodes (fixed path, no all() predicate in WHERE)
-  - Post-filtering logic for confidence and is_active
+  - Post-filtering logic for confidence
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ def _row(
     node_id: str,
     name: str,
     confidence_path: list[float] | None = None,
-    is_active_path: list[bool] | None = None,
     depth: int = 1,
 ) -> dict:
     return {
@@ -54,7 +53,6 @@ def _row(
         "depth": depth,
         "relationship_path": ["RELATED_TO"] * depth,
         "confidence_path": confidence_path or [0.9] * depth,
-        "is_active_path": is_active_path or [True] * depth,
         "context_path": [None] * depth,
         "natural_language_path": [None] * depth,
     }
@@ -141,24 +139,6 @@ class TestGetRelatedNodesDepthGt1:
         assert "Alice" in names
         assert "Bob" not in names
         assert "Carol" not in names
-
-    def test_depth2_results_filtered_by_is_active(self):
-        """Python post-filter should exclude rows where any hop is inactive."""
-        svc = _make_graph_service()
-        raw = [
-            _row("n1", "Alice", is_active_path=[True, True], depth=2),  # passes
-            _row("n2", "Bob", is_active_path=[True, False], depth=2),  # fails
-        ]
-
-        with (
-            patch.object(svc, "resolve_node_id", return_value="node-root"),
-            patch.object(svc, "execute_query", return_value=raw),
-        ):
-            result = svc.get_related_nodes("Root", max_depth=2, min_confidence=0.0)
-
-        names = {r["name"] for r in result}
-        assert "Alice" in names
-        assert "Bob" not in names
 
 
 # ---------------------------------------------------------------------------

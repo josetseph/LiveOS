@@ -81,7 +81,6 @@ def main() -> None:
     # ------------------------------------------------------------------
     query = """
     MATCH (src:Node)-[r:SEMANTIC_REL]->(tgt:Node)
-    WHERE r.is_active = true OR r.is_active IS NULL
     RETURN
         src.id    AS src_id,
         src.name  AS src_name,
@@ -131,7 +130,6 @@ def main() -> None:
     update_query = """
     MATCH (src:Node {id: $src_id})-[r:SEMANTIC_REL]->(tgt:Node {id: $tgt_id})
     WHERE r.rel_type = $old_rel_type
-      AND (r.is_active = true OR r.is_active IS NULL)
     SET r.rel_type = $new_rel_type
     """
 

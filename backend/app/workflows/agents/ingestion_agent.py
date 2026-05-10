@@ -144,7 +144,9 @@ async def multimodal_node(state: IngestionState):
                     )
                     try:
                         img_title = await llm_service.generate(
-                            img_title_prompt, temperature=0.0
+                            img_title_prompt,
+                            temperature=0.0,
+                            model=llm_service._get_ingestion_model(),
                         )
                         img_title = (img_title or "").strip().strip('"').strip(
                             "'"
@@ -226,17 +228,20 @@ Identify every distinct entity in the note. For each, assign:
 - `type`: The following are examples and not an exhaustive list — use your judgment to classify each entity into the most fitting type based on its nature and role in the note:
   - `Person` — a human individual
   - `Place` — a physical or geographic location
-  - `Organization` — a group, nation, army, institution, or collective body
+  - `Organization` — a group, nation, army, or institution (governments, companies, teams, schools)
   - `Event` — a specific occurrence with a defined scope
+  - `Work` — a creative or intellectual work such as a book, film, TV series, album, article, or artwork
   - `Thing` — a physical object, document, or artifact
   - `Concept` — an abstract idea, principle, or condition (e.g., "sovereignty", "friendship")
   - `Time Period` — a specific date, duration, era, or recurring time (e.g., "Weekend", "2 March 1896")
+- `type_reasoning`: One sentence explaining why you chose this type for this entity. Be specific — mention the key clue from the note that determined the classification.
 
 ### STEP 2 — Relationship Extraction
 List every relationship between entities. For each:
 - Write a short, verb-driven statement: `[Entity A] -> [verb phrase] -> [Entity B]`
 - Indicate directionality: `->` (one directional) or `<->` (mutual)
 - Only include what the text explicitly states or directly implies
+- `reasoning`: One sentence citing the specific word, phrase, or sentence in the note that supports this relationship
 
 ### STEP 3 — Relationship Graph
 Represent all relationships as a compact symbolic graph using `->`. Group related clusters together.
@@ -262,7 +267,8 @@ Return a single JSON object structured exactly like this:
   "entities": [
     {{
       "name": "string — canonical entity name",
-      "type": "string — one of the 7 defined types",
+      "type": "string — the most fitting type for this entity",
+      "type_reasoning": "string — explaining why you chose this type, citing the key clue from the note",
       "context": "string — isolated, entity-centric contextual paragraph drawn entirely from the note",
       "relationships": [
         "string — e.g., 'Ama is friends with Kofi'",
@@ -275,7 +281,8 @@ Return a single JSON object structured exactly like this:
       "entity1": "string",
       "entity2": "string",
       "direction": "-> or <->",
-      "description": "string — concise verb-phrase description of the relationship"
+      "description": "string — concise verb-phrase description of the relationship",
+      "reasoning": "string — one sentence citing the specific text that supports this relationship"
     }}
   ],
   "graph": "string — compact symbolic representation of all relationships"
@@ -295,6 +302,7 @@ Return a single JSON object structured exactly like this:
     {{
       "name": "Ama",
       "type": "Person",
+      "type_reasoning": "Ama is explicitly described as a girl, making her a human individual.",
       "context": "Ama is a girl and a student at Primary School. She is mutual friends with Kofi and shares a weekend play routine with him. She lives in the same neighborhood as Kofi. She consistently completes her homework before engaging in play.",
       "relationships": [
         "Ama is friends with Kofi",
@@ -307,6 +315,7 @@ Return a single JSON object structured exactly like this:
     {{
       "name": "Kofi",
       "type": "Person",
+      "type_reasoning": "Kofi is explicitly described as a boy, making him a human individual.",
       "context": "Kofi is a boy who lives in the Neighborhood. He is mutual friends with Ama and plays with her every weekend. His play is situated within the neighborhood.",
       "relationships": [
         "Kofi is friends with Ama",
@@ -317,6 +326,7 @@ Return a single JSON object structured exactly like this:
     {{
       "name": "Primary School",
       "type": "Place",
+      "type_reasoning": "Primary School is an educational institution — a physical location that Ama attends.",
       "context": "Primary School is the educational institution that Ama attends. It is the only institution mentioned in the note and defines Ama's role as a student.",
       "relationships": [
         "Ama attends Primary School"
@@ -325,6 +335,7 @@ Return a single JSON object structured exactly like this:
     {{
       "name": "Neighborhood",
       "type": "Place",
+      "type_reasoning": "The Neighborhood is a physical geographic area where both Ama and Kofi live and play.",
       "context": "The Neighborhood is a shared residential area where both Ama and Kofi live. It is also where Kofi plays.",
       "relationships": [
         "Ama lives in the Neighborhood",
@@ -336,6 +347,7 @@ Return a single JSON object structured exactly like this:
       "name": "Weekend",
       "type": "Time Period",
       "context": "The Weekend is the recurring time period during which Ama and Kofi play together. It is contingent on Ama finishing her homework first.",
+      "type_reasoning": "Weekend is a recurring temporal interval — a defined period of time during which events in the note occur.",
       "relationships": [
         "Ama plays with Kofi on the Weekend",
         "Weekend follows Ama completing Homework"
@@ -344,6 +356,7 @@ Return a single JSON object structured exactly like this:
     {{
       "name": "Homework",
       "type": "Thing",
+      "type_reasoning": "Homework is a concrete recurring task/artifact that Ama must complete — a physical obligation rather than an abstract concept.",
       "context": "Homework is a recurring obligation that Ama must complete before she is free to play with Kofi on the Weekend. It acts as a precondition to their shared leisure activity.",
       "relationships": [
         "Ama completes Homework before the Weekend",
@@ -352,14 +365,14 @@ Return a single JSON object structured exactly like this:
     }}
   ],
   "relationships": [
-    {{"entity1": "Ama", "entity2": "Kofi", "direction": "<->", "description": "are mutual friends"}},
-    {{"entity1": "Ama", "entity2": "Primary School", "direction": "->", "description": "attends"}},
-    {{"entity1": "Ama", "entity2": "Neighborhood", "direction": "->", "description": "lives in"}},
-    {{"entity1": "Kofi", "entity2": "Neighborhood", "direction": "->", "description": "lives and plays in"}},
-    {{"entity1": "Ama", "entity2": "Weekend", "direction": "->", "description": "plays with Kofi during"}},
-    {{"entity1": "Kofi", "entity2": "Weekend", "direction": "->", "description": "plays with Ama during"}},
-    {{"entity1": "Ama", "entity2": "Homework", "direction": "->", "description": "completes before weekend play"}},
-    {{"entity1": "Homework", "entity2": "Weekend", "direction": "->", "description": "must be completed before"}}
+    {{"entity1": "Ama", "entity2": "Kofi", "direction": "<->", "description": "are mutual friends", "reasoning": "The note states 'Ama and Kofi are friends'."}},
+    {{"entity1": "Ama", "entity2": "Primary School", "direction": "->", "description": "attends", "reasoning": "The note says 'Ama is a girl in primary school'."}},
+    {{"entity1": "Ama", "entity2": "Neighborhood", "direction": "->", "description": "lives in", "reasoning": "Implied by Kofi playing 'in the neighborhood' and both sharing the same area."}},
+    {{"entity1": "Kofi", "entity2": "Neighborhood", "direction": "->", "description": "lives and plays in", "reasoning": "The note says 'Kofi is a boy who plays in the neighborhood'."}},
+    {{"entity1": "Ama", "entity2": "Weekend", "direction": "->", "description": "plays with Kofi during", "reasoning": "The note says 'Ama likes to play with Kofi every weekend'."}},
+    {{"entity1": "Kofi", "entity2": "Weekend", "direction": "->", "description": "plays with Ama during", "reasoning": "The note says 'Ama likes to play with Kofi every weekend', making it mutual."}},
+    {{"entity1": "Ama", "entity2": "Homework", "direction": "->", "description": "completes before weekend play", "reasoning": "The note says 'after she is done with her homework'."}},
+    {{"entity1": "Homework", "entity2": "Weekend", "direction": "->", "description": "must be completed before", "reasoning": "The note says Ama plays 'after she is done with her homework', making homework a precondition to weekend play."}}
   ],
   "graph": "Ama <-> Kofi, Ama -> Primary School, Ama -> Neighborhood <- Kofi, Ama -> Weekend <- Kofi, Ama -> Homework -> Weekend"
 }}
@@ -374,13 +387,36 @@ Now apply this entire process to the following note and return only the JSON out
         # Use generate() instead of extract_structured() to bypass Ollama's
         # grammar-constrained JSON sampling, which causes small models (e.g.
         # gemma3:4b) to emit empty `relationships: []` for complex nested arrays.
-        raw_response = await llm_service.generate(prompt, temperature=0.1)
+        raw_response = await llm_service.generate(
+            prompt, temperature=0.1, model=llm_service._get_ingestion_model()
+        )
         cleaned_json = llm_service._clean_json(raw_response)
         extraction = Extraction.model_validate_json(cleaned_json)
         if not extraction:
             return {"errors": ["LLM returned empty extraction"]}
 
         logger.info(f"Extraction Completed: {extraction}")
+
+        # Log per-entity type reasoning for auditability
+        for n in extraction.nodes:
+            reasoning = (
+                n.type_reasoning.strip()
+                if n.type_reasoning
+                else "no reasoning provided"
+            )
+            logger.info(
+                f"  [Entity] name={n.name!r} type={n.type!r} reasoning={reasoning!r}"
+            )
+
+        # Log per-relationship reasoning for auditability
+        for r in extraction.relationships:
+            rel_reasoning = (
+                r.reasoning.strip() if r.reasoning else "no reasoning provided"
+            )
+            logger.info(
+                f"  [Relationship] {r.source_name!r} -> {r.target_name!r}"
+                f" ({r.relationship_type!r}): {rel_reasoning!r}"
+            )
 
         # GARBAGE NAME HANDLING: nodes with empty/placeholder names but valid context
         # get a recovery rename; nodes with neither are dropped.
@@ -414,7 +450,11 @@ Now apply this entire process to the following note and return only the JSON out
                 'Return ONLY: [{"index": 1, "name": "..."}, ...]'
             )
             try:
-                rename_resp = await llm_service.generate(rename_prompt, temperature=0.0)
+                rename_resp = await llm_service.generate(
+                    rename_prompt,
+                    temperature=0.0,
+                    model=llm_service._get_ingestion_model(),
+                )
                 match = _re.search(r"\[.*?\]", rename_resp, _re.DOTALL)
                 if match:
                     name_list = _json.loads(match.group())
@@ -665,7 +705,11 @@ Format: {{"source_name": "...", "target_name": "...", "relationship_type": "snak
         try:
             prompt = _build_audit_prompt(extraction, pass_num)
             patch = await asyncio.to_thread(
-                llm_service.extract_structured, prompt, Extraction
+                llm_service.extract_structured,
+                prompt,
+                Extraction,
+                0.1,
+                llm_service._get_ingestion_model(),
             )
             if patch:
                 added_nodes, added_rels = _merge_patch(extraction, patch)

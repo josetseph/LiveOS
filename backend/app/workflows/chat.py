@@ -3,7 +3,6 @@ import time
 from app.core.database import AsyncSessionLocal
 from app.core.log import get_logger
 from app.models.note import Note
-from app.services.llm import llm_service
 from app.services.retrieval import retrieval_service
 from sqlalchemy import select
 
@@ -56,25 +55,6 @@ class ChatWorkflow:
                     seen_local.add(doc_id)
             return deduped
 
-        async def _run_structured_fallback(
-            trigger_reason: str,
-        ) -> tuple[str | None, list[dict]]:
-            logger.info(
-                f"[Chat] Triggering iterative loop fallback ({trigger_reason})"
-            )
-            t_fb = time.perf_counter()
-            fb_answer, fb_docs = (
-                await retrieval_service.retrieve_with_iterative_loop(
-                    user_query,
-                    top_k=50,
-                )
-            )
-            logger.info(
-                f"[Chat] Iterative loop fallback: {len(fb_docs)} docs in "
-                f"{time.perf_counter() - t_fb:.2f}s"
-            )
-            return fb_answer, fb_docs
-
         # Deduplicate docs
         unique_docs: list[dict] = _dedupe_docs(all_docs)
 
@@ -113,30 +93,12 @@ class ChatWorkflow:
             answer = final_answer
 
         if not answer:
-            fallback_reason = "no loop context" if not unique_docs else "no loop answer"
-            fb_answer, fb_docs = await _run_structured_fallback(fallback_reason)
-
-            if fb_docs:
-                unique_docs = _dedupe_docs(unique_docs + fb_docs)
-                logger.info(f"[Chat] Fallback merged unique docs: {len(unique_docs)}")
-
-            # The structured chain-of-reasoning answer is the most reliable signal.
-            # Raw synthesis over the fallback doc pool is unreliable for multi-hop
-            # questions and causes hallucinations (e.g. "Mistborn" instead of
-            # "Animorphs", "yes" instead of "no" for Laleli/Esma Sultan).
-            if fb_answer:
-                logger.info(f"[Chat] Using structured fallback answer: '{fb_answer}'")
-                answer = fb_answer
-
-            if not answer:
-                answer = (
-                    "I couldn't find any relevant context in your brain to answer that."
-                    if not unique_docs
-                    else "I couldn't find enough information to answer that."
-                )
-                logger.info(
-                    "[Chat] Both primary and fallback retrieval paths exhausted."
-                )
+            answer = (
+                "I couldn't find any relevant context in your brain to answer that."
+                if not unique_docs
+                else "I couldn't find enough information to answer that."
+            )
+            logger.info("[Chat] Iterative loop exhausted — no answer produced.")
 
         # Only cite notes from docs that the reranker individually scored.
         # Graph-expansion docs are added after reranking and carry no rerank_score;

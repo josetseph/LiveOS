@@ -9,14 +9,14 @@ Node table:
   kind values: 'note' | 'indexable' | 'community'
 
 Relationship tables:
-    REFERENCES(FROM Node TO Node, note_id STRING, is_active BOOLEAN)
+    REFERENCES(FROM Node TO Node, note_id STRING)
     MEMBER_OF(FROM Node TO Node, level INT64)
     CONTAINS(FROM Node TO Node)
     SEMANTIC_REL(FROM Node TO Node,
         rel_type STRING, confidence DOUBLE, strength DOUBLE,
         relevance DOUBLE, edge_weight DOUBLE, relationship_id STRING,
         ingested_at STRING, last_updated STRING, mention_count INT64,
-        is_active BOOLEAN, note_id STRING, valid_from STRING, valid_to STRING,
+        note_id STRING, valid_from STRING, valid_to STRING,
         evolved_from STRING, evolved_to STRING, invalidated_by STRING,
         invalidation_note_id STRING, evolution_note_id STRING,
         is_similarity BOOLEAN, created_at STRING)
@@ -71,8 +71,7 @@ _SCHEMA_STMTS = [
     )""",
     """CREATE REL TABLE IF NOT EXISTS REFERENCES(
         FROM Node TO Node,
-        note_id STRING,
-        is_active BOOLEAN
+        note_id STRING
     )""",
     """CREATE REL TABLE IF NOT EXISTS MEMBER_OF(
         FROM Node TO Node,
@@ -92,7 +91,6 @@ _SCHEMA_STMTS = [
         ingested_at STRING,
         last_updated STRING,
         mention_count INT64,
-        is_active BOOLEAN,
         note_id STRING,
         valid_from STRING,
         valid_to STRING,
@@ -370,7 +368,7 @@ class GraphService:
 
         # NOTE: Do NOT add `all(rel IN relationships(path) WHERE ...)` inside a
         # variable-length MATCH — it triggers a KU_UNREACHABLE parser assertion in
-        # this Kuzu build.  Confidence and is_active filtering is done in Python
+        # this Kuzu build.  Confidence filtering is done in Python
         # below after the query returns.
         query = f"""
         UNWIND $node_ids AS source_id
@@ -390,18 +388,16 @@ class GraphService:
                      ELSE label(rel) END
             ] AS relationship_types,
             [rel IN rels | coalesce(rel.confidence, 0.8)] AS confidence_path,
-            [rel IN rels | coalesce(rel.is_active, true)] AS is_active_path,
             pathLength AS depth
         ORDER BY pathLength
         LIMIT 20
         """
         rows = self.execute_query(query, {"node_ids": node_ids})
-        # Post-filter: keep only paths where every hop meets confidence and is_active.
+        # Post-filter: keep only paths where every hop meets the confidence threshold.
         return [
             r
             for r in rows
             if all(c >= min_confidence for c in (r.get("confidence_path") or []))
-            and all(a for a in (r.get("is_active_path") or [True]))
         ]
 
     def get_indexable_nodes_for_communities(self) -> list[dict]:
@@ -421,7 +417,6 @@ class GraphService:
         WHERE a.kind = 'indexable' AND b.kind = 'indexable'
           AND a.id IS NOT NULL AND b.id IS NOT NULL
           AND a.id < b.id
-          AND (r.is_active = true OR r.is_active IS NULL)
         RETURN DISTINCT
             a.id AS source_node_id,
             b.id AS target_node_id,
@@ -572,7 +567,7 @@ class GraphService:
         query = """
         UNWIND $node_ids AS node_id
         MATCH (n:Node {id: node_id})<-[r:REFERENCES]-(note:Node)
-        WHERE note.kind = 'note' AND r.is_active = true
+        WHERE note.kind = 'note'
         RETURN n.id AS node_id, note.id AS note_id, 'REFERENCES' AS relationship_type
         """
         return self.execute_query(query, {"node_ids": node_ids})
@@ -618,7 +613,7 @@ class GraphService:
         query = """
         UNWIND $node_ids AS node_id
         MATCH (n:Node {id: node_id})<-[r:REFERENCES]-(note:Node)
-        WHERE note.kind = 'note' AND r.is_active = true
+        WHERE note.kind = 'note'
         WITH node_id, collect(DISTINCT {id: note.id, title: note.name}) AS evidence
         RETURN node_id, evidence
         """
@@ -641,8 +636,7 @@ class GraphService:
         """
         links_query = """
         MATCH (source:Node)-[r:SEMANTIC_REL|REFERENCES]->(target:Node)
-        WHERE (r.is_active = true OR r.is_active IS NULL)
-          AND source.kind IN ['indexable', 'note']
+        WHERE source.kind IN ['indexable', 'note']
           AND target.kind IN ['indexable', 'note']
         RETURN
             source.id AS source,
@@ -759,9 +753,8 @@ class GraphService:
             result = self.execute_query(
                 """
                 MATCH (source:Node {id: $source_id})-[r:SEMANTIC_REL]->(target:Node {id: $target_id})
-                WHERE r.rel_type = $contra_type AND r.is_active = true
-                SET r.is_active = false,
-                    r.valid_to = $ingestion_time,
+                WHERE r.rel_type = $contra_type
+                SET r.valid_to = $ingestion_time,
                     r.invalidated_by = $relationship_type,
                     r.invalidation_note_id = $note_id
                 RETURN r.rel_type AS invalidated_type
@@ -786,7 +779,6 @@ class GraphService:
             """
             MATCH (source:Node {id: $source_id})-[r:SEMANTIC_REL]->(target:Node {id: $target_id})
             WHERE r.rel_type = $rel_type
-              AND (r.is_active = true OR r.is_active IS NULL)
             RETURN r.rel_type AS current_type, r.confidence AS current_confidence
             LIMIT 1
             """,
@@ -801,7 +793,6 @@ class GraphService:
             """
             MATCH (source:Node {id: $source_id})-[r:SEMANTIC_REL]->(target:Node {id: $target_id})
             WHERE r.rel_type <> $rel_type
-              AND (r.is_active = true OR r.is_active IS NULL)
             RETURN r.rel_type AS current_type
             LIMIT 1
             """,
@@ -821,14 +812,12 @@ class GraphService:
                 """
                 MATCH (source:Node {id: $source_id})-[r:SEMANTIC_REL]->(target:Node {id: $target_id})
                 WHERE r.rel_type = $rel_type
-                  AND (r.is_active = true OR r.is_active IS NULL)
                 SET r.last_updated = $ingestion_time,
                     r.mention_count = coalesce(r.mention_count, 0) + 1,
                     r.confidence = CASE
                         WHEN $confidence > coalesce(r.confidence, 0.0) THEN $confidence
                         ELSE r.confidence
                     END,
-                    r.is_active = true,
                     r.relationship_id = CASE
                         WHEN r.relationship_id IS NULL THEN $relationship_id
                         ELSE r.relationship_id
@@ -858,9 +847,7 @@ class GraphService:
                     """
                     MATCH (source:Node {id: $source_id})-[r:SEMANTIC_REL]->(target:Node {id: $target_id})
                     WHERE r.rel_type = $current_type
-                      AND (r.is_active = true OR r.is_active IS NULL)
-                    SET r.is_active = false,
-                        r.valid_to = $ingestion_time,
+                    SET r.valid_to = $ingestion_time,
                         r.evolved_to = $new_type,
                         r.evolution_note_id = $note_id
                     """,
@@ -888,7 +875,6 @@ class GraphService:
                         r.last_updated = $ingestion_time,
                         r.evolved_from = $previous_type,
                         r.mention_count = 1,
-                        r.is_active = true,
                         r.note_id = $note_id
                     """,
                     {
@@ -939,8 +925,7 @@ class GraphService:
                             r.ingested_at = $ingestion_time,
                             r.last_updated = $ingestion_time,
                             r.mention_count = 1,
-                            r.is_active = true,
-                            r.note_id = $note_id
+                                r.note_id = $note_id
                         """,
                         {
                             "source_id": source_id,
@@ -996,7 +981,6 @@ class GraphService:
                     r.ingested_at = $ingestion_time,
                     r.last_updated = $ingestion_time,
                     r.mention_count = 1,
-                    r.is_active = true,
                     r.note_id = $note_id
                 """,
                 {
@@ -1078,7 +1062,6 @@ class GraphService:
                 WHERE r.rel_type = $rel_type
                 SET r.last_updated = $ingestion_time,
                     r.mention_count = coalesce(r.mention_count, 0) + 1,
-                    r.is_active = true,
                     r.note_id = $note_id
                 """,
                 {
@@ -1100,7 +1083,6 @@ class GraphService:
                     r.ingested_at = $ingestion_time,
                     r.last_updated = $ingestion_time,
                     r.mention_count = 1,
-                    r.is_active = true,
                     r.note_id = $note_id
                 """,
                 {
@@ -1156,7 +1138,6 @@ class GraphService:
                     r.confidence = $confidence,
                     r.created_at = $created_at,
                     r.note_id = $note_id,
-                    r.is_active = true,
                     r.is_similarity = true
                 """,
                 {
@@ -1197,8 +1178,7 @@ class GraphService:
             # temple" instead of "shirley temple plays corliss archer").
             outgoing_query = """
             MATCH (start:Node {id: $node_id})-[r:SEMANTIC_REL|REFERENCES]->(related:Node)
-            WHERE (r.is_active = true OR r.is_active IS NULL)
-              AND coalesce(r.confidence, 1.0) >= $min_confidence
+            WHERE coalesce(r.confidence, 1.0) >= $min_confidence
             RETURN DISTINCT
                 related.id AS node_id,
                 related.name AS name,
@@ -1212,8 +1192,7 @@ class GraphService:
             """
             incoming_query = """
             MATCH (start:Node {id: $node_id})<-[r:SEMANTIC_REL|REFERENCES]-(related:Node)
-            WHERE (r.is_active = true OR r.is_active IS NULL)
-              AND coalesce(r.confidence, 1.0) >= $min_confidence
+            WHERE coalesce(r.confidence, 1.0) >= $min_confidence
             RETURN DISTINCT
                 related.id AS node_id,
                 related.name AS name,
@@ -1241,7 +1220,7 @@ class GraphService:
 
         # NOTE: Do NOT add `all(rel IN relationships(path) WHERE ...)` inside a
         # variable-length MATCH — it triggers a KU_UNREACHABLE parser assertion in
-        # this Kuzu build.  Confidence and is_active filtering is done in Python
+        # this Kuzu build.  Confidence filtering is done in Python
         # below after the query returns.
         query = f"""
         MATCH path = (start:Node {{id: $node_id}})-[:SEMANTIC_REL|REFERENCES*1..{max_depth}]-(related:Node)
@@ -1256,19 +1235,17 @@ class GraphService:
                      ELSE label(rel) END
             ] AS relationship_path,
             [rel IN rels | coalesce(rel.confidence, 0.0)] AS confidence_path,
-            [rel IN rels | coalesce(rel.is_active, true)] AS is_active_path,
             [rel IN rels | NULL] AS context_path,
             [rel IN rels | NULL] AS natural_language_path
         ORDER BY depth
         LIMIT 200
         """
         rows = self.execute_query(query, {"node_id": node_id})
-        # Post-filter: keep only paths where every hop meets confidence and is_active.
+        # Post-filter: keep only paths where every hop meets the confidence threshold.
         return [
             r
             for r in rows
             if all(c >= min_confidence for c in (r.get("confidence_path") or []))
-            and all(a for a in (r.get("is_active_path") or [True]))
         ]
 
     def get_relationships_between_nodes(self, names: list[str]) -> list[dict]:
@@ -1284,7 +1261,6 @@ class GraphService:
         query = """
         MATCH (a:Node)-[r:SEMANTIC_REL]->(b:Node)
         WHERE a.id IN $ids AND b.id IN $ids
-          AND (r.is_active = true OR r.is_active IS NULL)
         RETURN a.id AS source, r.rel_type AS rel_type, b.id AS target,
                r.edge_weight AS weight
         ORDER BY r.confidence DESC
@@ -1332,7 +1308,7 @@ class GraphService:
         MATCH (c)-[:CONTAINS]->(member:Node)
         WHERE member.kind IN ['indexable', 'note']
         MATCH (note:Node)-[r:REFERENCES]->(member)
-        WHERE note.kind = 'note' AND r.is_active = true
+        WHERE note.kind = 'note'
         WITH comm_name, note.id AS note_id, note.name AS note_name
         WITH comm_name, collect(DISTINCT {id: note_id, title: note_name}) AS all_notes
         RETURN comm_name AS community_name, all_notes AS notes
@@ -1361,8 +1337,7 @@ class GraphService:
         edge_rows = self.execute_query(
             """
             MATCH (a:Node)-[r:SEMANTIC_REL]->(b:Node)
-            WHERE (r.is_active = true OR r.is_active IS NULL)
-              AND a.id IS NOT NULL AND b.id IS NOT NULL
+            WHERE a.id IS NOT NULL AND b.id IS NOT NULL
             RETURN DISTINCT a.id AS src, b.id AS tgt
             UNION
             MATCH (n:Node)-[:MEMBER_OF]->(c:Node)
@@ -1482,8 +1457,7 @@ class GraphService:
         edge_rows = self.execute_query(
             """
             MATCH (a:Node)-[r:SEMANTIC_REL]->(b:Node)
-            WHERE (r.is_active = true OR r.is_active IS NULL)
-              AND a.id IS NOT NULL AND b.id IS NOT NULL
+            WHERE a.id IS NOT NULL AND b.id IS NOT NULL
               AND a.kind IN ['indexable', 'note']
               AND b.kind IN ['indexable', 'note']
             RETURN DISTINCT a.id AS source, b.id AS target, r.rel_type AS rel_type
@@ -1656,7 +1630,6 @@ class GraphService:
               AND b.kind IN ['indexable', 'note']
               AND NOT EXISTS { MATCH (:Node)-[:CONTAINS]->(a) }
               AND NOT EXISTS { MATCH (:Node)-[:CONTAINS]->(b) }
-              AND (r.is_active = true OR r.is_active IS NULL)
               AND a.id IS NOT NULL AND b.id IS NOT NULL
             RETURN DISTINCT a.id AS source, b.id AS target, r.rel_type AS rel_type
             LIMIT 1000
@@ -1694,7 +1667,6 @@ class GraphService:
             MATCH (c)-[:CONTAINS]->(b:Node)
             MATCH (a)-[r:SEMANTIC_REL]->(b)
             WHERE a.id IS NOT NULL AND b.id IS NOT NULL
-              AND (r.is_active = true OR r.is_active IS NULL)
             RETURN DISTINCT
                 a.id AS source,
                 b.id AS target,

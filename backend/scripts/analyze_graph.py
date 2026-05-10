@@ -118,7 +118,6 @@ def load_graph_from_kuzu() -> tuple:
         MATCH (a:Node)-[r:SEMANTIC_REL]->(b:Node)
         WHERE a.kind NOT IN $exclude
           AND b.kind NOT IN $exclude
-          AND (r.is_active = true OR r.is_active IS NULL)
         RETURN
             a.id                            AS src,
             b.id                            AS tgt,
