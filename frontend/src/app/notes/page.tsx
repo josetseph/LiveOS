@@ -22,22 +22,8 @@ import remarkGfm from "remark-gfm";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ShaderBackground } from "@/components/shader-background";
+import type { Note, FilePreview } from "@/lib/types";
 
-interface Note {
-  id: string;
-  title: string;
-  content: string;
-  created_at: string;
-  updated_at: string;
-  processed?: boolean;
-  failed?: boolean;
-}
-
-interface FilePreview {
-  url: string;
-  filename: string;
-  type: "image" | "pdf" | "audio" | "other";
-}
 
 type ProcessedFilter = "all" | "ingested" | "ingesting" | "saved" | "failed";
 
@@ -250,7 +236,7 @@ export default function NotesPage() {
                 failed: status.failed,
               });
             }
-          } catch (_) {}
+          } catch { }
         }),
       );
       if (completed.length === 0) return;

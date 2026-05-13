@@ -2,23 +2,73 @@ import uuid
 from contextvars import ContextVar
 from datetime import datetime, timezone
 
-# Setup logging before any other imports
+# Setup logging before any other imports — must precede service imports so
+# every module that calls get_logger() at import time finds logging configured.
 from app.core.log import get_logger, setup_logging
-from fastapi import (
+
+setup_logging()
+
+from app.core.database import get_db  # noqa: E402
+from app.models.note import Note  # noqa: E402
+from app.schemas.extraction import NoteInput  # noqa: E402
+from app.schemas.feedback import FeedbackCreate, FeedbackResponse  # noqa: E402
+from app.schemas.note import CreateNoteInput  # noqa: E402
+from app.services.feedback import feedback_service  # noqa: E402
+from app.services.graph import graph_service  # noqa: E402
+from app.workflows.chat import chat_workflow  # noqa: E402
+from app.workflows.ingestion import ingestion_workflow  # noqa: E402
+from fastapi import (  # noqa: E402
     BackgroundTasks,
     Depends,
     FastAPI,
     File,
+    HTTPException,
     Request,
     Response,
     UploadFile,
 )
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+from sqlalchemy import delete, select  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
-setup_logging()
 logger = get_logger("API")  # App logger; avoid uvicorn.access formatter expectations
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_date_str(s: str) -> datetime:
+    """Parse a date string, trying ISO format first then dateparser.
+
+    Always returns a timezone-aware datetime. Falls back to utcnow() when
+    every parse attempt fails so callers never receive a bare None.
+    """
+    from dateutil import parser as dateutil_parser
+
+    try:
+        dt = dateutil_parser.isoparse(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        pass
+
+    try:
+        import dateparser
+
+        dt = dateparser.parse(s)
+        if dt:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+    except Exception:
+        pass
+
+    return datetime.now(timezone.utc)
+
 
 # ---------------------------------------------------------------------------
 # Request trace-ID context variable
@@ -110,8 +160,6 @@ async def delete_file(file_key: str):
     logger.info(f"Deleting file: {file_key}")
     result = await delete_files(file_key)
     if "error" in result:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=500, detail=result["error"])
     logger.info(f"File deleted successfully: {file_key}")
     return {"status": "deleted", "file_key": file_key}
@@ -129,20 +177,8 @@ async def health_check():
     return {"status": "healthy", "graph": "connected" if connected else "unavailable"}
 
 
-from app.core.database import get_db  # noqa: E402
-from app.models.note import Note  # noqa: E402
-from app.schemas.extraction import NoteInput  # noqa: E402
-from app.workflows.ingestion import ingestion_workflow  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
-
-
 class ChatInput(BaseModel):
     query: str
-
-
-from app.schemas.feedback import FeedbackCreate, FeedbackResponse  # noqa: E402
-from app.services.feedback import feedback_service  # noqa: E402
-from app.workflows.chat import chat_workflow  # noqa: E402
 
 
 @app.post("/api/v1/chat")
@@ -162,9 +198,6 @@ async def submit_feedback(
     Persist user feedback for retrieval-quality analysis and future ingestion.
     """
     return await feedback_service.create_feedback(db, feedback_input)
-
-
-from app.services.graph import graph_service  # noqa: E402
 
 
 @app.get("/api/v1/graph/summary")
@@ -187,16 +220,6 @@ async def get_graph_visualization():
     Fetch nodes and edges for 2D Force Graph.
     """
     return graph_service.get_full_graph()
-
-
-@app.get("/api/v1/graph/export")
-async def export_graph_for_3d():
-    """
-    Export full graph data for 3D visualization.
-    Returns all Indexable nodes and their relationships in 3d-force-graph format.
-    """
-    graph_data = graph_service.get_full_graph()
-    return graph_data
 
 
 @app.get("/api/v1/graph/3d/overview")
@@ -236,31 +259,11 @@ async def graph_3d_node_detail(node_id: str):
     """
     detail = graph_service.get_node_detail(node_id)
     if detail is None:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=404, detail="Node not found")
     return detail
 
 
 # --- Notes API ---
-
-
-class NoteResponse(BaseModel):
-    id: str
-    content: str
-    created_at: str | None = None
-    title: str | None = None
-    summary: str | None = None
-    processed: bool = False
-    failed: bool = False
-
-    class Config:
-        from_attributes = True
-
-
-class CreateNoteInput(BaseModel):
-    content: str
-    created_at: str | None = None
 
 
 @app.post("/api/v1/notes")
@@ -273,37 +276,17 @@ async def create_note(
     Note will have processed=False until explicitly ingested via POST /api/v1/notes/{id}/ingest.
     """
     note_id = str(uuid.uuid4())
-
-    c_at = datetime.now(timezone.utc)
-    if note_input.created_at:
-        try:
-            # Try parsing as ISO format first (from frontend)
-            from dateutil import parser as dateutil_parser
-
-            dt = dateutil_parser.isoparse(note_input.created_at)
-            # Ensure timezone-aware
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            c_at = dt
-        except Exception:
-            # Fallback to dateparser for other formats
-            try:
-                import dateparser
-
-                dt = dateparser.parse(note_input.created_at)
-                if dt:
-                    # Ensure timezone-aware
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    c_at = dt
-            except Exception:
-                pass
+    c_at = (
+        _parse_date_str(note_input.created_at)
+        if note_input.created_at
+        else datetime.now(timezone.utc)
+    )
 
     new_note = Note(
         id=note_id,
         content=note_input.content,
         created_at=c_at,
-        processed=False,  # Not ingested yet
+        processed=False,
     )
     db.add(new_note)
     await db.commit()
@@ -322,7 +305,6 @@ async def ingest_existing_note(
     Trigger ingestion for an existing note.
     This will process the note in the background and set processed=True when complete.
     """
-    # Fetch the note
     result = await db.execute(select(Note).where(Note.id == note_id))
     note = result.scalar_one_or_none()
 
@@ -336,13 +318,11 @@ async def ingest_existing_note(
             "message": "Note has already been ingested",
         }
 
-    # Create NoteInput for the ingestion workflow
     note_data = NoteInput(
         content=note.content,
         created_at=note.created_at.isoformat() if note.created_at else None,
     )
 
-    # Trigger background ingestion
     background_tasks.add_task(ingestion_workflow.process_note, note_data, note_id)
 
     return {
@@ -363,27 +343,18 @@ async def ingest_note(
     For manual note creation, prefer POST /api/v1/notes then POST /api/v1/notes/{id}/ingest.
     """
     note_id = str(uuid.uuid4())
+    c_at = (
+        _parse_date_str(note_data.created_at)
+        if note_data.created_at
+        else datetime.now(timezone.utc)
+    )
 
-    # 1. Save to Postgres
-    c_at = datetime.now(timezone.utc)
-    if note_data.created_at:
-        try:
-            import dateparser
-
-            dt = dateparser.parse(note_data.created_at)
-            if dt:
-                c_at = dt
-        except Exception:
-            pass
-
-    # Create note with processed=False initially
     new_note = Note(
         id=note_id, content=note_data.content, created_at=c_at, processed=False
     )
     db.add(new_note)
     await db.commit()
 
-    # 2. Trigger ingestion unless skip_ingestion=True
     if not note_data.skip_ingestion:
         if note_data.created_at is None:
             note_data.created_at = c_at.isoformat()
@@ -397,7 +368,7 @@ async def ingest_note(
         "status": status,
         "content": note_data.content,
         "created_at": c_at.isoformat(),
-        "processed": False,  # Will be set to True after background task completes
+        "processed": False,
     }
 
 
@@ -414,7 +385,6 @@ async def get_notes(
     """
     base_query = select(Note)
 
-    # Apply filters
     filters = []
     if search:
         term = f"%{search}%"
@@ -459,10 +429,15 @@ async def get_note_ingestion_status(note_id: str, db: AsyncSession = Depends(get
       - failed: true if the ingestion pipeline encountered a permanent error
       - status: "completed" | "failed" | "processing"
     """
-    result = await db.execute(
-        select(Note.id, Note.processed, Note.failed).where(Note.id == note_id)
-    )
-    row = result.one_or_none()
+    try:
+        result = await db.execute(
+            select(Note.id, Note.processed, Note.failed).where(Note.id == note_id)
+        )
+        row = result.one_or_none()
+    except TimeoutError:
+        raise HTTPException(
+            status_code=503, detail="Database temporarily unavailable, retry shortly"
+        )
 
     if row is None:
         return {"error": "Note not found"}, 404
@@ -495,33 +470,10 @@ async def update_note(
     if not existing_note:
         return {"error": "Note not found"}
 
-    # Update content only, preserve processed status
     existing_note.content = note_input.content
 
-    # Update created_at if provided
     if note_input.created_at:
-        try:
-            # Try parsing as ISO format first (from frontend)
-            from dateutil import parser as dateutil_parser
-
-            dt = dateutil_parser.isoparse(note_input.created_at)
-            # Ensure timezone-aware
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            existing_note.created_at = dt
-        except Exception:
-            # Fallback to dateparser for other formats
-            try:
-                import dateparser
-
-                dt = dateparser.parse(note_input.created_at)
-                if dt:
-                    # Ensure timezone-aware
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    existing_note.created_at = dt
-            except Exception:
-                pass
+        existing_note.created_at = _parse_date_str(note_input.created_at)
 
     existing_note.updated_at = datetime.now(timezone.utc)
 
@@ -536,11 +488,9 @@ async def delete_note(note_id: str, db: AsyncSession = Depends(get_db)):
     """
     Delete a note from Postgres and the graph.
     """
-    # 1. Delete from Postgres
     await db.execute(delete(Note).where(Note.id == note_id))
     await db.commit()
 
-    # 2. Delete from graph
     graph_service.execute_query(
         "MATCH (n:Node {id: $id}) WHERE n.kind = 'note' DETACH DELETE n",
         {"id": note_id},

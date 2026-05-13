@@ -41,6 +41,7 @@ export default function Home() {
               alt="LiveOS"
               width={96}
               height={96}
+              loading="eager"
               className="h-24 w-24 object-contain"
             />
           </motion.div>

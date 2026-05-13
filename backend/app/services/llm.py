@@ -36,38 +36,52 @@ class LLMService:
         # Legacy compatibility flags
         self.is_gemini = self.provider == "gemini"
 
+    def _make_local_openai_clients(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: "httpx.Timeout",
+        instructor_mode=None,
+    ):
+        """Create extraction, chat, and async_chat clients for a local OpenAI-compatible server.
+
+        ``instructor_mode`` is passed to ``instructor.patch()``; omit it (or pass None)
+        to use instructor's default mode (suitable for lm_studio).
+        """
+        raw_client = OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=3,
+        )
+        patch_kwargs = {"mode": instructor_mode} if instructor_mode is not None else {}
+        self.extraction_client = instructor.patch(raw_client, **patch_kwargs)
+        self.chat_client = OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=3,
+        )
+        self.async_chat_client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=3,
+        )
+
     def _init_clients(self):
         """Initialize clients for the configured provider."""
         if self.provider == "ollama":
             base_url = f"{settings.LLM_BASE_URL.rstrip('/')}/v1"
             logger.info(f"Initializing Ollama (URL: {base_url})")
-            api_key = settings.LLM_API_KEY
-            # Local models can take a long time to respond — use a generous read timeout
             _local_timeout = httpx.Timeout(
                 connect=30.0, read=3600.0, write=60.0, pool=60.0
             )
-
-            self.extraction_client = instructor.patch(
-                OpenAI(
-                    base_url=base_url,
-                    api_key=api_key,
-                    timeout=_local_timeout,
-                    max_retries=3,
-                ),
-                mode=instructor.Mode.MD_JSON,
-            )
-            self.chat_client = OpenAI(
+            self._make_local_openai_clients(
                 base_url=base_url,
-                api_key=api_key,
+                api_key=settings.LLM_API_KEY,
                 timeout=_local_timeout,
-                max_retries=3,
-            )
-            # Async client for batch processing
-            self.async_chat_client = AsyncOpenAI(
-                base_url=base_url,
-                api_key=api_key,
-                timeout=_local_timeout,
-                max_retries=3,
+                instructor_mode=instructor.Mode.MD_JSON,
             )
 
         elif self.provider == "lm_studio":
@@ -75,30 +89,13 @@ class LLMService:
             logger.info(
                 f"Initializing LM Studio (URL: {base_url}, Model: {settings.LLM_MODEL})"
             )
-            api_key = settings.LLM_API_KEY
             _local_timeout = httpx.Timeout(
                 connect=30.0, read=3600.0, write=60.0, pool=60.0
             )
-
-            self.extraction_client = instructor.patch(
-                OpenAI(
-                    base_url=base_url,
-                    api_key=api_key,
-                    timeout=_local_timeout,
-                    max_retries=3,
-                )
-            )
-            self.chat_client = OpenAI(
+            self._make_local_openai_clients(
                 base_url=base_url,
-                api_key=api_key,
+                api_key=settings.LLM_API_KEY,
                 timeout=_local_timeout,
-                max_retries=3,
-            )
-            self.async_chat_client = AsyncOpenAI(
-                base_url=base_url,
-                api_key=api_key,
-                timeout=_local_timeout,
-                max_retries=3,
             )
 
         elif self.provider == "openai":
@@ -991,69 +988,6 @@ class LLMService:
         except Exception as e:
             logger.error(f"[LLM] generate() failed: {e}")
             raise
-
-    async def final_synthesis_from_sub_results(
-        self,
-        original_question: str,
-        sub_results: list[dict],
-        query_attr: str | None = None,
-    ) -> str | None:
-        if not sub_results:
-            return None
-
-        if query_attr is None:
-            try:
-                qa = self.analyze_query(original_question)
-                query_attr = qa.get("question_attribute", "").lower()
-            except Exception:
-                pass
-        else:
-            query_attr = (query_attr or "").lower()
-
-        qa_block_lines = []
-        for i, sr in enumerate(sub_results, 1):
-            q = sr.get("resolved_question") or sr.get("question", "")
-            reasoning = sr.get("answer_reasoning") or ""
-            full = sr.get("full_answer") or "Not found"
-            block = f"Sub-question {i}: {q}\n"
-            if reasoning:
-                block += f"  Reasoning: {reasoning}\n"
-            block += f"  Answer: {full}"
-            qa_block_lines.append(block)
-        qa_block = "\n\n".join(qa_block_lines)
-
-        prompt = (
-            "You are answering a multi-hop question using structured research findings.\n"
-            "Use the retrieved sub-question findings as your primary evidence. "
-            "If some findings are marked 'Not found', reason from what was found "
-            "combined with your knowledge to attempt a complete answer.\n\n"
-            f"RESEARCH FINDINGS:\n{qa_block}\n\n"
-            f"ORIGINAL QUESTION: {original_question}\n\n"
-            f"{self._REASONING_RULES}\n"
-            f"{self._OUTPUT_RULES}\n"
-            "Write out your reasoning tracing through the findings to your "
-            "conclusion, then on a new line write your answer:\n"
-            "ANSWER: <bare answer phrase>\n\n"
-            "If findings are insufficient:\n"
-            "ANSWER: INSUFFICIENT\n\n"
-            "Reply:"
-        )
-
-        try:
-            raw = self.reason(prompt) or ""
-            logger.info(f"[LLM] final_synthesis_from_sub_results raw:\n{raw}")
-        except Exception as e:
-            logger.warning(f"[LLM] final_synthesis_from_sub_results failed: {e}")
-            return None
-
-        _non_answers = {"INSUFFICIENT", "NONE", "N/A", "UNKNOWN", "NOT FOUND"}
-        for line in raw.splitlines():
-            line = line.strip()
-            if line.lower().startswith("answer:"):
-                val = line.split(":", 1)[1].strip()
-                if val.upper() not in _non_answers:
-                    return val
-        return None
 
     async def iterative_step(
         self,

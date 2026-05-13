@@ -25,6 +25,7 @@ import remarkGfm from "remark-gfm";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ShaderBackground } from "@/components/shader-background";
+import type { FilePreview, NotePreview } from "@/lib/types";
 
 interface Message {
   id: string;
@@ -33,16 +34,43 @@ interface Message {
   timestamp: Date;
 }
 
-interface NotePreview {
-  id: string;
-  title: string;
-  content: string;
-}
+/** Prose classes shared by the two inline message renderers. */
+const PROSE_CLASSNAME =
+  "prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:my-2 prose-p:leading-relaxed prose-p:text-white/90 prose-strong:text-white prose-em:text-white/90 prose-a:text-purple-400 prose-code:text-pink-400 prose-ul:text-white/90 prose-ol:text-white/90 prose-li:text-white/90";
 
-interface FilePreview {
-  url: string;
-  filename: string;
-  type: "image" | "pdf" | "audio" | "other";
+/**
+ * Returns a react-markdown `components` map that turns file-attachment links
+ * (prefixed with 📎 or 🎤) into buttons, and leaves all other anchors intact.
+ */
+function makeLinkRenderer(
+  handleFileClick: (url: string, filename: string) => void,
+) {
+  return {
+    a: ({
+      node: _node,
+      children,
+      href,
+      ...props
+    }: React.ComponentPropsWithoutRef<"a"> & { node?: unknown }) => {
+      const text = children?.toString() || "";
+      if (href && (text.startsWith("📎") || text.startsWith("🎤"))) {
+        const filename = text.replace(/^[📎🎤]\s*/, "");
+        return (
+          <button
+            onClick={() => handleFileClick(href, filename)}
+            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
+          >
+            {text}
+          </button>
+        );
+      }
+      return (
+        <a href={href} {...props}>
+          {children}
+        </a>
+      );
+    },
+  };
 }
 
 export default function ChatPage() {
@@ -79,7 +107,7 @@ export default function ChatPage() {
       try {
         const parsed = JSON.parse(savedMessages);
         setMessages(
-          parsed.map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) })),
+          parsed.map((m: Message) => ({ ...m, timestamp: new Date(m.timestamp) })),
         );
       } catch (error) {
         console.error("Error loading chat messages:", error);
@@ -134,9 +162,7 @@ export default function ChatPage() {
 
   const handleNoteReference = async (noteId: string) => {
     try {
-      console.log("Fetching note with ID:", noteId);
       const fullNote = await api.getNote(noteId);
-      console.log("Note fetched:", fullNote);
       setPreviewNote({
         id: fullNote.id,
         title: fullNote.title || "Untitled",
@@ -215,9 +241,10 @@ export default function ChatPage() {
                 <Image
                   src="/logo-black-background.png"
                   alt="LiveOS"
-                  width={96}
-                  height={96}
-                  className="h-24 w-24 object-contain"
+                  width={40}
+                  height={40}
+                  loading="eager"
+                  className="h-full w-full object-contain"
                 />
               </div>
               <div>
@@ -333,52 +360,10 @@ export default function ChatPage() {
 
                               return (
                                 <>
-                                  <div className="prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:my-2 prose-p:leading-relaxed prose-p:text-white/90 prose-strong:text-white prose-em:text-white/90 prose-a:text-purple-400 prose-code:text-pink-400 prose-ul:text-white/90 prose-ol:text-white/90 prose-li:text-white/90">
+                                  <div className={PROSE_CLASSNAME}>
                                     <ReactMarkdown
                                       remarkPlugins={[remarkGfm]}
-                                      components={{
-                                        a: ({
-                                          node,
-                                          children,
-                                          href,
-                                          ...props
-                                        }) => {
-                                          const text =
-                                            children?.toString() || "";
-
-                                          // Check if this is a file link
-                                          if (
-                                            href &&
-                                            (text.startsWith("📎") ||
-                                              text.startsWith("🎤"))
-                                          ) {
-                                            const filename = text.replace(
-                                              /^[📎🎤]\s*/,
-                                              "",
-                                            );
-                                            return (
-                                              <button
-                                                onClick={() =>
-                                                  handleFileClick(
-                                                    href,
-                                                    filename,
-                                                  )
-                                                }
-                                                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
-                                              >
-                                                {text}
-                                              </button>
-                                            );
-                                          }
-
-                                          // Regular links
-                                          return (
-                                            <a href={href} {...props}>
-                                              {children}
-                                            </a>
-                                          );
-                                        },
-                                      }}
+                                      components={makeLinkRenderer(handleFileClick)}
                                     >
                                       {beforeRefs}
                                     </ReactMarkdown>
@@ -402,12 +387,6 @@ export default function ChatPage() {
                                           <button
                                             key={i}
                                             onClick={() => {
-                                              console.log(
-                                                "Clicked note:",
-                                                noteTitle,
-                                                "ID:",
-                                                noteId,
-                                              );
                                               handleNoteReference(noteId);
                                             }}
                                             className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
@@ -425,43 +404,10 @@ export default function ChatPage() {
 
                             // No references, just render markdown normally
                             return (
-                              <div className="prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:my-2 prose-p:leading-relaxed prose-p:text-white/90 prose-strong:text-white prose-em:text-white/90 prose-a:text-purple-400 prose-code:text-pink-400 prose-ul:text-white/90 prose-ol:text-white/90 prose-li:text-white/90">
+                              <div className={PROSE_CLASSNAME}>
                                 <ReactMarkdown
                                   remarkPlugins={[remarkGfm]}
-                                  components={{
-                                    a: ({ node, children, href, ...props }) => {
-                                      const text = children?.toString() || "";
-
-                                      // Check if this is a file link
-                                      if (
-                                        href &&
-                                        (text.startsWith("📎") ||
-                                          text.startsWith("🎤"))
-                                      ) {
-                                        const filename = text.replace(
-                                          /^[📎🎤]\s*/,
-                                          "",
-                                        );
-                                        return (
-                                          <button
-                                            onClick={() =>
-                                              handleFileClick(href, filename)
-                                            }
-                                            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
-                                          >
-                                            {text}
-                                          </button>
-                                        );
-                                      }
-
-                                      // Regular links
-                                      return (
-                                        <a href={href} {...props}>
-                                          {children}
-                                        </a>
-                                      );
-                                    },
-                                  }}
+                                  components={makeLinkRenderer(handleFileClick)}
                                 >
                                   {message.content}
                                 </ReactMarkdown>
@@ -611,29 +557,8 @@ export default function ChatPage() {
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     components={{
-                      a: ({ node, children, href, ...props }) => {
-                        const text = children?.toString() || "";
-                        if (
-                          href &&
-                          (text.startsWith("📎") || text.startsWith("🎤"))
-                        ) {
-                          const filename = text.replace(/^[📎🎤]\s*/, "");
-                          return (
-                            <button
-                              onClick={() => handleFileClick(href, filename)}
-                              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
-                            >
-                              {text}
-                            </button>
-                          );
-                        }
-                        return (
-                          <a href={href} {...props}>
-                            {children}
-                          </a>
-                        );
-                      },
-                      h1: ({ node, children, ...props }) => (
+                      a: makeLinkRenderer(handleFileClick).a,
+                      h1: ({ node: _node, children, ...props }) => (
                         <h1
                           className="text-4xl font-bold text-white mt-6 mb-4"
                           {...props}
@@ -641,7 +566,7 @@ export default function ChatPage() {
                           {children}
                         </h1>
                       ),
-                      h2: ({ node, children, ...props }) => (
+                      h2: ({ node: _node, children, ...props }) => (
                         <h2
                           className="text-3xl font-bold text-white mt-5 mb-3"
                           {...props}
@@ -649,7 +574,7 @@ export default function ChatPage() {
                           {children}
                         </h2>
                       ),
-                      h3: ({ node, children, ...props }) => (
+                      h3: ({ node: _node, children, ...props }) => (
                         <h3
                           className="text-2xl font-bold text-white mt-4 mb-3"
                           {...props}
@@ -657,7 +582,7 @@ export default function ChatPage() {
                           {children}
                         </h3>
                       ),
-                      h4: ({ node, children, ...props }) => (
+                      h4: ({ node: _node, children, ...props }) => (
                         <h4
                           className="text-xl font-bold text-white mt-3 mb-2"
                           {...props}
@@ -665,12 +590,12 @@ export default function ChatPage() {
                           {children}
                         </h4>
                       ),
-                      strong: ({ node, children, ...props }) => (
+                      strong: ({ node: _node, children, ...props }) => (
                         <strong className="font-bold text-white" {...props}>
                           {children}
                         </strong>
                       ),
-                      em: ({ node, children, ...props }) => (
+                      em: ({ node: _node, children, ...props }) => (
                         <em className="italic text-white/90" {...props}>
                           {children}
                         </em>

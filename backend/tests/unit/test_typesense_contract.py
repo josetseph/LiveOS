@@ -9,9 +9,8 @@ Regression guard:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 def _make_typesense_service():

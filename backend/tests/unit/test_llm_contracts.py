@@ -129,8 +129,6 @@ class TestEnrichmentThinEntityFilter:
     @pytest.mark.asyncio
     async def test_non_thin_entity_proceeds_to_llm(self, llm_svc):
         """Non-thin entities with context should attempt an LLM call."""
-        from openai.types.chat import ChatCompletion, ChatCompletionMessage
-        from openai.types.chat.chat_completion import Choice
 
         fake_response = MagicMock()
         fake_response.choices = [

@@ -324,17 +324,10 @@ class RetrievalService:
             except Exception as _e:
                 logger.debug(f"  [GraphExpand] Qdrant neighbor enrichment failed: {_e}")
 
-        # All neighbours pass through — the reranker downstream handles relevance
-        # scoring, so a redundant LLM filter here is unnecessary overhead.
-        logger.info(
-            f"  [GraphExpand] Expanding all {len(relationship_entries)} neighbour relationships (reranker filters)"
-        )
         if not relationship_entries:
             return []
 
-        # Build lookups so we can form structured _build_node_text strings for
-        # the reranker: origin_obj carries name + entity_type; origin_text is
-        # the raw content used for the LLM-facing text field.
+        # Build origin node lookup (needed for per-neighbor reranker text below)
         origin_obj_by_name: dict[str, dict] = {}
         origin_text_by_name: dict[str, str] = {}
         for doc in relevant_docs:
@@ -350,6 +343,79 @@ class RetrievalService:
                 origin_obj_by_name[_name] = _node
                 if _text:
                     origin_text_by_name[_name] = _text
+
+        # Rank each (root, neighbor) pair individually with the reranker, then
+        # keep only the top N — so the merged root doc only contains the neighbors
+        # the reranker considers relevant to this question.
+        if (
+            settings.RERANKER_ENABLED
+            and len(relationship_entries) > settings.GRAPH_EXPAND_TOP_NEIGHBORS
+        ):
+            from app.services.reranker import reranker_service
+
+            _per_neighbor_texts: list[str] = []
+            for entry in relationship_entries:
+                _origin_node = origin_obj_by_name.get(
+                    entry["source"], {"name": entry["source"]}
+                )
+                neighbor = entry["neighbor"]
+                nl = entry.get("nl_sentence")
+                if nl:
+                    _is_incoming = entry.get("_nl_is_reverse", False)
+                else:
+                    _is_incoming = entry.get("edge_direction") == "incoming"
+                    nl = (entry.get("rel_type") or "connected_to").replace("_", " ")
+                _rel_entry = {
+                    "nl_sentence": nl,
+                    "neighbour_name": neighbor.get("name", ""),
+                    "neighbour_type": neighbor.get("entity_type") or "",
+                    "neighbour_context": self._get_node_text(neighbor)
+                    or neighbor.get("name", ""),
+                    "is_incoming": _is_incoming,
+                }
+                _per_neighbor_texts.append(
+                    self._build_node_text(_origin_node, [_rel_entry])
+                )
+
+            _scores = await reranker_service.rerank(question, _per_neighbor_texts)
+            _score_map: dict[int, float] = (
+                {r["index"]: r["relevance_score"] for r in _scores} if _scores else {}
+            )
+            for i, entry in enumerate(relationship_entries):
+                entry["_expand_score"] = _score_map.get(i, 0.0)
+                logger.debug(
+                    f"  [GraphExpand] {entry['source']} → {entry['neighbor'].get('name','?')} "
+                    f"score={entry['_expand_score']:.4f}"
+                )
+            relationship_entries.sort(
+                key=lambda e: e.get("_expand_score", 0.0), reverse=True
+            )
+            _before = len(relationship_entries)
+            relationship_entries = relationship_entries[
+                : settings.GRAPH_EXPAND_TOP_NEIGHBORS
+            ]
+            _thresh = settings.GRAPH_EXPAND_SCORE_THRESHOLD
+            if _thresh > 0:
+                _before_thresh = len(relationship_entries)
+                relationship_entries = [
+                    e
+                    for e in relationship_entries
+                    if e.get("_expand_score", 0.0) >= _thresh
+                ]
+                if len(relationship_entries) < _before_thresh:
+                    logger.info(
+                        f"  [GraphExpand] Score threshold {_thresh} dropped "
+                        f"{_before_thresh - len(relationship_entries)} neighbour(s) → {len(relationship_entries)} remaining"
+                    )
+            _top_scores = [f"{e['_expand_score']:.4f}" for e in relationship_entries]
+            logger.info(
+                f"  [GraphExpand] Ranked {_before} neighbours → kept top {len(relationship_entries)} "
+                f"(scores: {_top_scores})"
+            )
+        else:
+            logger.info(
+                f"  [GraphExpand] Expanding all {len(relationship_entries)} neighbour(s) (at or below top-N limit)"
+            )
 
         # Group entries by origin node — one merged doc per source so the root
         # node text appears exactly once, with all its relationships listed below.
@@ -409,9 +475,7 @@ class RetrievalService:
                 continue
 
             if _origin_node:
-                _formatted_text = self._build_node_text(
-                    _origin_node, rel_entries, brief_root=True
-                )
+                _formatted_text = self._build_node_text(_origin_node, rel_entries)
             else:
                 _lines = [_origin_text] if _origin_text else []
                 for _n in rel_entries:
@@ -1220,6 +1284,7 @@ class RetrievalService:
             query,
             combined_results,
             top_n=settings.RERANKER_TOP_K,
+            score_threshold=settings.RERANKER_SCORE_THRESHOLD,
             question_attribute=question_attribute,
             expected_entity_types=expected_entity_types,
         )
@@ -1279,6 +1344,7 @@ class RetrievalService:
         top_n: int | None = None,
         question_attribute: str | None = None,
         expected_entity_types: list[str] | None = None,
+        score_threshold: float | None = None,
     ) -> list[dict]:
         """Rank candidates and return the top_n highest-scoring ones.
 
@@ -1288,6 +1354,8 @@ class RetrievalService:
 
         Args:
             top_n: After ranking, slice to this many results.  None = no cutoff.
+            score_threshold: After top_n slice, drop candidates scoring below
+                this value.  None = no threshold applied.
             question_attribute: If provided, append to the reranker query so the
                 model scores candidates against the specific attribute sought.
             expected_entity_types: If provided, append to the reranker query so
@@ -1362,6 +1430,17 @@ class RetrievalService:
             candidates = candidates[:top_n]
         else:
             logger.info(f"  [Reranker] Ranked {len(candidates)} candidates (no cutoff)")
+
+        if score_threshold is not None:
+            before = len(candidates)
+            candidates = [
+                c for c in candidates if c.get("rerank_score", 0.0) >= score_threshold
+            ]
+            if len(candidates) < before:
+                logger.info(
+                    f"  [Reranker] Score threshold {score_threshold} dropped "
+                    f"{before - len(candidates)} candidate(s) → {len(candidates)} remaining"
+                )
 
         return candidates
 

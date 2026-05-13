@@ -2,23 +2,6 @@
 
 This directory contains tools for evaluating LiveOS retrieval and answer quality against standardized multi-hop reasoning datasets.
 
-## Latest Retrieval Fix Snapshot (2026-04-28)
-
-Recent retrieval fixes validated in the latest HotpotQA smoke benchmark:
-
-- `select_relevant_docs_with_reasoning()` compatibility update now accepts `original_query`.
-- Retrieval now enforces entity-first search with vector/full-text fallback only when entity matches lack usable text evidence.
-- One-hop graph expansion LLM evaluation is no longer failing in this run.
-
-Benchmark artifact:
-- `backend/tests/benchmark/results/hotpotqa_n5_20260428_145930.json`
-
-Current top outcomes (n=5):
-- `error_count=0`, `valid_tests=5`
-- Answer metrics: `exact_match=0.4`, `answer_f1=0.4`, `fuzzy_match=0.4`
-- Retrieval metrics: `precision=0.3848`, `recall=0.7`, `retrieval_f1=0.4966`
-- Avg response time: `116929.65 ms`
-
 ## Important: Benchmark Mode
 
 LiveOS is designed for **personal knowledge management** with prompts that address the user as "You" and build personal narratives. This causes issues when testing with Wikipedia-style benchmark data.
@@ -71,9 +54,21 @@ unset BENCHMARK_MODE
 ### Step 1: Ingest Notes
 
 ```bash
-# Make sure your backend services are running (Neo4j, PostgreSQL)
-python ../batch-note-processing/batch_ingest.py tests/benchmark/musique_notes/ # MuSiQue
-python ../batch-note-processing/batch_ingest.py tests/benchmark/hotpotqa_notes/ # HotPotQA
+# From backend/ with venv active
+python tests/benchmark/prepare_dataset.py --dataset hotpotqa
+python tests/benchmark/prepare_dataset.py --dataset musique
+
+# Resume after interruption
+python tests/benchmark/prepare_dataset.py --dataset hotpotqa --resume
+
+# Retry only failed notes
+python tests/benchmark/prepare_dataset.py --dataset hotpotqa --retry-failed
+
+# Preview without sending
+python tests/benchmark/prepare_dataset.py --dataset hotpotqa --dry-run
+
+# Limit to a subset for quick testing
+python tests/benchmark/prepare_dataset.py --dataset hotpotqa --limit 10
 ```
 
 If you need a full manual community rebuild before evaluation:
@@ -83,17 +78,23 @@ If you need a full manual community rebuild before evaluation:
 python scripts/run_community_detection.py
 ```
 
-Usage expectations with current orchestration:
-- Start this only after ingestion has gone idle.
-- If a new ingestion starts during recompute, the recompute cancels immediately.
-- Recompute requests are single-flight with superseding semantics, so only the newest request/run proceeds.
+Start community detection only after ingestion has gone idle. Recompute requests are single-flight with superseding semantics — only the newest request proceeds.
 
 ### Step 2: Run Evaluation
 
 ```bash
-# With RAGAS metrics (uses local Ollama by default)
-python tests/benchmark/evaluate.py --dataset musique --verbose  # MuSiQue
-python tests/benchmark/evaluate.py --dataset hotpotqa --verbose  # HotPotQA
+# From backend/ with venv active
+python tests/benchmark/evaluate.py --dataset hotpotqa --verbose
+python tests/benchmark/evaluate.py --dataset musique --verbose
+
+# Limit to a subset
+python tests/benchmark/evaluate.py --dataset hotpotqa --limit 10 --verbose
+
+# Custom output path
+python tests/benchmark/evaluate.py --dataset hotpotqa --output /tmp/my_results.json
+
+# Skip saving results
+python tests/benchmark/evaluate.py --dataset hotpotqa --no-save
 ```
 
 ## Metrics Explained
@@ -109,113 +110,33 @@ python tests/benchmark/evaluate.py --dataset hotpotqa --verbose  # HotPotQA
 - **Recall**: What % of relevant notes were retrieved?
 - **F1 Score**: Harmonic mean of precision and recall
 
-### RAGAS Metrics (Semantic)
-- **Faithfulness**: Is the answer grounded in retrieved context? (no hallucinations)
-- **Answer Relevancy**: Is the answer relevant to the question?
-- **Answer Correctness**: Semantic similarity to ground truth
-- **Context Precision**: Are relevant contexts ranked higher?
-- **Context Recall**: Are all relevant contexts retrieved?
+## Installation
 
-## Installation & Configuration
-
-### Basic Evaluation
 ```bash
 pip install httpx tqdm
 ```
 
-### With RAGAS Metrics (Local LLM - Recommended)
-```bash
-pip install ragas datasets langchain-ollama
+The evaluation script (`evaluate.py`) uses only `httpx` and `tqdm` — no additional dependencies required.
 
-# Ensure Ollama is running with your models
-ollama pull gemma3:4b        # For LLM evaluation
-ollama pull nomic-embed-text  # For embeddings
-```
+## Directory Structure
 
-### With RAGAS Metrics (OpenAI)
-```bash
-pip install ragas datasets langchain-openai
-export OPENAI_API_KEY="your-key"
-
-# Then run with --llm openai flag
-python tests/benchmark/evaluate_ragas.py --dataset musique --use-ragas --llm openai
-```
-
-### Ollama Configuration
-
-By default, the evaluation uses your local Ollama installation:
-- **Base URL**: `http://localhost:11434`
-- **LLM Model**: `gemma3:4b` (configurable in evaluate_ragas.py)
-- **Embed Model**: `nomic-embed-text`
-
-You can customize these in `evaluate_ragas.py` at the top of the file.
-
-## Research Validation
-
-To validate that Graph-First retrieval outperforms Vector RAG:
-
-1. **Run benchmarks with your system** → Record metrics
-2. **Compare with baseline**: Standard RAG systems typically get ~40-50% on HotpotQA
-3. **Your hypothesis**: Graph traversal should improve multi-hop questions
-
-### Key Questions to Answer
-
-1. Does `find_paths_between_nodes` successfully connect entities across documents?
-2. Are "bridge" type questions (requiring 2 hops) answered better than "comparison" types?
-3. How does retrieval recall compare between name-based lookup vs. vector fallback?
-
-## Output Files
-
-After preparation:
 ```
 tests/benchmark/
-├── prepare_musique_local.py     # Uses local LongBench MuSiQue data
-├── prepare_hotpotqa_local.py    # Uses local LongBench HotpotQA data
-├── evaluate_ragas.py            # Evaluation with RAGAS metrics (works for both datasets)
-├── musique_notes/               # MuSiQue note files for ingestion
-│   ├── musique_0_0.md
-│   └── ...
-├── musique_test_cases.json      # MuSiQue test cases with questions & answers
+├── prepare_dataset.py           # Ingest notes from a manifest into LiveOS
+├── evaluate.py                  # Run evaluation against a manifest
+├── hotpotqa_manifest.json       # HotpotQA test cases + note index (100 questions)
+├── musique_manifest.json        # MuSiQue test cases + note index (50 questions)
 ├── hotpotqa_notes/              # HotpotQA note files for ingestion
-│   ├── hotpotqa_0_0.md
-│   └── ...
-├── hotpotqa_test_cases.json     # HotpotQA test cases with questions & answers
-└── results/                     # Saved evaluation results (auto-generated)
-    ├── musique_20240115_143022.json
-    └── hotpotqa_20240115_150033.json
-```
-
-## Saved Results
-
-Results are automatically saved to `tests/benchmark/results/` with timestamped filenames.
-To skip saving, use the `--no-save` flag:
-
-```bash
-python tests/benchmark/evaluate_ragas.py --dataset musique --no-save
+├── musique_notes/               # MuSiQue note files for ingestion
+├── .prepare_progress.json       # Ingestion progress tracker (auto-managed)
+└── results/                     # Evaluation results (auto-generated, timestamped)
+    └── hotpotqa_20260510_033714.json
 ```
 
 ## Tips for Research Paper
 
-1. **Report F1 on HotpotQA** - This is the standard   benchmark metric
-2. **Break down by question type** - "bridge" vs "comparison" questions
-3. **Show retrieval quality** - Not just final answer accuracy
-4. **Compare timing** - Your graph traversal vs. embedding all documents
-5. **Highlight multi-hop success** - Cases where 3-4 hop paths were correctly found
-6. **Compare RAGAS metrics** - Faithfulness and Context Recall are key for RAG systems
-
-
-
-
-
-
-# From backend/ with venv active:
-
-# Step 1 — ingest notes (990 for hotpotqa, 526 for musique)
-python tests/benchmark/prepare_dataset.py --dataset hotpotqa
-python tests/benchmark/prepare_dataset.py --dataset hotpotqa --resume   # if interrupted
-python tests/benchmark/prepare_dataset.py --dataset hotpotqa --retry-failed # if some failed
-python tests/benchmark/prepare_dataset.py --dataset hotpotqa --limit 10 # quick test
-
-# Step 2 — run evaluation
-python tests/benchmark/evaluate.py --dataset hotpotqa --verbose
-python tests/benchmark/evaluate.py --dataset hotpotqa --limit 10 --verbose
+1. **Report F1 on HotpotQA** — standard benchmark metric (SQuAD, HotpotQA papers all use this)
+2. **Break down by question type** — "bridge" vs "comparison" questions
+3. **Show retrieval quality** — not just final answer accuracy
+4. **Compare timing** — graph traversal vs. embedding all documents
+5. **Highlight multi-hop success** — cases where 3-4 hop paths were correctly found

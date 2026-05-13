@@ -249,107 +249,6 @@ class GraphService:
             {"base_name": base_lower, "limit": limit, "suffix_pat": _SUFFIX_PAT},
         )
 
-    def find_similar_entities(
-        self,
-        entity_name: str,
-        entity_type: str = "Person",
-        limit: int = 10,
-        node_label: str = "Indexable",
-    ) -> list[dict]:
-        import re as _re
-
-        name_lower = entity_name.lower().strip()
-        name_parts = name_lower.split()
-        _SUFFIX_RE = _re.compile(r"^(sr\.?|jr\.?|senior|junior|[ivxlc]{1,6})$", _re.I)
-        _SUFFIX_PAT = ".* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$"
-
-        if entity_type.lower() == "person" and len(name_parts) >= 2:
-            first_name = name_parts[0]
-            last_name = name_parts[-1]
-            if _SUFFIX_RE.match(last_name):
-                last_name = name_parts[-2] if len(name_parts) > 2 else name_parts[0]
-
-            query = """
-            MATCH (e:Node)
-            WHERE e.kind IN ['indexable', 'note']
-              AND toLower(e.type) = 'person'
-              AND toLower(e.name) <> $name
-              AND size(string_split(trim(e.name), ' ')) >= 2
-              AND (
-                toLower($name) STARTS WITH (toLower(e.name) + ' ')
-                OR toLower(e.name) STARTS WITH (toLower($name) + ' ')
-                OR (toLower(e.name) STARTS WITH ($first_name + ' ')
-                    AND toLower(e.name) ENDS WITH (' ' + $last_name))
-              )
-              AND NOT (
-                (toLower(e.name) CONTAINS ' sr' AND toLower($name) CONTAINS ' jr')
-                OR (toLower(e.name) CONTAINS ' jr' AND toLower($name) CONTAINS ' sr')
-                OR (regexp_matches(toLower(e.name), $suffix_pat)
-                    AND NOT regexp_matches(toLower($name), $suffix_pat))
-                OR (regexp_matches(toLower($name), $suffix_pat)
-                    AND NOT regexp_matches(toLower(e.name), $suffix_pat))
-              )
-            RETURN e.id AS node_id, e.name AS name, e.type AS entity_type
-            LIMIT $limit
-            """
-            return self.execute_query(
-                query,
-                {
-                    "name": name_lower,
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "limit": limit,
-                    "suffix_pat": _SUFFIX_PAT,
-                },
-            )
-        else:
-            type_filter = (
-                "AND toLower(e.type) = toLower($entity_type)"
-                if entity_type and entity_type.lower() not in ("unknown", "")
-                else ""
-            )
-            _YEAR_PAT = ".*(^| )[0-9]{4}( |$).*"
-            query = f"""
-            MATCH (e:Node)
-            WHERE e.kind IN ['indexable', 'note']
-              AND toLower(e.name) <> $name
-              {type_filter}
-              AND (
-                toLower($name) CONTAINS toLower(e.name)
-                OR toLower(e.name) CONTAINS toLower($name)
-              )
-              AND size(string_split(trim(e.name), ' ')) >= 2
-              AND size(string_split(trim($name), ' ')) >= 2
-              AND abs(size(e.name) - size($name)) >= 2
-              AND NOT regexp_matches($name, $year_pat)
-              AND NOT regexp_matches(toLower(e.name), $year_pat)
-            RETURN e.id AS node_id, e.name AS name, e.type AS entity_type
-            LIMIT $limit
-            """
-            return self.execute_query(
-                query,
-                {
-                    "name": name_lower,
-                    "entity_type": entity_type,
-                    "limit": limit,
-                    "year_pat": _YEAR_PAT,
-                },
-            )
-
-    def get_similar_entities(
-        self, entity_name: str, node_label: str = "Indexable"
-    ) -> list[dict]:
-        name_lower = entity_name.lower().strip()
-        node_id = self.resolve_node_id(name_lower)
-        if not node_id:
-            return []
-        query = """
-        MATCH (e:Node {id: $node_id})-[r:SEMANTIC_REL]-(similar:Node)
-        WHERE r.is_similarity = true
-        RETURN DISTINCT similar.id AS node_id, r.rel_type AS rel_type
-        """
-        return self.execute_query(query, {"node_id": node_id})
-
     def find_paths_between_nodes(
         self,
         node_names: list[str],
@@ -408,23 +307,6 @@ class GraphService:
             n.id AS node_id,
             n.name AS name,
             n.type AS type
-        """
-        return self.execute_query(query, {})
-
-    def get_weighted_relationships_for_communities(self) -> list[dict]:
-        query = """
-        MATCH (a:Node)-[r:SEMANTIC_REL]->(b:Node)
-        WHERE a.kind = 'indexable' AND b.kind = 'indexable'
-          AND a.id IS NOT NULL AND b.id IS NOT NULL
-          AND a.id < b.id
-        RETURN DISTINCT
-            a.id AS source_node_id,
-            b.id AS target_node_id,
-            CASE
-                WHEN r.edge_weight IS NOT NULL THEN r.edge_weight
-                WHEN r.confidence IS NOT NULL THEN r.confidence * 10.0
-                ELSE 1.0
-            END AS weight
         """
         return self.execute_query(query, {})
 
@@ -551,26 +433,6 @@ class GraphService:
         row["community_level"] = (content or {}).get("community_level")
         row["relationship_natural_language"] = relationship_natural_language
         return row
-
-    def get_node_source_notes(
-        self, node_names: list[str], node_labels: list[str]
-    ) -> list[dict]:
-        if not node_names:
-            return []
-        node_ids = [
-            nid
-            for n in node_names
-            if (nid := qdrant_service.find_node_id_by_name(n.lower().strip()))
-        ]
-        if not node_ids:
-            return []
-        query = """
-        UNWIND $node_ids AS node_id
-        MATCH (n:Node {id: node_id})<-[r:REFERENCES]-(note:Node)
-        WHERE note.kind = 'note'
-        RETURN n.id AS node_id, note.id AS note_id, 'REFERENCES' AS relationship_type
-        """
-        return self.execute_query(query, {"node_ids": node_ids})
 
     def get_linked_evidence(
         self, node_names: list[str], limit_per_node: int = 3
@@ -1095,66 +957,31 @@ class GraphService:
                 },
             )
 
-    def create_similarity_relationship(
-        self,
-        name1: str,
-        name2: str,
-        confidence: float = 0.9,
-        note_id: str = None,
-        rel_type: str = "IS_SIMILAR",
-        node_label: str = "Indexable",
-    ) -> dict:
-        import re as _re
-        from datetime import datetime
+    def _hop_query(self, direction: str) -> str:
+        """Return a Cypher query template for a 1-hop neighbour expansion.
 
-        name1_lower = name1.lower().strip()
-        name2_lower = name2.lower().strip()
-        created_at = datetime.utcnow().isoformat()
-        rel_type = _re.sub(r"[^A-Za-z0-9_]", "_", rel_type.strip()) or "ALIAS_OF"
-
-        result = self.execute_query(
+        ``direction`` must be either ``"->"`` (outgoing) or ``"<-"`` (incoming).
+        The arrow is inserted into the MATCH pattern so both directed queries
+        can share a single definition.
+        """
+        if direction == "->":
+            pattern = "(start:Node {id: $node_id})-[r:SEMANTIC_REL|REFERENCES]->(related:Node)"
+        else:
+            pattern = "(start:Node {id: $node_id})<-[r:SEMANTIC_REL|REFERENCES]-(related:Node)"
+        return f"""
+            MATCH {pattern}
+            WHERE coalesce(r.confidence, 1.0) >= $min_confidence
+            RETURN DISTINCT
+                related.id AS node_id,
+                related.name AS name,
+                related.kind AS label,
+                1 AS depth,
+                [CASE WHEN label(r) = 'SEMANTIC_REL' THEN r.rel_type ELSE label(r) END] AS relationship_path,
+                [coalesce(r.confidence, 1.0)] AS confidence_path,
+                [NULL] AS context_path,
+                [NULL] AS natural_language_path
+            ORDER BY name
             """
-            MATCH (e1:Node)-[r:SEMANTIC_REL]-(e2:Node)
-            WHERE e1.name = $name1 AND e2.name = $name2 AND r.is_similarity = true
-            RETURN count(r) > 0 AS exists
-            """,
-            {"name1": name1_lower, "name2": name2_lower},
-        )
-        if result and result[0].get("exists"):
-            return {"action": "exists", "name1": name1_lower, "name2": name2_lower}
-
-        id1 = self.resolve_node_id(name1_lower)
-        id2 = self.resolve_node_id(name2_lower)
-        if not id1 or not id2:
-            return {"action": "failed", "name1": name1_lower, "name2": name2_lower}
-
-        for src, tgt in [(id1, id2), (id2, id1)]:
-            self.execute_query(
-                """
-                MATCH (source:Node {id: $source_id})
-                MATCH (target:Node {id: $target_id})
-                CREATE (source)-[r:SEMANTIC_REL]->(target)
-                SET r.rel_type = $rel_type,
-                    r.confidence = $confidence,
-                    r.created_at = $created_at,
-                    r.note_id = $note_id,
-                    r.is_similarity = true
-                """,
-                {
-                    "source_id": src,
-                    "target_id": tgt,
-                    "rel_type": rel_type,
-                    "confidence": confidence,
-                    "created_at": created_at,
-                    "note_id": note_id,
-                },
-            )
-
-        logger.info(
-            f"[Similarity] Created {rel_type}: {name1_lower} <-> {name2_lower} "
-            f"(confidence={confidence:.2f})"
-        )
-        return {"action": "created", "name1": name1_lower, "name2": name2_lower}
 
     def get_related_nodes(
         self,
@@ -1176,34 +1003,8 @@ class GraphService:
             # An undirected match loses directionality, causing the expansion prompt
             # to display incoming edges backwards (e.g. "corliss archer plays shirley
             # temple" instead of "shirley temple plays corliss archer").
-            outgoing_query = """
-            MATCH (start:Node {id: $node_id})-[r:SEMANTIC_REL|REFERENCES]->(related:Node)
-            WHERE coalesce(r.confidence, 1.0) >= $min_confidence
-            RETURN DISTINCT
-                related.id AS node_id,
-                related.name AS name,
-                related.kind AS label,
-                1 AS depth,
-                [CASE WHEN label(r) = 'SEMANTIC_REL' THEN r.rel_type ELSE label(r) END] AS relationship_path,
-                [coalesce(r.confidence, 1.0)] AS confidence_path,
-                [NULL] AS context_path,
-                [NULL] AS natural_language_path
-            ORDER BY name
-            """
-            incoming_query = """
-            MATCH (start:Node {id: $node_id})<-[r:SEMANTIC_REL|REFERENCES]-(related:Node)
-            WHERE coalesce(r.confidence, 1.0) >= $min_confidence
-            RETURN DISTINCT
-                related.id AS node_id,
-                related.name AS name,
-                related.kind AS label,
-                1 AS depth,
-                [CASE WHEN label(r) = 'SEMANTIC_REL' THEN r.rel_type ELSE label(r) END] AS relationship_path,
-                [coalesce(r.confidence, 1.0)] AS confidence_path,
-                [NULL] AS context_path,
-                [NULL] AS natural_language_path
-            ORDER BY name
-            """
+            outgoing_query = self._hop_query("->")
+            incoming_query = self._hop_query("<-")
             params = {"node_id": node_id, "min_confidence": min_confidence}
             outgoing = self.execute_query(outgoing_query, params)
             for row in outgoing:
@@ -1247,76 +1048,6 @@ class GraphService:
             for r in rows
             if all(c >= min_confidence for c in (r.get("confidence_path") or []))
         ]
-
-    def get_relationships_between_nodes(self, names: list[str]) -> list[dict]:
-        if not names or len(names) < 2:
-            return []
-        ids = [
-            nid
-            for n in names
-            if (nid := qdrant_service.find_node_id_by_name(n.lower().strip()))
-        ]
-        if len(ids) < 2:
-            return []
-        query = """
-        MATCH (a:Node)-[r:SEMANTIC_REL]->(b:Node)
-        WHERE a.id IN $ids AND b.id IN $ids
-        RETURN a.id AS source, r.rel_type AS rel_type, b.id AS target,
-               r.edge_weight AS weight
-        ORDER BY r.confidence DESC
-        """
-        return self.execute_query(query, {"ids": ids}) or []
-
-    # ---- Communities --------------------------------------------------------
-
-    def search_communities(
-        self, vector: list[float], top_k: int = 5, min_score: float = 0.55
-    ) -> list[dict]:
-        """Find semantically relevant communities via Qdrant (no graph query needed)."""
-        hits = qdrant_service.search_node_cores(
-            query_vector=vector,
-            limit=top_k,
-            min_score=min_score,
-            node_type="community",
-        )
-        results = []
-        for hit in hits:
-            payload = hit.get("payload", {})
-            results.append(
-                {
-                    "name": payload.get("name"),
-                    "domain": "Semantic",
-                    "summary": _strip_facts_prefix(payload.get("description", "")),
-                    "themes": payload.get("themes", []),
-                    "last_updated": payload.get("updated_at"),
-                    "member_count": payload.get("member_count", 0),
-                    "community_id": payload.get("node_id"),
-                    "community_level": payload.get("community_level"),
-                    "score": hit.get("score", 0.0),
-                }
-            )
-        return results
-
-    def get_community_linked_notes(
-        self, community_names: list[str], limit_per_community: int = 3
-    ) -> list[dict]:
-        if not community_names:
-            return []
-        query = """
-        UNWIND $community_names AS comm_name
-        MATCH (c:Node) WHERE c.kind = 'community' AND c.name = comm_name
-        MATCH (c)-[:CONTAINS]->(member:Node)
-        WHERE member.kind IN ['indexable', 'note']
-        MATCH (note:Node)-[r:REFERENCES]->(member)
-        WHERE note.kind = 'note'
-        WITH comm_name, note.id AS note_id, note.name AS note_name
-        WITH comm_name, collect(DISTINCT {id: note_id, title: note_name}) AS all_notes
-        RETURN comm_name AS community_name, all_notes AS notes
-        """
-        rows = self.execute_query(query, {"community_names": community_names})
-        for row in rows:
-            row["notes"] = (row.get("notes") or [])[:limit_per_community]
-        return rows
 
     # ---- 3D spatial layout --------------------------------------------------
 

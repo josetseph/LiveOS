@@ -15,12 +15,12 @@ _scripts_dir = os.path.abspath(os.path.dirname(__file__))
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
 
-from alembic.config import Config
-from app.core.config import settings
-from app.core.database import engine
-from init_kuzu import init_kuzu
-from init_qdrant import init_qdrant
-from init_typesense import init_typesense
+from alembic.config import Config  # noqa: E402
+from app.core.config import settings  # noqa: E402
+from app.core.database import engine  # noqa: E402
+from init_kuzu import init_kuzu  # noqa: E402
+from init_qdrant import init_qdrant  # noqa: E402
+from init_typesense import init_typesense  # noqa: E402
 
 
 # 1. Wait for Postgres

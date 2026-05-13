@@ -95,6 +95,7 @@ function NodeDetailModal({
 
   useEffect(() => {
     let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setFetching(true);
     api
       .getNodeDetail(node.node_id)
@@ -416,14 +417,13 @@ export default function Graph3DPage() {
   }, [selectedNode, searchOpen]);
 
   useEffect(() => {
-    nodesRef.current = graphData.nodes as any[];
-  }, [graphData.nodes]); // eslint-disable-line @typescript-eslint/no-explicit-any
+    nodesRef.current = graphData.nodes as any[]; // eslint-disable-line @typescript-eslint/no-explicit-any
+  }, [graphData.nodes]);
   useEffect(() => {
-    linksRef.current = graphData.links as any[];
-  }, [graphData.links]); // eslint-disable-line @typescript-eslint/no-explicit-any
+    linksRef.current = graphData.links as any[]; // eslint-disable-line @typescript-eslint/no-explicit-any
+  }, [graphData.links]);
 
   // Build a stable id→node_type map so linkColor can resolve string IDs too
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const nodeTypeMapRef = useRef<Map<string, string>>(new Map());
   useEffect(() => {
     const m = new Map<string, string>();
@@ -436,6 +436,7 @@ export default function Graph3DPage() {
 
   // ── Search results — filter nodes client-side as user types ──
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!searchQuery.trim()) { setSearchResults([]); return; }
     const q = searchQuery.toLowerCase();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -647,7 +648,7 @@ export default function Graph3DPage() {
 
     rafId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafId);
-  }, [graphData.nodes.length, graphData.links.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [graphData.nodes.length, graphData.links.length]);
 
   // Fetch and adapt data: nodes need `id` field, edges become `links`
   useEffect(() => {

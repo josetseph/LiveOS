@@ -20,7 +20,6 @@ import argparse
 import asyncio
 import html
 import json
-import os
 import re
 import sys
 import time
@@ -36,7 +35,6 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import settings from config
-from app.core.config import settings
 
 
 @dataclass
@@ -500,12 +498,12 @@ def print_report(metrics: dict, results: list[EvaluationResult]):
     print(f"   Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
 
-    print(f"\n📈 SUMMARY")
+    print("\n📈 SUMMARY")
     print(f"   Total Tests: {metrics.get('total_tests', 0)}")
     print(f"   Valid Tests: {metrics.get('valid_tests', 0)}")
     print(f"   Errors: {metrics.get('error_count', 0)}")
 
-    print(f"\n🎯 ANSWER QUALITY")
+    print("\n🎯 ANSWER QUALITY")
     print(f"   Exact Match (EM): {metrics.get('answer_exact_match', 0):.1%}")
     print(
         f"   F1 Score:         {metrics.get('answer_f1', 0):.1%}  ⭐ (Standard QA Metric)"
@@ -513,12 +511,12 @@ def print_report(metrics: dict, results: list[EvaluationResult]):
     print(f"   Fuzzy Match:      {metrics.get('answer_fuzzy_match', 0):.1%}")
     print(f"   Contains Answer:  {metrics.get('answer_contains_expected', 0):.1%}")
 
-    print(f"\n🔍 RETRIEVAL QUALITY")
+    print("\n🔍 RETRIEVAL QUALITY")
     print(f"   Precision: {metrics.get('retrieval_precision', 0):.1%}")
     print(f"   Recall:    {metrics.get('retrieval_recall', 0):.1%}")
     print(f"   F1 Score:  {metrics.get('retrieval_f1', 0):.1%}")
 
-    print(f"\n⏱️  PERFORMANCE")
+    print("\n⏱️  PERFORMANCE")
     print(f"   Avg Response Time: {metrics.get('avg_response_time_ms', 0):.0f}ms")
 
     # Show sample failures

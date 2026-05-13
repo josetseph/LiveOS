@@ -26,6 +26,7 @@ export function Sidebar() {
             alt="LiveOS"
             width={48}
             height={48}
+            loading="eager"
             className="h-full w-full object-cover"
           />
         </div>

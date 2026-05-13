@@ -1,20 +1,30 @@
 import axios from "axios";
+import type { NoteStatus } from "@/lib/types";
 
 const API_BASE_URL = "http://localhost:8000/api/v1";
 
+/** Thin wrappers so each method is one line instead of three. */
+const http = {
+  get: (path: string, params?: Record<string, unknown>) =>
+    axios.get(`${API_BASE_URL}${path}`, { params }).then((r) => r.data),
+  post: (path: string, data?: unknown) =>
+    axios.post(`${API_BASE_URL}${path}`, data).then((r) => r.data),
+  put: (path: string, data?: unknown) =>
+    axios.put(`${API_BASE_URL}${path}`, data).then((r) => r.data),
+  del: (path: string) =>
+    axios.delete(`${API_BASE_URL}${path}`).then((r) => r.data),
+};
+
 export const api = {
   async chat(query: string) {
-    const response = await axios.post(`${API_BASE_URL}/chat`, { query });
-    return response.data;
+    return http.post("/chat", { query });
   },
 
   async upload(file: File) {
     const formData = new FormData();
     formData.append("file", file);
     const response = await axios.post(`${API_BASE_URL}/upload`, formData, {
-      headers: {
-        "Content-Type": "multipart/form-data",
-      },
+      headers: { "Content-Type": "multipart/form-data" },
     });
     return response.data;
   },
@@ -24,78 +34,51 @@ export const api = {
     created_at?: string;
     skip_ingestion?: boolean;
   }) {
-    const response = await axios.post(`${API_BASE_URL}/ingest`, data);
-    return response.data;
+    return http.post("/ingest", data);
   },
 
   async getSummary() {
-    const response = await axios.get(`${API_BASE_URL}/graph/summary`);
-    return response.data;
+    return http.get("/graph/summary");
   },
 
   async getGraphData() {
-    const response = await axios.get(`${API_BASE_URL}/graph/visualization`);
-    return response.data;
+    return http.get("/graph/visualization");
   },
 
   async getNotes(search?: string, processed?: boolean, failed?: boolean) {
-    const params: any = {};
+    const params: Record<string, unknown> = {};
     if (search) params.search = search;
     if (processed !== undefined) params.processed = processed;
     if (failed !== undefined) params.failed = failed;
-    const response = await axios.get(`${API_BASE_URL}/notes`, { params });
-    return response.data;
+    return http.get("/notes", params);
   },
 
   async getNote(id: string) {
-    const response = await axios.get(`${API_BASE_URL}/notes/${id}`);
-    return response.data;
+    return http.get(`/notes/${id}`);
   },
 
-  async getNoteStatus(id: string): Promise<{
-    id: string;
-    processed: boolean;
-    failed: boolean;
-    status: string;
-  }> {
-    const response = await axios.get(`${API_BASE_URL}/notes/${id}/status`);
-    return response.data;
+  async getNoteStatus(id: string): Promise<NoteStatus> {
+    return http.get(`/notes/${id}/status`);
   },
 
   async createNote(content: string, created_at?: string) {
-    // Create note WITHOUT ingestion (POST /api/v1/notes)
-    const response = await axios.post(`${API_BASE_URL}/notes`, {
-      content,
-      created_at,
-    });
-    return response.data;
+    return http.post("/notes", { content, created_at });
   },
 
   async updateNote(id: string, content: string, created_at?: string) {
-    // Update note WITHOUT re-ingestion
-    const response = await axios.put(`${API_BASE_URL}/notes/${id}`, {
-      content,
-      created_at,
-    });
-    return response.data;
+    return http.put(`/notes/${id}`, { content, created_at });
   },
 
   async ingestNote(id: string) {
-    // Trigger ingestion for an existing note (POST /api/v1/notes/{id}/ingest)
-    const response = await axios.post(`${API_BASE_URL}/notes/${id}/ingest`);
-    return response.data;
+    return http.post(`/notes/${id}/ingest`);
   },
 
   async deleteNote(id: string) {
-    const response = await axios.delete(`${API_BASE_URL}/notes/${id}`);
-    return response.data;
+    return http.del(`/notes/${id}`);
   },
 
   async deleteFile(fileKey: string) {
-    const response = await axios.delete(
-      `${API_BASE_URL}/files/${encodeURIComponent(fileKey)}`,
-    );
-    return response.data;
+    return http.del(`/files/${encodeURIComponent(fileKey)}`);
   },
 
   async submitFeedback(payload: {
@@ -106,8 +89,7 @@ export const api = {
     comments?: string;
     node_ids_used?: string[];
   }) {
-    const res = await axios.post(`${API_BASE_URL}/feedback`, payload);
-    return res.data;
+    return http.post("/feedback", payload);
   },
 
   async getHealth() {
@@ -145,8 +127,7 @@ export const api = {
       type: string;
     }>;
   }> {
-    const response = await axios.get(`${API_BASE_URL}/graph/3d/overview`);
-    return response.data;
+    return http.get("/graph/3d/overview");
   },
 
   async getGraph3DCommunity(communityId: string): Promise<{
@@ -170,10 +151,7 @@ export const api = {
       natural_language: string;
     }>;
   }> {
-    const response = await axios.get(
-      `${API_BASE_URL}/graph/3d/community/${communityId}`,
-    );
-    return response.data;
+    return http.get(`/graph/3d/community/${communityId}`);
   },
 
   async getGraph3DFull(): Promise<{
@@ -194,8 +172,7 @@ export const api = {
       type: string;
     }>;
   }> {
-    const response = await axios.get(`${API_BASE_URL}/graph/3d/full`);
-    return response.data;
+    return http.get("/graph/3d/full");
   },
 
   async getNodeDetail(nodeId: string): Promise<{
@@ -209,7 +186,6 @@ export const api = {
     status?: string;
     community_id?: string;
   }> {
-    const response = await axios.get(`${API_BASE_URL}/graph/3d/node/${nodeId}`);
-    return response.data;
+    return http.get(`/graph/3d/node/${nodeId}`);
   },
 };

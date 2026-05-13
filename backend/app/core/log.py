@@ -36,17 +36,15 @@ COMPONENT_LOG_FILES = {
     "uvicorn.error": "api.log",
     "MultimediaService": "multimedia.log",
     "ChatWorkflow": "chat.log",
-    "BucketStorage": "storage.log",
+    "BucketStorage": "ingestion.log",
     "DatabaseService": "database.log",
-    "ResetIndex": "system.log",
-    "InitDB": "system.log",
-    "RelationshipTest": "tests.log",
-    "SummaryVerification": "tests.log",
-    # Storage / search infrastructure
-    "QdrantService": "qdrant.log",
-    "TypesenseService": "typesense.log",
+    "ResetIndex": "api.log",
+    "InitDB": "api.log",
+    # Storage / search infrastructure — consolidated into retrieval log
+    "QdrantService": "retrieval.log",
+    "TypesenseService": "retrieval.log",
     # Retrieval sub-services
-    "RerankerService": "reranker.log",
+    "RerankerService": "retrieval.log",
     "TavilyService": "retrieval.log",
 }
 

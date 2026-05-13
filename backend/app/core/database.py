@@ -2,7 +2,6 @@ from app.core.config import settings
 from app.core.log import get_logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.pool import NullPool
 
 logger = get_logger("DatabaseService")
 
@@ -22,9 +21,10 @@ engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     future=True,
-    poolclass=NullPool,  # No pool — each request gets its own connection, closed immediately.
-    # This eliminates QueuePool exhaustion when many concurrent requests + background
-    # tasks compete for connections. Appropriate for a single-process dev/benchmark server.
+    pool_size=10,  # Connections kept open and reused (avoids repeated SSL handshakes).
+    max_overflow=20,  # Extra burst capacity; total ceiling = 30.
+    pool_timeout=30,  # Wait up to 30s for a free connection before raising TimeoutError.
+    pool_pre_ping=True,  # Validate connections before use; drops stale ones silently.
     connect_args={"statement_cache_size": 0},
 )
 logger.info("Async database engine created successfully")

@@ -15,7 +15,6 @@ Skip these tests with: pytest tests/unit/ -k "not integration"
 from __future__ import annotations
 
 import os
-import tempfile
 
 import pytest
 
