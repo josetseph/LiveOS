@@ -24,22 +24,26 @@ class EmbeddingService:
     def __init__(self):
         # Resolve effective embedding provider
         configured = settings.EMBEDDING_PROVIDER.lower().strip()
+        _local_providers = ("local", "ollama", "lm_studio")
         if configured == "auto":
+            # Follow main LLM provider; any local variant maps to lm_studio behavior
+            llm_p = settings.LLM_PROVIDER.lower()
             self.embedding_provider = (
-                "lm_studio"
-                if settings.LLM_PROVIDER.lower() == "lm_studio"
-                else "ollama"
+                "lm_studio" if llm_p in _local_providers else "ollama"
             )
         else:
-            self.embedding_provider = configured
+            # "local" is a clean alias for lm_studio-style OpenAI-compatible endpoint
+            self.embedding_provider = (
+                "lm_studio" if configured == "local" else configured
+            )
 
         if self.embedding_provider not in ("ollama", "lm_studio"):
             raise ValueError(
                 f"Unsupported EMBEDDING_PROVIDER: '{settings.EMBEDDING_PROVIDER}'. "
-                "Supported: 'ollama', 'lm_studio', 'auto'."
+                "Supported: 'local', 'ollama', 'lm_studio', 'auto'."
             )
 
-        # For LM Studio, attempt to auto-resolve the exact loaded model ID.
+        # For LM Studio/local, attempt to auto-resolve the exact loaded model ID.
         # For Ollama, use the configured model name directly.
         if self.embedding_provider == "lm_studio":
             self.embedding_model = self._resolve_lm_studio_embedding_model(

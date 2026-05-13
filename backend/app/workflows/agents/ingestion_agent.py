@@ -143,10 +143,9 @@ async def multimodal_node(state: IngestionState):
                         "Return ONLY the title text, nothing else."
                     )
                     try:
-                        img_title = await llm_service.generate(
+                        img_title = await llm_service.ingestion_generate(
                             img_title_prompt,
                             temperature=0.0,
-                            model=llm_service._get_ingestion_model(),
                         )
                         img_title = (img_title or "").strip().strip('"').strip(
                             "'"
@@ -387,9 +386,7 @@ Now apply this entire process to the following note and return only the JSON out
         # Use generate() instead of extract_structured() to bypass Ollama's
         # grammar-constrained JSON sampling, which causes small models (e.g.
         # gemma3:4b) to emit empty `relationships: []` for complex nested arrays.
-        raw_response = await llm_service.generate(
-            prompt, temperature=0.1, model=llm_service._get_ingestion_model()
-        )
+        raw_response = await llm_service.ingestion_generate(prompt, temperature=0.1)
         cleaned_json = llm_service._clean_json(raw_response)
         extraction = Extraction.model_validate_json(cleaned_json)
         if not extraction:
@@ -450,10 +447,9 @@ Now apply this entire process to the following note and return only the JSON out
                 'Return ONLY: [{"index": 1, "name": "..."}, ...]'
             )
             try:
-                rename_resp = await llm_service.generate(
+                rename_resp = await llm_service.ingestion_generate(
                     rename_prompt,
                     temperature=0.0,
-                    model=llm_service._get_ingestion_model(),
                 )
                 match = _re.search(r"\[.*?\]", rename_resp, _re.DOTALL)
                 if match:
@@ -705,11 +701,10 @@ Format: {{"source_name": "...", "target_name": "...", "relationship_type": "snak
         try:
             prompt = _build_audit_prompt(extraction, pass_num)
             patch = await asyncio.to_thread(
-                llm_service.extract_structured,
+                llm_service.ingestion_extract_structured,
                 prompt,
                 Extraction,
                 0.1,
-                llm_service._get_ingestion_model(),
             )
             if patch:
                 added_nodes, added_rels = _merge_patch(extraction, patch)

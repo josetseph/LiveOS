@@ -33,6 +33,9 @@ class LLMService:
         # Initialize provider-specific clients
         self._init_clients()
 
+        # Initialize ingestion-specific clients (may be separate provider/server)
+        self._init_ingestion_clients()
+
         # Legacy compatibility flags
         self.is_gemini = self.provider == "gemini"
 
@@ -84,10 +87,10 @@ class LLMService:
                 instructor_mode=instructor.Mode.MD_JSON,
             )
 
-        elif self.provider == "lm_studio":
+        elif self.provider in ("lm_studio", "local"):
             base_url = f"{settings.LLM_BASE_URL.rstrip('/')}/v1"
             logger.info(
-                f"Initializing LM Studio (URL: {base_url}, Model: {settings.LLM_MODEL})"
+                f"Initializing local OpenAI-compatible server (URL: {base_url}, Model: {settings.LLM_MODEL})"
             )
             _local_timeout = httpx.Timeout(
                 connect=30.0, read=3600.0, write=60.0, pool=60.0
@@ -238,10 +241,172 @@ class LLMService:
         else:
             raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
+    def _init_ingestion_clients(self):
+        """
+        Set up a separate set of clients for ingestion (extraction/entity reasoning).
+
+        If INGESTION_PROVIDER / INGESTION_BASE_URL / INGESTION_API_KEY are not set,
+        the ingestion clients simply alias the main chat clients so there is zero overhead.
+        """
+        raw_provider = (settings.INGESTION_PROVIDER or "").strip().lower()
+        self.ingestion_provider = raw_provider or self.provider
+
+        ingestion_base_url = (
+            settings.INGESTION_BASE_URL or ""
+        ).strip() or settings.LLM_BASE_URL
+        ingestion_api_key = (
+            settings.INGESTION_API_KEY or ""
+        ).strip() or settings.LLM_API_KEY
+
+        # Determine whether ingestion truly differs from the main provider
+        same_local = (
+            self.ingestion_provider in ("local", "ollama", "lm_studio")
+            and self.provider in ("local", "ollama", "lm_studio")
+            and ingestion_base_url == settings.LLM_BASE_URL
+            and ingestion_api_key == settings.LLM_API_KEY
+        )
+        same_provider = self.ingestion_provider == self.provider and (
+            same_local
+            or self.ingestion_provider not in ("local", "ollama", "lm_studio")
+        )
+
+        if same_provider:
+            # Alias main clients — no extra connections needed
+            self.i_chat_client = getattr(self, "chat_client", None)
+            self.i_async_chat_client = getattr(self, "async_chat_client", None)
+            self.i_extraction_client = getattr(self, "extraction_client", None)
+            self.i_gemini_client = getattr(self, "gemini_client", None)
+            self.i_anthropic_client = getattr(self, "anthropic_client", None)
+            logger.info(
+                f"Ingestion LLM: shared with main ({self.ingestion_provider.upper()})"
+            )
+            return
+
+        logger.info(
+            f"Ingestion LLM: separate provider {self.ingestion_provider.upper()}"
+        )
+
+        if self.ingestion_provider in ("local", "ollama", "lm_studio"):
+            base_url = f"{ingestion_base_url.rstrip('/')}/v1"
+            _timeout = httpx.Timeout(connect=30.0, read=3600.0, write=60.0, pool=60.0)
+            instructor_mode = (
+                instructor.Mode.MD_JSON if self.ingestion_provider == "ollama" else None
+            )
+            raw = OpenAI(
+                base_url=base_url,
+                api_key=ingestion_api_key,
+                timeout=_timeout,
+                max_retries=3,
+            )
+            patch_kwargs = (
+                {"mode": instructor_mode} if instructor_mode is not None else {}
+            )
+            self.i_extraction_client = instructor.patch(raw, **patch_kwargs)
+            self.i_chat_client = OpenAI(
+                base_url=base_url,
+                api_key=ingestion_api_key,
+                timeout=_timeout,
+                max_retries=3,
+            )
+            self.i_async_chat_client = AsyncOpenAI(
+                base_url=base_url,
+                api_key=ingestion_api_key,
+                timeout=_timeout,
+                max_retries=3,
+            )
+            self.i_gemini_client = None
+            self.i_anthropic_client = None
+
+        elif self.ingestion_provider == "gemini":
+            if not settings.GEMINI_API_KEY:
+                raise ValueError(
+                    "GEMINI_API_KEY required for INGESTION_PROVIDER=gemini"
+                )
+            self.i_gemini_client = genai.Client(
+                api_key=settings.GEMINI_API_KEY,
+                http_options=types.HttpOptions(timeout=120000),
+            )
+            self.i_chat_client = None
+            self.i_async_chat_client = None
+            self.i_extraction_client = None
+            self.i_anthropic_client = None
+
+        elif self.ingestion_provider == "openai":
+            if not settings.OPENAI_API_KEY:
+                raise ValueError(
+                    "OPENAI_API_KEY required for INGESTION_PROVIDER=openai"
+                )
+            self.i_chat_client = OpenAI(api_key=settings.OPENAI_API_KEY, timeout=300.0)
+            self.i_async_chat_client = AsyncOpenAI(
+                api_key=settings.OPENAI_API_KEY, timeout=300.0
+            )
+            self.i_extraction_client = instructor.patch(
+                OpenAI(api_key=settings.OPENAI_API_KEY, timeout=300.0)
+            )
+            self.i_gemini_client = None
+            self.i_anthropic_client = None
+
+        elif self.ingestion_provider == "anthropic":
+            if not settings.ANTHROPIC_API_KEY:
+                raise ValueError(
+                    "ANTHROPIC_API_KEY required for INGESTION_PROVIDER=anthropic"
+                )
+            from anthropic import Anthropic
+
+            self.i_anthropic_client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            self.i_extraction_client = instructor.from_anthropic(
+                self.i_anthropic_client, mode=instructor.Mode.ANTHROPIC_JSON
+            )
+            self.i_chat_client = None
+            self.i_async_chat_client = None
+            self.i_gemini_client = None
+
+        elif self.ingestion_provider == "huggingface":
+            if not settings.HUGGINGFACE_API_KEY:
+                raise ValueError(
+                    "HUGGINGFACE_API_KEY required for INGESTION_PROVIDER=huggingface"
+                )
+            base_url = "https://router.huggingface.co/v1"
+            self.i_chat_client = OpenAI(
+                base_url=base_url,
+                api_key=settings.HUGGINGFACE_API_KEY,
+                timeout=300.0,
+                max_retries=3,
+            )
+            self.i_async_chat_client = AsyncOpenAI(
+                base_url=base_url,
+                api_key=settings.HUGGINGFACE_API_KEY,
+                timeout=300.0,
+                max_retries=3,
+            )
+            self.i_extraction_client = instructor.patch(
+                OpenAI(
+                    base_url=base_url,
+                    api_key=settings.HUGGINGFACE_API_KEY,
+                    timeout=300.0,
+                    max_retries=3,
+                ),
+                mode=instructor.Mode.MD_JSON,
+            )
+            self.i_gemini_client = None
+            self.i_anthropic_client = None
+
+        else:
+            raise ValueError(
+                f"Unsupported INGESTION_PROVIDER: {self.ingestion_provider}"
+            )
+
     def _with_keep_alive(self, extra_body: dict | None = None) -> dict:
         """Attach provider keep-alive controls for local OpenAI-compatible backends."""
         body = dict(extra_body or {})
-        if self.provider in ("ollama", "lm_studio"):
+        if self.provider in ("ollama", "lm_studio", "local"):
+            body.setdefault("keep_alive", settings.LLM_KEEP_ALIVE)
+        return body
+
+    def _with_ingestion_keep_alive(self, extra_body: dict | None = None) -> dict:
+        """keep_alive hint for local ingestion backends."""
+        body = dict(extra_body or {})
+        if self.ingestion_provider in ("ollama", "lm_studio", "local"):
             body.setdefault("keep_alive", settings.LLM_KEEP_ALIVE)
         return body
 
@@ -373,7 +538,7 @@ class LLMService:
                 return self._extract_ollama(
                     prompt, response_model, temperature, model=model
                 )
-            elif self.provider == "lm_studio":
+            elif self.provider in ("lm_studio", "local"):
                 return self._extract_lm_studio(
                     prompt, response_model, temperature, model=model
                 )
@@ -520,8 +685,9 @@ class LLMService:
         response_model: Type[BaseModel],
         temperature: float,
         model: str | None = None,
+        _client=None,
     ) -> BaseModel:
-        """LM Studio extraction using prompt-guided JSON object mode."""
+        """LM Studio/local extraction using prompt-guided JSON object mode."""
         import json
 
         model = model or self._get_model_for_task("extraction")
@@ -545,6 +711,7 @@ class LLMService:
             temperature=temperature,
             schema=None,
             schema_name=response_model.__name__,
+            _client=_client,
         )
         cleaned_json = self._clean_json(raw_content)
         try:
@@ -566,10 +733,13 @@ class LLMService:
         temperature: float,
         schema: dict | None = None,
         schema_name: str = "response",
+        _client=None,
     ) -> str:
         """
         Try configured response_format strategy with compatibility fallbacks.
+        ``_client`` allows routing to an ingestion-specific server.
         """
+        client = _client or self.chat_client
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
@@ -579,7 +749,7 @@ class LLMService:
             schema=schema, schema_name=schema_name
         ):
             try:
-                response = self.chat_client.chat.completions.create(
+                response = client.chat.completions.create(
                     model=model,
                     messages=messages,
                     response_format=response_format,
@@ -676,10 +846,12 @@ class LLMService:
         response_model: Type[BaseModel],
         temperature: float,
         model: str | None = None,
+        _gemini_client=None,
     ) -> BaseModel:
         """Gemini extraction with native SDK and JSON schema enforcement."""
         import time
 
+        gemini_client = _gemini_client or self.gemini_client
         model = model or settings.GEMINI_MODEL
         logger.info(f"[Gemini] Extracting with {model} (native SDK)")
 
@@ -698,7 +870,7 @@ class LLMService:
                 inlined_schema = self._inline_schema_refs(
                     response_model.model_json_schema()
                 )
-                response = self.gemini_client.models.generate_content(
+                response = gemini_client.models.generate_content(
                     model=model,
                     contents=prompt,
                     config=types.GenerateContentConfig(
@@ -762,7 +934,7 @@ class LLMService:
         # Select reasoning model based on provider
         if self.provider == "gemini":
             response = self.gemini_client.models.generate_content(
-                model=model or settings.GEMINI_MODEL,
+                model=model or self._get_model_for_task("reasoning"),
                 config=types.GenerateContentConfig(
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
@@ -771,7 +943,7 @@ class LLMService:
             return response.text
         elif self.provider == "anthropic":
             response = self.chat_client.messages.create(
-                model=settings.ANTHROPIC_MODEL,
+                model=model or self._get_model_for_task("reasoning"),
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text
@@ -803,13 +975,13 @@ class LLMService:
         # Select model based on provider
         if self.provider == "gemini":
             response = self.gemini_client.models.generate_content(
-                model=model or settings.GEMINI_MODEL,
+                model=model or self._get_model_for_task("summarization"),
                 contents=f"Generate a concise, descriptive title for this note. Do not use quotes.\n\nNote content:\n{text}\n\nTitle:",
             )
             return response.text.strip().replace('"', "")
         elif self.provider == "anthropic":
             response = self.chat_client.messages.create(
-                model=settings.ANTHROPIC_MODEL,
+                model=model or self._get_model_for_task("summarization"),
                 messages=[
                     {
                         "role": "user",
@@ -950,7 +1122,7 @@ class LLMService:
         try:
             if self.provider == "gemini":
                 response = self.gemini_client.models.generate_content(
-                    model=model or settings.GEMINI_MODEL,
+                    model=model or self._get_model_for_task("brain"),
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         temperature=temperature,
@@ -963,7 +1135,7 @@ class LLMService:
 
             elif self.provider == "anthropic":
                 response = self.chat_client.messages.create(
-                    model=settings.ANTHROPIC_MODEL,
+                    model=model or self._get_model_for_task("brain"),
                     max_tokens=max_tokens if max_tokens is not None else 8192,
                     temperature=temperature,
                     messages=[{"role": "user", "content": prompt}],
@@ -1231,8 +1403,13 @@ class LLMService:
         """
 
     def _get_model_for_task(self, task: str) -> str:
-        """Get the appropriate model name for a given task based on provider."""
-        if self.provider in ("ollama", "lm_studio"):
+        """Get the appropriate model name for a given task based on provider.
+
+        CHAT_MODEL always wins if set — provider-specific keys are fallbacks.
+        """
+        if settings.CHAT_MODEL:
+            return settings.CHAT_MODEL
+        if self.provider in ("ollama", "lm_studio", "local"):
             return settings.LLM_MODEL
         elif self.provider == "openai":
             if task == "reasoning":
@@ -1247,18 +1424,122 @@ class LLMService:
         return settings.LLM_MODEL
 
     def _get_ingestion_model(self) -> str | None:
-        """Return the configured ingestion model for the active provider.
+        """Return the configured ingestion model for the active ingestion provider.
 
-        Returns None when no override is set, meaning callers fall back to the
-        default model for that provider (LLM_MODEL / GEMINI_MODEL / etc.).
+        INGESTION_MODEL always wins if set — provider-specific keys are fallbacks.
         """
-        if self.provider in ("ollama", "lm_studio"):
-            return settings.INGESTION_LLM_MODEL or None
-        elif self.provider == "gemini":
-            return settings.INGESTION_GEMINI_MODEL or None
-        # For OpenAI / Anthropic / HuggingFace no separate ingestion override
-        # is defined yet — return None to use the standard model.
+        if settings.INGESTION_MODEL:
+            return settings.INGESTION_MODEL
+        p = getattr(self, "ingestion_provider", self.provider)
+        if p in ("ollama", "lm_studio", "local"):
+            return settings.INGESTION_LLM_MODEL or settings.LLM_MODEL or None
+        elif p == "gemini":
+            return settings.INGESTION_GEMINI_MODEL or settings.GEMINI_MODEL or None
+        elif p == "openai":
+            return settings.OPENAI_MODEL or None
+        elif p == "anthropic":
+            return settings.ANTHROPIC_MODEL or None
+        elif p == "huggingface":
+            return settings.HUGGINGFACE_MODEL or None
         return None
+
+    # ── Ingestion-specific generation ─────────────────────────────────────────
+
+    async def ingestion_generate(
+        self,
+        prompt: str,
+        temperature: float = 0.1,
+        max_tokens: int | None = None,
+    ) -> str:
+        """
+        Like ``generate()`` but always routes to the ingestion provider/server.
+        Use this for all LLM calls inside the ingestion pipeline.
+        """
+        model = self._get_ingestion_model()
+        try:
+            if self.ingestion_provider == "gemini":
+                response = self.i_gemini_client.models.generate_content(
+                    model=model or settings.GEMINI_MODEL,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    ),
+                )
+                return response.text.strip()
+
+            elif self.ingestion_provider == "anthropic":
+                response = self.i_anthropic_client.messages.create(
+                    model=settings.ANTHROPIC_MODEL,
+                    max_tokens=max_tokens if max_tokens is not None else 8192,
+                    temperature=temperature,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return response.content[0].text.strip()
+
+            else:  # local / ollama / lm_studio / openai / huggingface
+                _kwargs = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": temperature,
+                    "extra_body": self._with_ingestion_keep_alive(),
+                }
+                if max_tokens is not None:
+                    _kwargs["max_tokens"] = max_tokens
+                response = self.i_chat_client.chat.completions.create(**_kwargs)
+                return response.choices[0].message.content.strip()
+
+        except Exception as e:
+            logger.error(f"[LLM] ingestion_generate() failed: {e}")
+            raise
+
+    def ingestion_extract_structured(
+        self,
+        prompt: str,
+        response_model: Type[BaseModel],
+        temperature: float = 0.1,
+    ):
+        """
+        Like ``extract_structured()`` but always routes to the ingestion provider/server.
+        Use this for all structured extraction inside the ingestion pipeline.
+        """
+        model = self._get_ingestion_model()
+        try:
+            if self.ingestion_provider in ("local", "ollama", "lm_studio"):
+                return self._extract_lm_studio(
+                    prompt,
+                    response_model,
+                    temperature,
+                    model=model,
+                    _client=self.i_chat_client,
+                )
+            elif self.ingestion_provider == "gemini":
+                return self._extract_gemini(
+                    prompt,
+                    response_model,
+                    temperature,
+                    model=model,
+                    _gemini_client=self.i_gemini_client,
+                )
+            elif self.ingestion_provider == "openai":
+                # Reuse main OpenAI extraction (uses i_chat_client via beta parse)
+                return self._extract_openai(prompt, response_model, temperature)
+            elif self.ingestion_provider == "anthropic":
+                return self._extract_anthropic(prompt, response_model, temperature)
+            elif self.ingestion_provider == "huggingface":
+                return self._extract_huggingface(prompt, response_model, temperature)
+            else:
+                raise ValueError(
+                    f"Unsupported ingestion provider: {self.ingestion_provider}"
+                )
+        except Exception as e:
+            logger.error(
+                f"Ingestion extraction failed ({self.ingestion_provider}): {e}"
+            )
+            try:
+                return response_model()
+            except Exception:
+                return None
 
 
 llm_service = LLMService()

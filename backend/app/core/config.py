@@ -19,30 +19,51 @@ class Settings(BaseSettings):
     KUZU_DB_PATH: str = DEFAULT_KUZU_DB_PATH
 
     # ── LLM Provider ──────────────────────────────────────────────────────────
-    # "ollama", "lm_studio", "openai", "gemini", "anthropic", "huggingface"
-    LLM_PROVIDER: str = "gemini"
+    # "local"  — any OpenAI-compatible server (LM Studio, Ollama, vLLM, etc.)
+    #            set LLM_BASE_URL, LLM_API_KEY, LLM_MODEL below
+    # "ollama" / "lm_studio" — legacy aliases (still work; prefer "local")
+    # "openai", "gemini", "anthropic", "huggingface" — cloud providers
+    LLM_PROVIDER: str = "local"
     LLM_FALLBACK_PROVIDER: str | None = None  # Optional fallback if primary fails
 
-    # Local / OpenAI-compatible LLM (Ollama, LM Studio, or any v1 endpoint)
-    # These are used when LLM_PROVIDER is "ollama" or "lm_studio".
+    # ── Local / OpenAI-compatible server ─────────────────────────────────────
+    # Used when LLM_PROVIDER is "local", "ollama", or "lm_studio".
     LLM_BASE_URL: str = (
-        "http://127.0.0.1:11434"  # LM Studio default: http://127.0.0.1:1234
+        "http://127.0.0.1:1234"  # LM Studio default; Ollama: http://127.0.0.1:11434
     )
-    LLM_API_KEY: str = "ollama"  # LM Studio default: "lm-studio"
-    LLM_MODEL: str = "gemma4:latest"  # LM Studio example: "google/gemma-3-4b"
-    # Separate model for ingestion (extraction, entity reasoning). If None, falls back to LLM_MODEL.
-    # gemma3:4b works well for structured extraction; gemma4 is better for chat/retrieval.
-    INGESTION_LLM_MODEL: str | None = "gemma3:4b"
-    # Gemini-specific ingestion model override. If None, falls back to GEMINI_MODEL.
-    # e.g. use "gemini-2.0-flash" for ingestion vs "gemini-2.5-pro" for chat.
-    INGESTION_GEMINI_MODEL: str | None = None
-    LLM_KEEP_ALIVE: str = "10m"  # Keep model loaded for 20 minutes after last request
+    LLM_API_KEY: str = "lm-studio"  # Ollama: "ollama"
+    LLM_MODEL: str = "google/gemma-4-e4b"  # model name as shown in your server
+    LLM_KEEP_ALIVE: str = "10m"  # Keep model loaded after last request
     # Response format for local JSON extraction ("text", "json_object", "auto").
     # LM Studio no longer accepts "json_object" (returns 400) — use "text".
     LLM_RESPONSE_FORMAT: str = "text"
 
+    # ── Universal model overrides (provider-agnostic) ─────────────────────────
+    # Set these instead of provider-specific keys (GEMINI_MODEL, LLM_MODEL, etc.).
+    # Works regardless of which provider is active.
+    #   CHAT_MODEL=gemini-2.5-pro       → used for chat/retrieval
+    #   INGESTION_MODEL=gemma-4-e4b     → used for extraction/entity reasoning
+    # If blank, falls back to the provider-specific key (GEMINI_MODEL, LLM_MODEL, etc.)
+    CHAT_MODEL: str | None = None
+    INGESTION_MODEL: str | None = None
+
+    # ── Ingestion overrides (extraction / entity reasoning) ───────────────────
+    # Leave blank to share the main LLM settings above.
+    # Set any of these to route ingestion to a different provider or server.
+    INGESTION_PROVIDER: str | None = (
+        None  # e.g. "gemini", "local" — defaults to LLM_PROVIDER
+    )
+    INGESTION_BASE_URL: str | None = (
+        None  # defaults to LLM_BASE_URL (local providers only)
+    )
+    INGESTION_API_KEY: str | None = None  # defaults to LLM_API_KEY
+    # Provider-specific model fallbacks (used when INGESTION_MODEL is not set)
+    INGESTION_LLM_MODEL: str | None = "google/gemma-4-e4b"  # for local/ollama providers
+    INGESTION_GEMINI_MODEL: str | None = None  # for Gemini provider
+
     # ── Embeddings ────────────────────────────────────────────────────────────
-    # "ollama", "lm_studio", or "auto" (follows LLM_PROVIDER)
+    # "local" / "ollama" / "lm_studio" — any OpenAI-compatible /v1/embeddings server
+    # "auto" — follows LLM_PROVIDER
     EMBEDDING_PROVIDER: str = "ollama"
     EMBEDDING_BASE_URL: str = (
         "http://localhost:11434"  # LM Studio: http://127.0.0.1:1234
