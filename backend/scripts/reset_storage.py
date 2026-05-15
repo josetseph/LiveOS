@@ -1,5 +1,5 @@
 """
-reset_minio.py — Delete all objects from the MinIO storage bucket.
+reset_storage.py — Delete all objects from the RustFS storage bucket.
 
 Removes every stored file (attachments, audio, images, PDFs) without
 deleting the bucket itself.
@@ -15,13 +15,13 @@ from app.core.config import settings
 from app.utils.bucket_storage import s3_client
 
 
-async def _reset_minio() -> None:
+async def _reset_storage() -> None:
     async with await s3_client() as client:
         bucket = settings.BUCKET_NAME
         response = await client.list_objects_v2(Bucket=bucket)
         objects = response.get("Contents", [])
         if not objects:
-            print("   ✅ MinIO bucket already empty.")
+            print("   ✅ RustFS bucket already empty.")
             return
         keys = [{"Key": obj["Key"]} for obj in objects]
         await client.delete_objects(Bucket=bucket, Delete={"Objects": keys})
@@ -40,11 +40,11 @@ async def _reset_minio() -> None:
                 print(f"   ✅ Deleted {len(keys)} more object(s).")
 
 
-def reset_minio() -> None:
-    print("🗑️  Resetting MinIO bucket...")
-    asyncio.run(_reset_minio())
-    print("✅ MinIO reset complete.")
+def reset_storage() -> None:
+    print("🗑️  Resetting RustFS bucket...")
+    asyncio.run(_reset_storage())
+    print("✅ RustFS bucket reset complete.")
 
 
 if __name__ == "__main__":
-    reset_minio()
+    reset_storage()

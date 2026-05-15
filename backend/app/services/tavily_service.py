@@ -5,6 +5,7 @@ Called by retrieval.py when FALLBACK_MODE="web" and the local knowledge graph
 could not produce a satisfactory answer. Results are returned as context dicts
 in the same shape as local retrieval docs so the synthesis step is unchanged.
 """
+# pylint: disable=import-outside-toplevel
 
 from __future__ import annotations
 
@@ -55,7 +56,7 @@ async def web_search(query: str, max_results: int = 5) -> list[dict]:
         logger.info(
             f"[Tavily] Web search returned {len(results)} result(s) for: {query!r}"
         )
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning(f"[Tavily] Web search failed: {exc}")
         return []
 

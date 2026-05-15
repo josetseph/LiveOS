@@ -1,5 +1,5 @@
 """
-init_kuzu.py — Initialise the embedded Kuzu graph database.
+init_graph.py — Initialise the embedded Kuzu graph database.
 
 Creates the database directory if it doesn't exist and triggers schema
 creation by calling GraphService.verify_connection(), which runs
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from app.core.config import REPO_ROOT, settings
 
 
-def init_kuzu() -> None:
+def init_graph() -> None:
     print("⏳ Initializing Kuzu graph database...")
 
     db_path = Path(settings.KUZU_DB_PATH).expanduser()
@@ -44,4 +44,4 @@ def init_kuzu() -> None:
 
 
 if __name__ == "__main__":
-    init_kuzu()
+    init_graph()

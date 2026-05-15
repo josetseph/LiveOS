@@ -1,3 +1,5 @@
+"""Application configuration loaded from environment variables via pydantic-settings."""
+
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -8,6 +10,8 @@ DEFAULT_KUZU_DB_PATH = str(REPO_ROOT / "data" / "kuzu" / "kuzu_graph")
 
 
 class Settings(BaseSettings):
+    """Pydantic settings that load all configuration from environment variables and .env files."""
+
     model_config = SettingsConfigDict(
         env_file=str(BACKEND_DIR / ".env"), env_file_encoding="utf-8", extra="ignore"
     )
@@ -141,10 +145,10 @@ class Settings(BaseSettings):
     HUGGINGFACE_API_KEY: str | None = None
     HUGGINGFACE_MODEL: str | None = None  # e.g. "meta-llama/Llama-3.3-70B-Instruct"
 
-    # ── Storage (R2 / MinIO) ──────────────────────────────────────────────────
+    # ── Storage (R2 / RustFS) ─────────────────────────────────────────────────
     BUCKET_NAME: str = "liveos-assets"
-    BUCKET_ACCESS_KEY_ID: str = "minioadmin"
-    BUCKET_SECRET_ACCESS_KEY: str = "minioadmin"
+    BUCKET_ACCESS_KEY_ID: str = "rustfsadmin"
+    BUCKET_SECRET_ACCESS_KEY: str = "rustfsadmin"
     R2_ENDPOINT_URL: str = "http://localhost:9000"
     FILES_URL: str = "http://localhost:9000/liveos-assets"
     BUCKET_TOKEN: str | None = None

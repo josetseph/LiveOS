@@ -9,8 +9,8 @@ until PGPASSWORD=liveos_password psql -h postgres -U liveos -d liveos_brain -c '
   sleep 1
 done
 
-echo "⏳ Waiting for MinIO..."
-until curl -sf http://minio:9000/minio/health/live > /dev/null 2>&1; do
+echo "⏳ Waiting for RustFS..."
+until curl -sf http://rustfs:9000/health > /dev/null 2>&1; do
   sleep 1
 done
 

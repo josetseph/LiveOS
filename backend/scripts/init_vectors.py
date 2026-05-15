@@ -1,10 +1,3 @@
-"""
-reset_qdrant.py — Delete all Qdrant collections and recreate them empty.
-
-This preserves the collection schema (vector size, distance metric) while
-discarding every stored point.
-"""
-
 import os
 import sys
 
@@ -13,28 +6,29 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from app.core.config import settings
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 
-def reset_qdrant() -> None:
-    print("🗑️  Resetting Qdrant collections...")
+@retry(stop=stop_after_attempt(10), wait=wait_fixed(2))
+def init_vectors() -> None:
+    print("⏳ Initializing Qdrant collections...")
     client = QdrantClient(
         host=settings.QDRANT_HOST,
         port=settings.QDRANT_PORT,
         api_key=settings.QDRANT_API_KEY,
     )
 
+    existing = {c.name for c in client.get_collections().collections}
     collections = [
         settings.QDRANT_COLLECTION_NODE_CORES,
         settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS,
         settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
     ]
 
-    existing = {c.name for c in client.get_collections().collections}
-
     for name in collections:
         if name in existing:
-            client.delete_collection(name)
-            print(f"   🗑️  Deleted collection '{name}'.")
+            print(f"✅ Qdrant collection '{name}' already exists.")
+            continue
         client.create_collection(
             collection_name=name,
             vectors_config=VectorParams(
@@ -42,12 +36,10 @@ def reset_qdrant() -> None:
                 distance=Distance.COSINE,
             ),
         )
-        count = client.get_collection(name).points_count
-        assert count == 0, f"Collection '{name}' has {count} points after recreation"
-        print(f"   ✅ Recreated collection '{name}' (0 points).")
+        print(f"✅ Created Qdrant collection '{name}'.")
 
-    print("✅ Qdrant reset complete.")
+    print("✅ Qdrant initialization complete.")
 
 
 if __name__ == "__main__":
-    reset_qdrant()
+    init_vectors()

@@ -1,3 +1,6 @@
+"""Research-loop chat workflow: iterative retrieval, sub-question synthesis, and attribution."""
+
+# pylint: disable=wrong-import-order
 import time
 
 from app.core.database import AsyncSessionLocal
@@ -18,7 +21,9 @@ def _doc_passage(doc: dict) -> str:
     return text
 
 
-class ChatWorkflow:
+class ChatWorkflow:  # pylint: disable=too-few-public-methods
+    """Iterative research-loop workflow: retrieve, synthesise, and attribute sources per turn."""
+
     async def chat(self, user_query: str) -> dict:
         """
         Research-style retrieval loop:
@@ -63,7 +68,7 @@ class ChatWorkflow:
         # docs so that irrelevant graph-expansion neighbours don't dilute precision.
         # Sort by the rerank_score already attached by _apply_reranker_logging;
         # unscored docs (expanded neighbours) fall to the bottom (score = 0).
-        MAX_CONTEXT_DOCS = 6
+        MAX_CONTEXT_DOCS = 6  # pylint: disable=invalid-name
         if len(unique_docs) > MAX_CONTEXT_DOCS:
             unique_docs = sorted(
                 unique_docs,
@@ -73,12 +78,14 @@ class ChatWorkflow:
 
         logger.info(f"[Chat] Unique docs: {len(unique_docs)}")
         if unique_docs:
-            print(f"\n🔍 CONTEXT ({len(unique_docs)} docs):")
-            for i, doc in enumerate(unique_docs):
-                print(
-                    f"  {i+1}. [{doc.get('original_obj',{}).get('name','?')}] "
-                    f"{_doc_passage(doc)}"
-                )
+            logger.debug(
+                "Context (%d docs): %s",
+                len(unique_docs),
+                [
+                    f"{i+1}. [{doc.get('original_obj', {}).get('name', '?')}] {_doc_passage(doc)}"
+                    for i, doc in enumerate(unique_docs)
+                ],
+            )
 
         # ── Answer assembly ──────────────────────────────────────────────────
         # Do not synthesize from raw docs in chat workflow. The only valid answer
@@ -152,7 +159,7 @@ class ChatWorkflow:
                     for row_id, row_title in rows:
                         if row_title:
                             id_to_title[row_id] = row_title
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug(f"[Chat] Note title lookup failed: {e}")
 
         references = []

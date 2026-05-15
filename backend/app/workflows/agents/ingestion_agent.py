@@ -1,3 +1,6 @@
+"""LangGraph ingestion agent: multimodal → extraction → refinement → storage → indexing."""
+
+# pylint: disable=import-outside-toplevel,protected-access
 import asyncio
 import uuid
 from datetime import datetime
@@ -22,6 +25,8 @@ concurrency_limit = asyncio.Semaphore(settings.INGESTION_AGENT_CONCURRENCY)
 
 # 1. Define Agent State
 class IngestionState(TypedDict):
+    """LangGraph state dictionary for the ingestion agent pipeline."""
+
     input: NoteInput
     content: str
     extraction: Optional[Extraction]
@@ -33,7 +38,10 @@ class IngestionState(TypedDict):
 
 
 # 2. Node Functions
-async def multimodal_node(state: IngestionState):
+async def multimodal_node(
+    state: IngestionState,
+):  # pylint: disable=too-many-locals,too-many-statements
+    """LangGraph node: extract text from any multimedia attachments in the note."""
     logs = state.get("logs", [])
     logs.append(
         f"[{datetime.now().strftime('%H:%M:%S')}] START: Processing Multimedia..."
@@ -46,7 +54,7 @@ async def multimodal_node(state: IngestionState):
     # This gate limits concurrent multimedia processing calls.
     async with concurrency_limit:
         logger.info(
-            f"Sempahore Acquired. (Active: {1 - concurrency_limit._value + 1 if hasattr(concurrency_limit, '_value') else '?'})"
+            f"Sempahore Acquired. (Active: {1 - concurrency_limit._value + 1 if hasattr(concurrency_limit, '_value') else '?'})"  # pylint: disable=line-too-long
         )
         content = state["input"].content or ""
         audio_changed = False  # Audio transcripts must be persisted as text
@@ -150,7 +158,7 @@ async def multimodal_node(state: IngestionState):
                         img_title = (img_title or "").strip().strip('"').strip(
                             "'"
                         ) or filename
-                    except Exception:
+                    except Exception:  # pylint: disable=broad-exception-caught
                         img_title = filename
 
                     content += (
@@ -161,7 +169,7 @@ async def multimodal_node(state: IngestionState):
                 else:
                     logger.info(f"Skipped (Unsupported Type): {url}")
 
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.error(f"File Processing Failed: {e}")
 
         # Audio transcripts are synced back to Postgres because audio files are
@@ -185,7 +193,10 @@ async def multimodal_node(state: IngestionState):
     }
 
 
-async def extraction_node(state: IngestionState):
+async def extraction_node(
+    state: IngestionState,
+):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    """LangGraph node: run structured LLM extraction to produce an Extraction object."""
     logs = state["logs"]
     logs.append(
         f"[{datetime.now().strftime('%H:%M:%S')}] EXTRACT: Running Knowledge Architect ({llm_service.models_path})..."
@@ -202,7 +213,7 @@ async def extraction_node(state: IngestionState):
     if state["input"].title:
         extraction_content = f"# {state['input'].title}\n\n{extraction_content}"
 
-    prompt = f"""You are a precision knowledge extraction engine. Your sole function is to decompose any input note into a fully structured knowledge graph — extracting every entity, every relationship, and generating an isolated contextual description for each entity as it exists *within the note only*.
+    prompt = f"""You are a precision knowledge extraction engine. Your sole function is to decompose any input note into a fully structured knowledge graph — extracting every entity, every relationship, and generating an isolated contextual description for each entity as it exists *within the note only*.  # pylint: disable=line-too-long
 
 ---
 
@@ -382,138 +393,151 @@ Now apply this entire process to the following note and return only the JSON out
 
 {extraction_content}
 """
-    try:
-        # Use generate() instead of extract_structured() to bypass Ollama's
-        # grammar-constrained JSON sampling, which causes small models (e.g.
-        # gemma3:4b) to emit empty `relationships: []` for complex nested arrays.
-        raw_response = await llm_service.ingestion_generate(prompt, temperature=0.1)
-        cleaned_json = llm_service._clean_json(raw_response)
-        extraction = Extraction.model_validate_json(cleaned_json)
-        if not extraction:
-            return {"errors": ["LLM returned empty extraction"]}
-
-        logger.info(f"Extraction Completed: {extraction}")
-
-        # Log per-entity type reasoning for auditability
-        for n in extraction.nodes:
-            reasoning = (
-                n.type_reasoning.strip()
-                if n.type_reasoning
-                else "no reasoning provided"
-            )
-            logger.info(
-                f"  [Entity] name={n.name!r} type={n.type!r} reasoning={reasoning!r}"
-            )
-
-        # Log per-relationship reasoning for auditability
-        for r in extraction.relationships:
-            rel_reasoning = (
-                r.reasoning.strip() if r.reasoning else "no reasoning provided"
-            )
-            logger.info(
-                f"  [Relationship] {r.source_name!r} -> {r.target_name!r}"
-                f" ({r.relationship_type!r}): {rel_reasoning!r}"
-            )
-
-        # GARBAGE NAME HANDLING: nodes with empty/placeholder names but valid context
-        # get a recovery rename; nodes with neither are dropped.
-        GARBAGE_NAMES = {"untitled", "none", "unknown", ""}
-
-        clean_nodes = []
-        renameable = []
-        for n in extraction.nodes:
-            val = (n.name or "").strip().lower()
-            if val not in GARBAGE_NAMES:
-                clean_nodes.append(n)
-            elif n.isolated_context:
-                renameable.append(n)
-            # else: no name and no context — silently drop
-
-        if renameable:
-            import json as _json
-            import re as _re
-
-            batch_lines = "\n".join(
-                f'{i+1}. (type={n.type}) "{n.isolated_context}"'
-                for i, n in enumerate(renameable)
-            )
-            rename_prompt = (
-                "For each numbered excerpt below, provide the most specific descriptive name "
-                "for the node it describes (1–5 words each).\n\n"
-                "Return null if an excerpt has insufficient information to name specifically.\n\n"
-                "Return ONLY a JSON array: "
-                '[{"index": 1, "name": "Name Here"}, {"index": 2, "name": null}, ...]\n\n'
-                f"{batch_lines}\n\n"
-                'Return ONLY: [{"index": 1, "name": "..."}, ...]'
-            )
-            try:
-                rename_resp = await llm_service.ingestion_generate(
-                    rename_prompt,
-                    temperature=0.0,
+    # Retry loop: local servers (LM Studio / Ollama) occasionally return empty
+    # responses when the model fails to allocate output tokens (KV cache pressure).
+    # Waiting 30-60s lets the server recover before retrying.
+    _MAX_EXTRACTION_ATTEMPTS = 3  # pylint: disable=invalid-name
+    for _attempt in range(_MAX_EXTRACTION_ATTEMPTS):
+        try:
+            # Use generate() instead of extract_structured() to bypass Ollama's
+            # grammar-constrained JSON sampling, which causes small models (e.g.
+            # gemma3:4b) to emit empty `relationships: []` for complex nested arrays.
+            raw_response = await llm_service.ingestion_generate(prompt, temperature=0.1)
+            cleaned_json = llm_service._clean_json(raw_response)
+            extraction = Extraction.model_validate_json(cleaned_json)
+            if not extraction:
+                return {"errors": ["LLM returned empty extraction"]}
+            break  # success — exit retry loop
+        except Exception as _e:  # pylint: disable=broad-exception-caught
+            if _attempt < _MAX_EXTRACTION_ATTEMPTS - 1:
+                _wait = 30 * (_attempt + 1)  # 30s, then 60s
+                logger.warning(
+                    f"Extraction attempt {_attempt + 1} failed, "
+                    f"retrying in {_wait}s: {_e}"
                 )
-                match = _re.search(r"\[.*?\]", rename_resp, _re.DOTALL)
-                if match:
-                    name_list = _json.loads(match.group())
-                    name_map = {
-                        e["index"]: e.get("name")
-                        for e in name_list
-                        if isinstance(e, dict) and "index" in e
-                    }
-                    for i, node in enumerate(renameable):
-                        new_name = name_map.get(i + 1)
-                        if (
-                            isinstance(new_name, str)
-                            and new_name.strip()
-                            and new_name.strip().lower() not in GARBAGE_NAMES
-                            and 2 < len(new_name.strip()) <= 80
-                        ):
-                            node.name = new_name.strip()
-                            logger.info(f"  [Rename] Recovered → '{node.name}'")
-                            clean_nodes.append(node)
-                        else:
-                            logger.info(
-                                f"  [Rename] Could not recover (response: '{new_name}')"
-                            )
-                else:
-                    logger.warning("  [Rename] Could not parse batch rename response.")
-            except Exception as rename_err:
-                logger.warning(f"  [Rename] Batch rename failed: {rename_err}")
+                await asyncio.sleep(_wait)
+            else:
+                logger.error(f"Extraction Error: {_e}")
+                return {
+                    "errors": [
+                        f"Extraction failed after {_MAX_EXTRACTION_ATTEMPTS} attempts: {_e}"
+                    ],
+                    "logs": logs,
+                }
 
-        # Dedup: if recovered names collide with existing clean nodes or with
-        # each other, keep only the first occurrence by normalized name.
-        _seen_names: set[str] = set()
-        deduped_nodes = []
-        for n in clean_nodes:
-            _key = (n.name or "").strip().lower()
-            if _key and _key not in _seen_names:
-                _seen_names.add(_key)
-                deduped_nodes.append(n)
-            elif _key:
-                logger.debug(
-                    f"  [Rename] Dedup: dropped duplicate node name '{n.name}'"
-                )
-        extraction.nodes = deduped_nodes
+    logger.info(f"Extraction Completed: {extraction}")
 
-        logger.info(f"Nodes after rename: {[n.name for n in extraction.nodes]}")
-
+    # Log per-entity type reasoning for auditability
+    for n in extraction.nodes:
+        reasoning = (
+            n.type_reasoning.strip() if n.type_reasoning else "no reasoning provided"
+        )
         logger.info(
-            f"Extracted: {len(extraction.nodes)} nodes, {len(extraction.relationships)} relationships."
+            f"  [Entity] name={n.name!r} type={n.type!r} reasoning={reasoning!r}"
         )
 
-        t_end = time.perf_counter()
-        logger.info(f"Extraction took: {t_end - t_start:.4f}s")
-        return {
-            "extraction": extraction,
-            "logs": logs,
-            "status": "EXTRACTED",
-        }
-    except Exception as e:
-        logger.error(f"Extraction Error: {e}")
-        logs.append(f"ERROR: Extraction failed: {e}")
-        return {"errors": [f"Extraction failed: {str(e)}"], "logs": logs}
+    # Log per-relationship reasoning for auditability
+    for r in extraction.relationships:
+        rel_reasoning = r.reasoning.strip() if r.reasoning else "no reasoning provided"
+        logger.info(
+            f"  [Relationship] {r.source_name!r} -> {r.target_name!r}"
+            f" ({r.relationship_type!r}): {rel_reasoning!r}"
+        )
+
+    # GARBAGE NAME HANDLING: nodes with empty/placeholder names but valid context
+    # get a recovery rename; nodes with neither are dropped.
+    GARBAGE_NAMES = {"untitled", "none", "unknown", ""}  # pylint: disable=invalid-name
+
+    clean_nodes = []
+    renameable = []
+    for n in extraction.nodes:
+        val = (n.name or "").strip().lower()
+        if val not in GARBAGE_NAMES:
+            clean_nodes.append(n)
+        elif n.isolated_context:
+            renameable.append(n)
+        # else: no name and no context — silently drop
+
+    if renameable:
+        import json as _json
+        import re as _re
+
+        batch_lines = "\n".join(
+            f'{i+1}. (type={n.type}) "{n.isolated_context}"'
+            for i, n in enumerate(renameable)
+        )
+        rename_prompt = (
+            "For each numbered excerpt below, provide the most specific descriptive name "
+            "for the node it describes (1–5 words each).\n\n"
+            "Return null if an excerpt has insufficient information to name specifically.\n\n"
+            "Return ONLY a JSON array: "
+            '[{"index": 1, "name": "Name Here"}, {"index": 2, "name": null}, ...]\n\n'
+            f"{batch_lines}\n\n"
+            'Return ONLY: [{"index": 1, "name": "..."}, ...]'
+        )
+        try:
+            rename_resp = await llm_service.ingestion_generate(
+                rename_prompt,
+                temperature=0.0,
+            )
+            match = _re.search(r"\[.*?\]", rename_resp, _re.DOTALL)
+            if match:
+                name_list = _json.loads(match.group())
+                name_map = {
+                    e["index"]: e.get("name")
+                    for e in name_list
+                    if isinstance(e, dict) and "index" in e
+                }
+                for i, node in enumerate(renameable):
+                    new_name = name_map.get(i + 1)
+                    if (
+                        isinstance(new_name, str)
+                        and new_name.strip()
+                        and new_name.strip().lower() not in GARBAGE_NAMES
+                        and 2 < len(new_name.strip()) <= 80
+                    ):
+                        node.name = new_name.strip()
+                        logger.info(f"  [Rename] Recovered → '{node.name}'")
+                        clean_nodes.append(node)
+                    else:
+                        logger.info(
+                            f"  [Rename] Could not recover (response: '{new_name}')"
+                        )
+            else:
+                logger.warning("  [Rename] Could not parse batch rename response.")
+        except Exception as rename_err:  # pylint: disable=broad-exception-caught
+            logger.warning(f"  [Rename] Batch rename failed: {rename_err}")
+
+    # Dedup: if recovered names collide with existing clean nodes or with
+    # each other, keep only the first occurrence by normalized name.
+    _seen_names: set[str] = set()
+    deduped_nodes = []
+    for n in clean_nodes:
+        _key = (n.name or "").strip().lower()
+        if _key and _key not in _seen_names:
+            _seen_names.add(_key)
+            deduped_nodes.append(n)
+        elif _key:
+            logger.debug(f"  [Rename] Dedup: dropped duplicate node name '{n.name}'")
+    extraction.nodes = deduped_nodes
+
+    logger.info(f"Nodes after rename: {[n.name for n in extraction.nodes]}")
+
+    logger.info(
+        f"Extracted: {len(extraction.nodes)} nodes, {len(extraction.relationships)} relationships."
+    )
+
+    t_end = time.perf_counter()
+    logger.info(f"Extraction took: {t_end - t_start:.4f}s")
+    return {
+        "extraction": extraction,
+        "logs": logs,
+        "status": "EXTRACTED",
+    }
 
 
 async def storage_node(state: IngestionState):
+    """LangGraph node: persist the validated extraction to the graph and vector stores."""
     if state.get("errors") or not state.get("extraction"):
         return {"errors": state.get("errors") or ["Missing extraction data"]}
 
@@ -550,12 +574,13 @@ async def storage_node(state: IngestionState):
         t_end = time.perf_counter()
         logger.info(f"  [Perf] Graph Storage took: {t_end - t_start:.4f}s")
         return {"note_id": note_id, "created_at": created_at}
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         logs.append(f"ERROR: Storage failed: {e}")
         return {"errors": [f"Storage failed: {str(e)}"], "logs": logs}
 
 
 async def summarization_node(state: IngestionState):
+    """LangGraph node: update per-node context summaries and mark ingestion complete."""
     if state.get("errors") or not state.get("extraction"):
         return {}
     logs = state["logs"]
@@ -637,8 +662,7 @@ enrich by copying surrounding verbatim sentences. Return as nodes with the same 
 {state['content']}
 </source_text>
 """
-        else:
-            return f"""<system_role>
+        return f"""<system_role>
 You are a Quality Assurance Auditor running pass {pass_num} of an iterative extraction loop.
 Review the already-extracted nodes against the Source Text and identify anything missed.
 </system_role>
@@ -693,7 +717,7 @@ Format: {{"source_name": "...", "target_name": "...", "relationship_type": "snak
         return added_nodes, added_rels
 
     extraction = state["extraction"]
-    MAX_PASSES = 1
+    MAX_PASSES = 1  # pylint: disable=invalid-name
     for pass_num in range(1, MAX_PASSES + 1):
         logs.append(
             f"[{datetime.now().strftime('%H:%M:%S')}] REFINE: Pass {pass_num} (max {MAX_PASSES})..."
@@ -723,7 +747,7 @@ Format: {{"source_name": "...", "target_name": "...", "relationship_type": "snak
                     f"[{datetime.now().strftime('%H:%M:%S')}] REFINE: Pass {pass_num} — no response."
                 )
                 break
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logs.append(f"WARN: Refinement pass {pass_num} failed: {e}")
             logger.warning(f"  [Refiner] Pass {pass_num} failed: {e}")
             break
@@ -732,6 +756,7 @@ Format: {{"source_name": "...", "target_name": "...", "relationship_type": "snak
 
 
 def should_continue_after_extraction(state: IngestionState):
+    """Route the graph after extraction: 'end' on error, 'store' otherwise."""
     if state.get("errors"):
         return "end"
     return "store"

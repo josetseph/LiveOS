@@ -1,5 +1,5 @@
 """
-reset_typesense.py — Drop and recreate the Typesense liveos_nodes collection.
+reset_index.py — Drop and recreate the Typesense liveos_nodes collection.
 
 Clears all indexed documents then recreates the collection with the correct
 schema for the current architecture.
@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from app.services.typesense_service import typesense_service
 
 
-def reset_typesense() -> None:
+def reset_index() -> None:
     print("🗑️  Resetting Typesense collection...")
     client = typesense_service.client
     collection = typesense_service.collection
@@ -33,4 +33,4 @@ def reset_typesense() -> None:
 
 
 if __name__ == "__main__":
-    reset_typesense()
+    reset_index()

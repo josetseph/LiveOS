@@ -1,3 +1,5 @@
+"""Qwen3-based generative reranker that scores document relevance via yes/no logits."""
+# pylint: disable=import-outside-toplevel
 import asyncio
 import os
 from typing import Optional
@@ -26,7 +28,8 @@ _PROMPT_TEMPLATE = (
 )
 
 
-class RerankerService:
+class RerankerService:  # pylint: disable=too-few-public-methods
+    """Qwen3-0.6b generative reranker: scores candidate documents via yes/no token logits."""
     def __init__(self):
         self._model = None
         self._tokenizer = None
@@ -83,7 +86,7 @@ class RerankerService:
                     f"(yes={self._yes_token_id}, no={self._no_token_id})"
                 )
                 return True
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.error(f"[Reranker] Failed to load model: {exc}")
                 return False
 
@@ -148,7 +151,7 @@ class RerankerService:
         try:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, _run)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error(f"[Reranker] Inference failed: {exc}")
             return []
 

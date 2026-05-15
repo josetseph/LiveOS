@@ -169,7 +169,7 @@ class IngestionTrackerService:
         cancelled_early = False
         try:
             await asyncio.to_thread(callback)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error(
                 f"[IngestionTracker] Leiden recompute failed: {e}", exc_info=True
             )
@@ -197,6 +197,7 @@ class IngestionTrackerService:
                 )
 
     async def mark_community_recompute_complete(self):
+        """Mark the background community-recompute pass as finished."""
         async with self._lock:
             self._community_recompute_running = False
 

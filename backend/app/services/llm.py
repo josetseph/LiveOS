@@ -1,3 +1,5 @@
+"""Multi-provider LLM service supporting chat, structured extraction, and ingestion routing."""
+# pylint: disable=too-many-lines,wrong-import-order,import-outside-toplevel
 import os
 import re
 from typing import Optional, Type
@@ -16,11 +18,19 @@ logger = get_logger("LLMService")
 
 
 class LLMService:
+    """Multi-provider LLM client supporting structured extraction, generation, and ingestion routing."""
     def __init__(self):
         self.device = "mps" if torch.backends.mps.is_available() else "cpu"
         self.models_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "../../models")
         )
+
+        # Declare client attributes upfront so they are always present on the
+        # instance regardless of which provider branch _init_clients() takes.
+        self.extraction_client = None
+        self.chat_client = None
+        self.async_chat_client = None
+        self._lm_studio_model_cache: Optional[str] = None
 
         # Determine Primary Provider
         self.provider = settings.LLM_PROVIDER.lower()
@@ -72,7 +82,7 @@ class LLMService:
             max_retries=3,
         )
 
-    def _init_clients(self):
+    def _init_clients(self):  # pylint: disable=too-many-statements
         """Initialize clients for the configured provider."""
         if self.provider == "ollama":
             base_url = f"{settings.LLM_BASE_URL.rstrip('/')}/v1"
@@ -130,12 +140,14 @@ class LLMService:
 
             # Create a minimal wrapper for backward compatibility with methods that use chat_client
             # This allows detect_similarity and other legacy methods to work
-            class GeminiChatWrapper:
+            class GeminiChatWrapper:  # pylint: disable=too-few-public-methods
+                """OpenAI-compatible wrapper that routes completion requests through the native Gemini SDK."""
                 def __init__(self, native_client):
                     self.native_client = native_client
                     self.chat = self
 
-                class Completions:
+                class Completions:  # pylint: disable=too-few-public-methods
+                    """Inner completions namespace mirroring the OpenAI Completions interface."""
                     def __init__(self, native_client):
                         self.native_client = native_client
 
@@ -143,10 +155,11 @@ class LLMService:
                         self,
                         model,
                         messages,
-                        max_tokens=None,
-                        extra_body=None,
+                        _max_tokens=None,
+                        _extra_body=None,
                         temperature=0.1,
                     ):
+                        """Execute a synchronous completion request against the Gemini API."""
                         # Convert OpenAI-style messages to Gemini format
                         # Combine system + user messages into single prompt
                         prompt_parts = []
@@ -171,11 +184,13 @@ class LLMService:
                         )
 
                         # Return OpenAI-compatible response structure
-                        class Choice:
+                        class Choice:  # pylint: disable=too-few-public-methods
+                            """OpenAI-compatible Choice wrapper holding a single candidate message."""
                             def __init__(self, text):
                                 self.message = type("Message", (), {"content": text})()
 
-                        class Response:
+                        class Response:  # pylint: disable=too-few-public-methods
+                            """OpenAI-compatible response wrapper containing a list of choices."""
                             def __init__(self, text):
                                 self.choices = [Choice(text)]
 
@@ -183,6 +198,7 @@ class LLMService:
 
                 @property
                 def completions(self):
+                    """Return the inner Completions object for OpenAI-style access."""
                     return self.Completions(self.native_client)
 
             self.chat_client = GeminiChatWrapper(self.gemini_client)
@@ -241,7 +257,7 @@ class LLMService:
         else:
             raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
-    def _init_ingestion_clients(self):
+    def _init_ingestion_clients(self):  # pylint: disable=too-many-statements
         """
         Set up a separate set of clients for ingestion (extraction/entity reasoning).
 
@@ -411,7 +427,7 @@ class LLMService:
         return body
 
     def _lm_studio_json_response_format(
-        self, schema: dict | None = None, schema_name: str = "response"
+        self, _schema: dict | None = None, _schema_name: str = "response"
     ) -> dict:
         """
         Force json_object mode to avoid LM Studio grammar compilation stalls
@@ -423,7 +439,7 @@ class LLMService:
         """Compatibility fallback for servers that don't accept json_object."""
         return {"type": "text"}
 
-    def _lm_studio_response_format_candidates(
+    def _lm_studio_response_format_candidates(  # pylint: disable=unused-argument
         self, schema: dict | None = None, schema_name: str = "response"
     ) -> list[dict]:
         """
@@ -478,7 +494,7 @@ class LLMService:
                 )
                 self._lm_studio_model_cache = contains[0]
                 return contains[0]
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning(f"[LM Studio] Could not list models for resolution: {e}")
 
         logger.warning(
@@ -517,7 +533,7 @@ class LLMService:
             logger.warning("json_repair not installed! Falling back to raw string.")
             return json_str
 
-    def extract_structured(
+    def extract_structured(  # pylint: disable=too-many-return-statements
         self,
         prompt: str,
         response_model: Type[BaseModel],
@@ -538,24 +554,23 @@ class LLMService:
                 return self._extract_ollama(
                     prompt, response_model, temperature, model=model
                 )
-            elif self.provider in ("lm_studio", "local"):
+            if self.provider in ("lm_studio", "local"):
                 return self._extract_lm_studio(
                     prompt, response_model, temperature, model=model
                 )
-            elif self.provider == "openai":
+            if self.provider == "openai":
                 return self._extract_openai(prompt, response_model, temperature)
-            elif self.provider == "gemini":
+            if self.provider == "gemini":
                 return self._extract_gemini(
                     prompt, response_model, temperature, model=model
                 )
-            elif self.provider == "anthropic":
+            if self.provider == "anthropic":
                 return self._extract_anthropic(prompt, response_model, temperature)
-            elif self.provider == "huggingface":
+            if self.provider == "huggingface":
                 return self._extract_huggingface(prompt, response_model, temperature)
-            else:
-                raise ValueError(f"Unsupported provider: {self.provider}")
+            raise ValueError(f"Unsupported provider: {self.provider}")
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error(f"Extraction failed with {self.provider}: {e}")
 
             # Try fallback provider if configured
@@ -572,7 +587,7 @@ class LLMService:
                     self.provider = original_provider
                     self._init_clients()
                     return result
-                except Exception as fallback_error:
+                except Exception as fallback_error:  # pylint: disable=broad-exception-caught
                     logger.error(f"Fallback extraction failed: {fallback_error}")
                     # Restore original provider
                     self.provider = original_provider
@@ -581,7 +596,7 @@ class LLMService:
             # Final fallback: return empty model
             try:
                 return response_model()
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 return None
 
     def _extract_ollama(
@@ -651,7 +666,7 @@ class LLMService:
             )
             if node_count == 0:
                 logger.warning(f"[Ollama] Empty nodes. Full JSON: {cleaned_json}")
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             logger.warning(f"[Ollama] Could not pre-parse JSON: {cleaned_json}")
 
         try:
@@ -718,14 +733,12 @@ class LLMService:
             return response_model.model_validate_json(cleaned_json)
         except Exception:
             # Some LM Studio models wrap result in {"extraction": {...}}.
-            import json
-
             data = json.loads(cleaned_json)
             if isinstance(data, dict) and isinstance(data.get("extraction"), dict):
                 return response_model.model_validate(data["extraction"])
             raise
 
-    def _extract_lm_studio_with_fallback(
+    def _extract_lm_studio_with_fallback(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         model: str,
         system_prompt: str,
@@ -734,7 +747,7 @@ class LLMService:
         schema: dict | None = None,
         schema_name: str = "response",
         _client=None,
-    ) -> str:
+    ) -> str:  # pylint: disable=too-many-arguments,too-many-positional-arguments
         """
         Try configured response_format strategy with compatibility fallbacks.
         ``_client`` allows routing to an ingestion-specific server.
@@ -757,7 +770,7 @@ class LLMService:
                     temperature=temperature,
                 )
                 return response.choices[0].message.content
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 last_error = e
                 logger.warning(
                     f"[LM Studio] response_format={response_format.get('type')} failed: {e}"
@@ -809,7 +822,7 @@ class LLMService:
                 raw = response.choices[0].message.content
                 cleaned = self._clean_json(raw)
                 return response_model.model_validate_json(cleaned)
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 last_error = e
                 logger.warning(
                     f"[HuggingFace] format={response_format['type']} failed: {e}"
@@ -840,7 +853,7 @@ class LLMService:
 
         return resolve(schema)
 
-    def _extract_gemini(
+    def _extract_gemini(  # pylint: disable=too-many-locals
         self,
         prompt: str,
         response_model: Type[BaseModel],
@@ -941,29 +954,28 @@ class LLMService:
                 contents=f"{prompt}",
             )
             return response.text
-        elif self.provider == "anthropic":
+        if self.provider == "anthropic":
             response = self.chat_client.messages.create(
                 model=model or self._get_model_for_task("reasoning"),
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text
-        else:
-            # Ollama/LM Studio/OpenAI
-            _model = model or self._get_model_for_task("reasoning")
-            extra_body = self._with_keep_alive()
+        # Ollama/LM Studio/OpenAI
+        _model = model or self._get_model_for_task("reasoning")
+        extra_body = self._with_keep_alive()
 
-            response = self.chat_client.chat.completions.create(
-                model=_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a deep reasoning engine. Analyze the input carefully. Detect conflicts, subtleties, or hidden connections.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                extra_body=extra_body,
-            )
-            return response.choices[0].message.content
+        response = self.chat_client.chat.completions.create(
+            model=_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a deep reasoning engine. Analyze the input carefully. Detect conflicts, subtleties, or hidden connections.",  # pylint: disable=line-too-long
+                },
+                {"role": "user", "content": prompt},
+            ],
+            extra_body=extra_body,
+        )
+        return response.choices[0].message.content
 
     def generate_title(self, text: str, model: str | None = None) -> str:
         """
@@ -976,48 +988,48 @@ class LLMService:
         if self.provider == "gemini":
             response = self.gemini_client.models.generate_content(
                 model=model or self._get_model_for_task("summarization"),
-                contents=f"Generate a concise, descriptive title for this note. Do not use quotes.\n\nNote content:\n{text}\n\nTitle:",
+                contents=f"Generate a concise, descriptive title for this note. Do not use quotes.\n\nNote content:\n{text}\n\nTitle:",  # pylint: disable=line-too-long
             )
             return response.text.strip().replace('"', "")
-        elif self.provider == "anthropic":
+        if self.provider == "anthropic":
             response = self.chat_client.messages.create(
                 model=model or self._get_model_for_task("summarization"),
                 messages=[
                     {
                         "role": "user",
-                        "content": f"Generate a concise, descriptive title for this note. Do not use quotes.\n\nNote content:\n{text}\n\nTitle:",
+                        "content": f"Generate a concise, descriptive title for this note. Do not use quotes.\n\nNote content:\n{text}\n\nTitle:",  # pylint: disable=line-too-long
                     }
                 ],
             )
             return response.content[0].text.strip().replace('"', "")
-        else:
-            # Ollama/LM Studio/OpenAI
-            _model = model or self._get_model_for_task("summarization")
-            extra_body = self._with_keep_alive()
+        # Ollama/LM Studio/OpenAI
+        _model = model or self._get_model_for_task("summarization")
+        extra_body = self._with_keep_alive()
 
-            response = self.chat_client.chat.completions.create(
-                model=_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Generate a concise, descriptive title for the provided note content. Do not use quotes.",
-                    },
-                    {"role": "user", "content": f"Note content:\n{text}\n\nTitle:"},
-                ],
-                extra_body=extra_body,
-            )
-            return response.choices[0].message.content.strip().replace('"', "")
+        response = self.chat_client.chat.completions.create(
+            model=_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Generate a concise, descriptive title for the provided note content. Do not use quotes.",  # pylint: disable=line-too-long
+                },
+                {"role": "user", "content": f"Note content:\n{text}\n\nTitle:"},
+            ],
+            extra_body=extra_body,
+        )
+        return response.choices[0].message.content.strip().replace('"', "")
 
     def analyze_query(self, query: str) -> dict:
         """
         Analyzes user query with structured outputs for better retrieval.
         Uses the same extraction approach as ingestion for consistency.
         """
-        from typing import Literal, Optional
+        from typing import Literal
 
         from pydantic import Field
 
         class QueryAnalysis(BaseModel):
+            """Structured output schema for query-analysis: sub-questions and search hints."""
             intent: Literal[
                 "search", "summarize", "compare", "explain", "list", "recent", "verify"
             ] = Field(description="Primary intent of the query")
@@ -1039,7 +1051,7 @@ class LLMService:
             )
             question_attribute: Optional[str] = Field(
                 default=None,
-                description="What attribute is being asked about: nationality, occupation, birth_date, location, director, capacity, etc.",
+                description="What attribute is being asked about: nationality, occupation, birth_date, location, director, capacity, etc.",  # pylint: disable=line-too-long
             )
 
         # Use the same prompt style as ingestion - concrete JSON examples
@@ -1084,10 +1096,9 @@ class LLMService:
             result = self.extract_structured(prompt, QueryAnalysis, temperature=0)
             if result:
                 return result.model_dump()
-            else:
-                raise ValueError("Empty extraction result")
+            raise ValueError("Empty extraction result")
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error(f"Query analysis failed: {e}")
             # Return safe defaults
             return {
@@ -1133,7 +1144,7 @@ class LLMService:
                 )
                 return response.text.strip()
 
-            elif self.provider == "anthropic":
+            if self.provider == "anthropic":
                 response = self.chat_client.messages.create(
                     model=model or self._get_model_for_task("brain"),
                     max_tokens=max_tokens if max_tokens is not None else 8192,
@@ -1142,33 +1153,33 @@ class LLMService:
                 )
                 return response.content[0].text.strip()
 
-            else:  # OpenAI-compatible local or cloud providers
-                model = model or self._get_model_for_task("brain")
-                extra_body = self._with_keep_alive()
+            # OpenAI-compatible local or cloud providers
+            model = model or self._get_model_for_task("brain")
+            extra_body = self._with_keep_alive()
 
-                _kwargs = {
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": temperature,
-                    "extra_body": extra_body,
-                }
-                if max_tokens is not None:
-                    _kwargs["max_tokens"] = max_tokens
-                response = self.chat_client.chat.completions.create(**_kwargs)
-                return response.choices[0].message.content.strip()
+            _kwargs = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "extra_body": extra_body,
+            }
+            if max_tokens is not None:
+                _kwargs["max_tokens"] = max_tokens
+            response = self.chat_client.chat.completions.create(**_kwargs)
+            return response.choices[0].message.content.strip()
 
         except Exception as e:
             logger.error(f"[LLM] generate() failed: {e}")
             raise
 
-    async def iterative_step(
+    async def iterative_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches,too-many-statements
         self,
         original_question: str,
         accumulated_steps: list[dict],
         search_query: str | None,
         docs: list[dict],
         tried_queries: list[str] | None = None,
-    ) -> dict:
+    ) -> dict:  # pylint: disable=too-many-arguments,too-many-positional-arguments
         """
         Single iteration of the iterative retrieval loop.
 
@@ -1274,7 +1285,7 @@ class LLMService:
         try:
             raw = self.reason(prompt) or ""
             logger.info(f"[LLM] iterative_step raw response:\n{raw}")
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning(f"[LLM] iterative_step failed: {e}")
             return {
                 "reasoning": "",
@@ -1411,17 +1422,17 @@ class LLMService:
             return settings.CHAT_MODEL
         if self.provider in ("ollama", "lm_studio", "local"):
             return settings.LLM_MODEL
-        elif self.provider == "openai":
-            if task == "reasoning":
-                return settings.OPENAI_MODEL_REASONING
-            return settings.OPENAI_MODEL
-        elif self.provider == "gemini":
-            return settings.GEMINI_MODEL
-        elif self.provider == "anthropic":
-            return settings.ANTHROPIC_MODEL
-        elif self.provider == "huggingface":
-            return settings.HUGGINGFACE_MODEL
-        return settings.LLM_MODEL
+        provider_model_map = {
+            "openai": (
+                settings.OPENAI_MODEL_REASONING
+                if task == "reasoning"
+                else settings.OPENAI_MODEL
+            ),
+            "gemini": settings.GEMINI_MODEL,
+            "anthropic": settings.ANTHROPIC_MODEL,
+            "huggingface": settings.HUGGINGFACE_MODEL,
+        }
+        return provider_model_map.get(self.provider, settings.LLM_MODEL)
 
     def _get_ingestion_model(self) -> str | None:
         """Return the configured ingestion model for the active ingestion provider.
@@ -1431,17 +1442,17 @@ class LLMService:
         if settings.INGESTION_MODEL:
             return settings.INGESTION_MODEL
         p = getattr(self, "ingestion_provider", self.provider)
-        if p in ("ollama", "lm_studio", "local"):
-            return settings.INGESTION_LLM_MODEL or settings.LLM_MODEL or None
-        elif p == "gemini":
-            return settings.INGESTION_GEMINI_MODEL or settings.GEMINI_MODEL or None
-        elif p == "openai":
-            return settings.OPENAI_MODEL or None
-        elif p == "anthropic":
-            return settings.ANTHROPIC_MODEL or None
-        elif p == "huggingface":
-            return settings.HUGGINGFACE_MODEL or None
-        return None
+        _local = settings.INGESTION_LLM_MODEL or settings.LLM_MODEL or None
+        ingestion_model_map = {
+            "ollama": _local,
+            "lm_studio": _local,
+            "local": _local,
+            "gemini": settings.INGESTION_GEMINI_MODEL or settings.GEMINI_MODEL or None,
+            "openai": settings.OPENAI_MODEL or None,
+            "anthropic": settings.ANTHROPIC_MODEL or None,
+            "huggingface": settings.HUGGINGFACE_MODEL or None,
+        }
+        return ingestion_model_map.get(p)
 
     # ── Ingestion-specific generation ─────────────────────────────────────────
 
@@ -1468,7 +1479,7 @@ class LLMService:
                 )
                 return response.text.strip()
 
-            elif self.ingestion_provider == "anthropic":
+            if self.ingestion_provider == "anthropic":
                 response = self.i_anthropic_client.messages.create(
                     model=settings.ANTHROPIC_MODEL,
                     max_tokens=max_tokens if max_tokens is not None else 8192,
@@ -1477,23 +1488,30 @@ class LLMService:
                 )
                 return response.content[0].text.strip()
 
-            else:  # local / ollama / lm_studio / openai / huggingface
-                _kwargs = {
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": temperature,
-                    "extra_body": self._with_ingestion_keep_alive(),
-                }
-                if max_tokens is not None:
-                    _kwargs["max_tokens"] = max_tokens
-                response = self.i_chat_client.chat.completions.create(**_kwargs)
-                return response.choices[0].message.content.strip()
+            # local / ollama / lm_studio / openai / huggingface
+            _kwargs = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "extra_body": self._with_ingestion_keep_alive(),
+            }
+            if max_tokens is not None:
+                _kwargs["max_tokens"] = max_tokens
+            response = self.i_chat_client.chat.completions.create(**_kwargs)
+            content = response.choices[0].message.content
+            if not content or not content.strip():
+                raise ValueError(
+                    "Local LLM returned empty content (0 output tokens). "
+                    "Possible causes: context overflow, KV cache pressure, or "
+                    "model crash. Check LM Studio / Ollama server logs."
+                )
+            return content.strip()
 
         except Exception as e:
             logger.error(f"[LLM] ingestion_generate() failed: {e}")
             raise
 
-    def ingestion_extract_structured(
+    def ingestion_extract_structured(  # pylint: disable=too-many-return-statements
         self,
         prompt: str,
         response_model: Type[BaseModel],
@@ -1513,7 +1531,7 @@ class LLMService:
                     model=model,
                     _client=self.i_chat_client,
                 )
-            elif self.ingestion_provider == "gemini":
+            if self.ingestion_provider == "gemini":
                 return self._extract_gemini(
                     prompt,
                     response_model,
@@ -1521,24 +1539,23 @@ class LLMService:
                     model=model,
                     _gemini_client=self.i_gemini_client,
                 )
-            elif self.ingestion_provider == "openai":
+            if self.ingestion_provider == "openai":
                 # Reuse main OpenAI extraction (uses i_chat_client via beta parse)
                 return self._extract_openai(prompt, response_model, temperature)
-            elif self.ingestion_provider == "anthropic":
+            if self.ingestion_provider == "anthropic":
                 return self._extract_anthropic(prompt, response_model, temperature)
-            elif self.ingestion_provider == "huggingface":
+            if self.ingestion_provider == "huggingface":
                 return self._extract_huggingface(prompt, response_model, temperature)
-            else:
-                raise ValueError(
-                    f"Unsupported ingestion provider: {self.ingestion_provider}"
-                )
-        except Exception as e:
+            raise ValueError(
+                f"Unsupported ingestion provider: {self.ingestion_provider}"
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error(
                 f"Ingestion extraction failed ({self.ingestion_provider}): {e}"
             )
             try:
                 return response_model()
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 return None
 
 

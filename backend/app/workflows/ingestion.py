@@ -1,3 +1,6 @@
+"""Ingestion workflow: LLM extraction, graph persistence, embedding, and community detection."""
+
+# pylint: disable=too-many-lines,import-outside-toplevel
 import asyncio
 import re
 import threading
@@ -9,7 +12,8 @@ from app.core.config import settings
 from app.core.log import get_logger
 from app.schemas.extraction import Extraction, NoteInput
 from app.services.graph import graph_service
-from app.services.ingestion_tracker import ingestion_tracker
+from app.services.embedding import embedding_service
+from app.services.ingestion_tracker import ingestion_tracker as _tracker
 from app.services.llm import llm_service
 from app.services.qdrant_service import qdrant_service
 from app.services.typesense_service import typesense_service
@@ -27,9 +31,10 @@ logger = get_logger("IngestionPipeline")
 # Single-flight guard for full community recompute.
 # Any newer recompute request supersedes older requests/runs.
 _community_run_state_lock = threading.Lock()
-_community_run_seq = 0
-_community_run_active_seq = 0
-_community_run_running = False
+_community_run_seq = 0  # pylint: disable=invalid-name
+_community_run_active_seq = 0  # pylint: disable=invalid-name
+_community_run_running = False  # pylint: disable=invalid-name
+# pylint: disable=invalid-name
 
 
 def clean_rel_type(rel_type: str, source_name: str, target_name: str) -> str:
@@ -68,7 +73,7 @@ def clean_rel_type(rel_type: str, source_name: str, target_name: str) -> str:
     return "_".join(cleaned)
 
 
-class EntityLockManager:
+class EntityLockManager:  # pylint: disable=too-few-public-methods
     """
     Manages per-entity locks to prevent race conditions during summary updates.
     Ensures that multiple notes updating the same entity wait for each other.
@@ -78,6 +83,7 @@ class EntityLockManager:
         self._locks = defaultdict(asyncio.Lock)
 
     def get_lock(self, label: str, name: str):
+        """Return the asyncio lock for a given (label, name) entity pair."""
         return self._locks[(label, name.lower().strip())]
 
 
@@ -85,13 +91,16 @@ entity_lock_manager = EntityLockManager()
 
 
 class IngestionWorkflow:
+    """Orchestrates full ingestion: multimedia → LLM extraction → graph → embeddings → communities."""
+
     async def process_note(self, note_input: NoteInput, note_id: str = None):
+        """Run the full ingestion pipeline for a single note."""
         if not note_id:
             note_id = str(uuid.uuid4())
 
         # Register with the tracker BEFORE the semaphore so the community-detection
         # idle timer never fires while tasks are queued waiting for a slot.
-        await ingestion_tracker.begin_ingestion()
+        await _tracker.begin_ingestion()
 
         # Wait for a pipeline slot.  Without this cap, sending 990 notes at once
         # spawns 990 concurrent coroutines that all hit the DB pool simultaneously.
@@ -115,8 +124,6 @@ class IngestionWorkflow:
             }
 
             # Use ainvoke because the graph contains async nodes (multimodal_node)
-            import time
-
             t_start = time.perf_counter()
             try:
                 final_state = await ingestion_agent.ainvoke(initial_state)
@@ -126,7 +133,9 @@ class IngestionWorkflow:
                     logger.error(
                         f"[Ingestion] FAILURE note_id={note_id}: {final_state['errors']}"
                     )
-                    raise Exception(f"Ingestion Agent Failed: {final_state['errors']}")
+                    raise RuntimeError(
+                        f"Ingestion Agent Failed: {final_state['errors']}"
+                    )
 
                 extraction = final_state.get("extraction")
                 if extraction:
@@ -168,7 +177,7 @@ class IngestionWorkflow:
             finally:
                 # Always decrement the active counter and potentially schedule
                 # community recompute, regardless of success or failure.
-                await ingestion_tracker.end_ingestion(self.rebuild_leiden_communities)
+                await _tracker.end_ingestion(self.rebuild_leiden_communities)
 
     # Internal helpers reused by the Agent
     from tenacity import retry, stop_after_attempt, wait_exponential
@@ -269,12 +278,12 @@ class IngestionWorkflow:
                 logger.error(f"Error marking note failed: {e}")
                 raise e
 
-    def _write_ontology(
+    def _write_ontology(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self,
         note_id: str,
         content: str,
         extraction: Extraction,
-        created_at: str,
+        _created_at: str,
         custom_title: str = None,
     ):
         logger.info(f"[Ontology] Writing ontology for note {note_id}")
@@ -287,7 +296,8 @@ class IngestionWorkflow:
             logger.info(f"[Ontology] Using extracted title: '{title}'")
         else:
             title = llm_service.generate_title(
-                content, model=llm_service._get_ingestion_model()
+                content,
+                model=llm_service._get_ingestion_model(),  # pylint: disable=protected-access
             )
             logger.info(f"[Ontology] Generated title: '{title}'")
         # Base Note Node — structural node in Kuzu with kind='note'.
@@ -306,9 +316,10 @@ class IngestionWorkflow:
             return name.lstrip("#").strip().lower()
 
         # 1. NODES (Batch — unified single type)
+        name_to_id: dict[str, str] = (
+            {}
+        )  # populated below; declared here so it's always bound
         if extraction.nodes:
-            from app.services.embedding import embedding_service
-
             # Build deduplicated (norm_name, text) pairs first, then embed in one shot.
             _embed_keys: list[str] = []
             _embed_texts: list[str] = []
@@ -588,7 +599,7 @@ class IngestionWorkflow:
                     )
                     _rel_written += 1
 
-                except Exception as e:
+                except Exception as e:  # pylint: disable=broad-exception-caught
                     logger.error(
                         f"[Relationship] Failed to create relationship "
                         f"{rel.source_name}->{rel.target_name}: {e}"
@@ -597,10 +608,8 @@ class IngestionWorkflow:
 
             # Batch-embed all new/evolved relationship NL texts in one round-trip.
             if _qdrant_rel_pending:
-                from app.services.embedding import embedding_service as _emb
-
                 _nl_batch = [item[1] for item in _qdrant_rel_pending]
-                _nl_vectors = _emb.embed_documents(_nl_batch)
+                _nl_vectors = embedding_service.embed_documents(_nl_batch)
                 for (result, nl_text, src_node_id, tgt_node_id), nl_vector in zip(
                     _qdrant_rel_pending, _nl_vectors
                 ):
@@ -640,9 +649,7 @@ class IngestionWorkflow:
         if not node_ids:
             return
 
-        _, queue_size = await ingestion_tracker.queue_nodes_for_community_recompute(
-            node_ids
-        )
+        _, queue_size = await _tracker.queue_nodes_for_community_recompute(node_ids)
         logger.info(
             f"[Community] Queued {len(node_ids)} node IDs for Leiden recompute "
             f"(queue size: {queue_size}) — IDs: {node_ids}{'...' if len(node_ids) > 10 else ''}"
@@ -702,12 +709,11 @@ class IngestionWorkflow:
                 f"[Neighborhood] {len(nodes_to_update)} node context updates complete."
             )
 
-    async def _update_node_summary(
+    async def _update_node_summary(  # pylint: disable=too-many-locals,too-many-statements
         self,
         label: str,
         name: str,
         new_contexts: list[str],
-        identifier_key: str = "name",
         node_type: str = "",
     ):
         """
@@ -721,7 +727,6 @@ class IngestionWorkflow:
             label: Node label (Entity, Concept, Task, etc.)
             name: Node identifier
             new_contexts: Contexts extracted for this node in the current ingestion run
-            identifier_key: Property to match on (name, description, trait, title)
         """
         async with entity_lock_manager.get_lock(label, name):
             loop = asyncio.get_running_loop()
@@ -800,7 +805,8 @@ class IngestionWorkflow:
 
                     def _merge_node():
                         graph_service.execute_query(
-                            "MERGE (n:Node {id: $node_id}) ON CREATE SET n.kind = 'indexable' SET n.name = $name, n.type = $type",
+                            "MERGE (n:Node {id: $node_id}) ON CREATE SET n.kind = 'indexable'"
+                            " SET n.name = $name, n.type = $type",
                             {
                                 "node_id": node_id,
                                 "name": name,
@@ -842,8 +848,6 @@ class IngestionWorkflow:
             )
 
             # 4. Generate embeddings for Qdrant writes
-            from app.services.embedding import embedding_service
-
             def _generate_embeddings():
                 # Embed only new isolated contexts (existing are already persisted).
                 _new_ctx_texts = [c for c in _contexts_to_add if c and c.strip()]
@@ -869,7 +873,8 @@ class IngestionWorkflow:
             # name + type so the graph endpoint never needs Qdrant for display labels.
             def _save_update():
                 graph_service.execute_query(
-                    "MERGE (n:Node {id: $node_id}) ON CREATE SET n.kind = 'indexable' SET n.name = $name, n.type = $type",
+                    "MERGE (n:Node {id: $node_id}) ON CREATE SET n.kind = 'indexable'"
+                    " SET n.name = $name, n.type = $type",
                     {"node_id": node_id, "name": name, "type": node_type or "unknown"},
                 )
 
@@ -903,8 +908,6 @@ class IngestionWorkflow:
             if merged_ctx_text:
 
                 def _write_node_core():
-                    from app.services.embedding import embedding_service
-
                     merged_vec = embedding_service.embed_documents([merged_ctx_text])[0]
                     qdrant_service.upsert_node_core(
                         node_id=node_id,
@@ -944,7 +947,7 @@ class IngestionWorkflow:
                             .retrieve()
                         )
                         contexts_text = existing_ts.get("isolated_contexts", "")
-                    except Exception:
+                    except Exception:  # pylint: disable=broad-exception-caught
                         pass
                 typesense_service.index_node(
                     node_id=node_id,
@@ -982,7 +985,9 @@ class IngestionWorkflow:
         return name, summary
 
     @staticmethod
-    def _is_generic_community_name(name: str | None) -> bool:
+    def _is_generic_community_name(  # pylint: disable=too-many-return-statements
+        name: str | None,
+    ) -> bool:
         """Heuristic guardrail for low-quality community names.
 
         Rejects template-like names that are not useful to end users.
@@ -1136,7 +1141,12 @@ class IngestionWorkflow:
                 "\n\nThis is a retry because the previous name was too generic. "
                 "The NAME must be specific and user-facing."
             )
-        raw = llm_service.reason(prompt, model=llm_service._get_ingestion_model()) or ""
+        raw = (
+            llm_service.reason(
+                prompt, model=llm_service._get_ingestion_model()
+            )  # pylint: disable=protected-access
+            or ""
+        )
         return self._parse_name_summary(raw)
 
     def _build_rollup_summary(
@@ -1183,22 +1193,26 @@ class IngestionWorkflow:
                 "\n\nThis is a retry because the previous name was too generic. "
                 "The NAME must be specific and user-facing."
             )
-        raw = llm_service.reason(prompt, model=llm_service._get_ingestion_model()) or ""
+        raw = (
+            llm_service.reason(
+                prompt, model=llm_service._get_ingestion_model()
+            )  # pylint: disable=protected-access
+            or ""
+        )
         return self._parse_name_summary(raw)
 
-    def rebuild_leiden_communities(self) -> int:
+    def rebuild_leiden_communities(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+        self,
+    ) -> int:
         """Run a full 3-level Leiden recomputation and rebuild community nodes.
 
-        Cooperative cancellation: checks ``ingestion_tracker.cancel_recompute`` between every
+        Cooperative cancellation: checks ``_tracker.cancel_recompute`` between every
         cluster summary.  When set, the run exits early (returning the count built so far) so a
         pending ingestion can proceed.  The tracker resets the flag and reschedules the full run
         after the next idle window.
         """
-        from app.services.embedding import embedding_service
 
-        from app.services.ingestion_tracker import ingestion_tracker as _tracker
-
-        global _community_run_seq, _community_run_active_seq, _community_run_running
+        global _community_run_seq, _community_run_active_seq, _community_run_running  # pylint: disable=global-statement
 
         # Register this as the newest requested run. If another run is active, request
         # cancellation and wait for handoff. Only the newest request is allowed to start.
@@ -1342,7 +1356,7 @@ class IngestionWorkflow:
                     clusters.setdefault(int(label), []).append(item_id)
                 return list(clusters.values())
 
-            def _commit_community(
+            def _commit_community(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
                 community_level: int,
                 member_entity_ids: list[str],
                 rollup_rows: list[dict],
@@ -1385,7 +1399,7 @@ class IngestionWorkflow:
                         name, summary = self._build_rollup_summary(
                             rollup_rows, community_level
                         )
-                except Exception as _summ_err:
+                except Exception as _summ_err:  # pylint: disable=broad-exception-caught
                     logger.warning(
                         f"[Community] Summary failed for {cluster_label}: {_summ_err}"
                     )
@@ -1414,7 +1428,9 @@ class IngestionWorkflow:
                             name = rn
                         if rs:
                             summary = rs
-                    except Exception as _retry_err:
+                    except (
+                        Exception
+                    ) as _retry_err:  # pylint: disable=broad-exception-caught
                         logger.warning(
                             f"[Community] {cluster_label}: name retry failed: {_retry_err}"
                         )
@@ -1482,7 +1498,7 @@ class IngestionWorkflow:
                         f"  [Community] Qdrant NL sentences written: {len(_nl_texts)} "
                         f"for community '{name}'"
                     )
-                except Exception as _rel_err:
+                except Exception as _rel_err:  # pylint: disable=broad-exception-caught
                     logger.warning(
                         f"[Community] Membership NL write failed for {community_id}: {_rel_err}"
                     )
@@ -1720,7 +1736,7 @@ class IngestionWorkflow:
                     f"[Community] Spring layout recomputed after Leiden: "
                     f"{len(positions)} nodes, {len(spring_edges)} edges"
                 )
-            except Exception as _layout_err:
+            except Exception as _layout_err:  # pylint: disable=broad-exception-caught
                 logger.warning(
                     f"[Community] 3D layout computation failed (non-fatal): {_layout_err}"
                 )

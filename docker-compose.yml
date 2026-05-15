@@ -37,22 +37,27 @@ services:
       timeout: 5s
       retries: 5
 
-  # 3. Local MinIO (Replaces R2)
-  minio:
-    image: minio/minio:latest
+  # 3. Local RustFS (S3-compatible object storage, Apache 2.0)
+  rustfs:
+    image: rustfs/rustfs:latest
     container_name: liveos_storage
     restart: unless-stopped
-    command: server /data --console-address ":9001"
+    user: "0:0"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true"
     ports:
-      - "9000:9000" # API
+      - "9000:9000" # S3 API
       - "9001:9001" # Console
     volumes:
-      - ./data/minio:/data
+      - ./data/rustfs:/data
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/health" ]
       interval: 5s
       timeout: 5s
       retries: 5

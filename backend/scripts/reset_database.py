@@ -1,5 +1,5 @@
 """
-reset_postgres.py — Truncate the notes table (raw note content + metadata).
+reset_database.py — Truncate the notes table (raw note content + metadata).
 
 Preserves the schema and sequences. Does NOT touch Neo4j, Qdrant, or ES —
 run reset_ingestion.py separately if you also want to clear the graph/vectors.
@@ -15,19 +15,18 @@ from app.core.database import AsyncSessionLocal
 from sqlalchemy import text
 
 
-async def _reset_postgres() -> None:
+async def _reset_database() -> None:
     async with AsyncSessionLocal() as session:
         await session.execute(text("TRUNCATE TABLE notes RESTART IDENTITY CASCADE"))
-        await session.execute(text("TRUNCATE TABLE feedback RESTART IDENTITY CASCADE"))
         await session.commit()
-    print("   ✅ Tables 'notes' and 'feedback' truncated.")
+    print("   ✅ Table 'notes' truncated.")
 
 
-def reset_postgres() -> None:
+def reset_database() -> None:
     print("🗑️  Resetting PostgreSQL...")
-    asyncio.run(_reset_postgres())
+    asyncio.run(_reset_database())
     print("✅ PostgreSQL reset complete.")
 
 
 if __name__ == "__main__":
-    reset_postgres()
+    reset_database()

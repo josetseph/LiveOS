@@ -20,22 +20,27 @@ services:
 
   # Neo4j removed — graph storage is now embedded Kuzu (no container needed)
 
-  # MinIO Object Storage
-  minio:
-    image: minio/minio:latest
-    container_name: liveos-minio
+  # RustFS Object Storage (S3-compatible, Apache 2.0)
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: liveos-rustfs
     restart: unless-stopped
-    command: server /data --console-address ":9001"
+    user: "0:0"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true"
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - ./data/minio:/data
+      - ./data/rustfs:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -79,10 +84,11 @@ services:
     environment:
       DATABASE_URL: "postgresql+asyncpg://liveos:liveos_password@postgres:5432/liveos_brain"
       KUZU_DB_PATH: "/data/kuzu/kuzu_graph"
-      MINIO_ENDPOINT: "minio:9000"
-      MINIO_ACCESS_KEY: "minioadmin"
-      MINIO_SECRET_KEY: "minioadmin"
-      MINIO_BUCKET: "liveos-assets"
+      R2_ENDPOINT_URL: "http://rustfs:9000"
+      BUCKET_ACCESS_KEY_ID: "rustfsadmin"
+      BUCKET_SECRET_ACCESS_KEY: "rustfsadmin"
+      BUCKET_NAME: "liveos-assets"
+      FILES_URL: "http://rustfs:9000/liveos-assets"
       OLLAMA_BASE_URL: "http://host.docker.internal:11434"
       QDRANT_HOST: "qdrant"
       QDRANT_PORT: "6333"
@@ -95,7 +101,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
+      rustfs:
         condition: service_healthy
       qdrant:
         condition: service_started
@@ -116,10 +122,11 @@ services:
     environment:
       DATABASE_URL: "postgresql+asyncpg://liveos:liveos_password@postgres:5432/liveos_brain"
       KUZU_DB_PATH: "/data/kuzu/kuzu_graph"
-      MINIO_ENDPOINT: "minio:9000"
-      MINIO_ACCESS_KEY: "minioadmin"
-      MINIO_SECRET_KEY: "minioadmin"
-      MINIO_BUCKET: "liveos-assets"
+      R2_ENDPOINT_URL: "http://rustfs:9000"
+      BUCKET_ACCESS_KEY_ID: "rustfsadmin"
+      BUCKET_SECRET_ACCESS_KEY: "rustfsadmin"
+      BUCKET_NAME: "liveos-assets"
+      FILES_URL: "http://rustfs:9000/liveos-assets"
       QDRANT_HOST: "qdrant"
       QDRANT_PORT: "6333"
       TYPESENSE_HOST: "typesense"
@@ -129,7 +136,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
+      rustfs:
         condition: service_healthy
       qdrant:
         condition: service_started
@@ -158,4 +165,4 @@ services:
 volumes:
   postgres_data:
   typesense_data:
-  minio_data:
+  rustfs_data:

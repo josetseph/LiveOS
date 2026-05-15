@@ -82,7 +82,7 @@ SOLAR_L2_NODE_MAX = 55.0
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
-def compute_positions(
+def compute_positions(  # pylint: disable=too-many-locals
     communities: list[dict],
     memberships: dict[str, list[str]],
     all_node_ids: list[str] | None = None,
@@ -172,7 +172,7 @@ def compute_positions(
     return positions
 
 
-def compute_solar_positions(
+def compute_solar_positions(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     communities: list[dict],
     node_level_map: dict[str, dict[int, str]],
     all_node_ids: list[str] | None = None,
@@ -388,8 +388,8 @@ def compute_solar_positions(
             # the full universe depth (not a surface), so they appear as background
             # asteroids between star systems rather than a solid central sphere.
             if truly_orphan:
-                _MAX_R = SOLAR_UNIVERSE_RADIUS * 1.4
-                _MIN_R = 80.0
+                _MAX_R = SOLAR_UNIVERSE_RADIUS * 1.4  # pylint: disable=invalid-name
+                _MIN_R = 80.0  # pylint: disable=invalid-name
                 for node_id in truly_orphan:
                     h = int(hashlib.md5(node_id.encode()).hexdigest(), 16)
                     # Uniform point on unit sphere (rejection-free method)
@@ -407,7 +407,7 @@ def compute_solar_positions(
     return positions
 
 
-def compute_spring_layout_3d(
+def compute_spring_layout_3d(  # pylint: disable=too-many-locals,too-many-statements
     node_ids: list[str],
     edges: list[tuple[str, str]],
     k: float = 220.0,
@@ -431,8 +431,6 @@ def compute_spring_layout_3d(
     Returns:
         {node_id: (x, y, z)}
     """
-    import math
-
     n = len(node_ids)
     if n == 0:
         return {}

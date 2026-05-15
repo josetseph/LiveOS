@@ -1,3 +1,5 @@
+"""Hybrid retrieval: vector search, graph traversal, keyword search, and cross-encoder reranking."""
+# pylint: disable=too-many-lines,import-outside-toplevel
 import logging
 import os
 import time
@@ -17,6 +19,7 @@ logger = get_logger("RetrievalService")
 
 
 class RetrievalService:
+    """Orchestrates multi-stage retrieval: vector → keyword → graph expansion → reranking."""
     def __init__(self):
         self.models_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), f"../../{settings.MODELS_PATH}")
@@ -79,16 +82,15 @@ class RetrievalService:
             logger.debug(f"TEXT SENT TO LLM ({len(doc.get('text', ''))} chars):")
             logger.debug(doc.get("text", ""))
 
-        logger.debug("\n" + "=" * 100 + "\n")
+        logger.debug("\n" + "=" * 100 + "\n")  # pylint: disable=logging-not-lazy
 
-    def _get_node_relationships(
+    def _get_node_relationships(  # pylint: disable=too-many-locals,too-many-branches
         self, node: dict, max_relationships: int = 5
     ) -> list[dict]:
         """
         Fetch 1-hop relationships for a node.
         Returns a list of dicts: {nl_sentence, neighbour_name, neighbour_type, neighbour_context}
         """
-        from app.services.graph import graph_service
 
         try:
             node_name = node.get("name", "")
@@ -96,7 +98,7 @@ class RetrievalService:
                 return []
 
             related_nodes = graph_service.get_related_nodes(
-                node_name=node_name, node_label=None, max_depth=1, min_confidence=0.5
+                node_name=node_name, max_depth=1, min_confidence=0.5
             )
             if not related_nodes:
                 return []
@@ -114,7 +116,7 @@ class RetrievalService:
                     neighbour_content = qdrant_service.get_nodes_content_by_ids(
                         list(neighbour_id_to_related.keys())
                     )
-                except Exception as e:
+                except Exception as e:  # pylint: disable=broad-exception-caught
                     logger.debug(
                         f"  [Relationships] Qdrant neighbour enrichment failed: {e}"
                     )
@@ -162,13 +164,13 @@ class RetrievalService:
 
             return entries
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.debug(
                 f"  [Relationships] Failed for {node.get('name', 'unknown')}: {e}"
             )
             return []
 
-    async def _expand_relevant_neighbors(
+    async def _expand_relevant_neighbors(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self,
         relevant_docs: list[dict],
         question: str,
@@ -196,11 +198,10 @@ class RetrievalService:
             try:
                 related = graph_service.get_related_nodes(
                     node_name=node_name,
-                    node_label=None,
                     max_depth=1,
                     min_confidence=0.5,
                 )
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug(
                     f"  [GraphExpand] get_related_nodes failed for {node_name}: {e}"
                 )
@@ -283,7 +284,7 @@ class RetrievalService:
                                 nl, _tgt_name, _src_name
                             )
                             entry["_nl_is_reverse"] = True
-        except Exception as _qdrant_err:
+        except Exception as _qdrant_err:  # pylint: disable=broad-exception-caught
             logger.debug(f"  [GraphExpand] Qdrant NL lookup failed: {_qdrant_err}")
 
         logger.info(
@@ -321,7 +322,7 @@ class RetrievalService:
                         # Propagate entity type from Qdrant when Kuzu didn't supply one
                         if not entry["neighbor"].get("entity_type"):
                             entry["neighbor"]["entity_type"] = _c.get("type", "")
-            except Exception as _e:
+            except Exception as _e:  # pylint: disable=broad-exception-caught
                 logger.debug(f"  [GraphExpand] Qdrant neighbor enrichment failed: {_e}")
 
         if not relationship_entries:
@@ -405,7 +406,8 @@ class RetrievalService:
                 if len(relationship_entries) < _before_thresh:
                     logger.info(
                         f"  [GraphExpand] Score threshold {_thresh} dropped "
-                        f"{_before_thresh - len(relationship_entries)} neighbour(s) → {len(relationship_entries)} remaining"
+                        f"{_before_thresh - len(relationship_entries)} neighbour(s)"
+                        f" → {len(relationship_entries)} remaining"
                     )
             _top_scores = [f"{e['_expand_score']:.4f}" for e in relationship_entries]
             logger.info(
@@ -524,7 +526,7 @@ class RetrievalService:
                         doc_notes.extend(node_to_notes.get(n_name.lower(), []))
                     if doc_notes:
                         doc["linked_notes"] = doc_notes
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug(f"  [GraphExpand] get_linked_evidence failed: {e}")
             finally:
                 for doc in result:
@@ -559,7 +561,7 @@ class RetrievalService:
                 text = text[: -len(name)].rstrip(" ")
         return text.strip() or nl
 
-    def _build_node_text(
+    def _build_node_text(  # pylint: disable=too-many-branches
         self, node: dict, relationships: list[dict], brief_root: bool = False
     ) -> str:
         """
@@ -647,7 +649,7 @@ class RetrievalService:
         _isolated_joined = " ".join(s for s in _isolated_contexts if s)
         return node.get("summary") or node.get("description") or _isolated_joined
 
-    async def _search_qdrant_multi_collection(
+    async def _search_qdrant_multi_collection(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self, query_vector: list[float]
     ) -> list[dict]:
         """Search all Qdrant collections and normalize into node-like results.
@@ -719,7 +721,7 @@ class RetrievalService:
                     _name = (_row.get("name") or "").strip()
                     if _name:
                         resolved_names[_nid] = _name
-            except Exception as _e:
+            except Exception as _e:  # pylint: disable=broad-exception-caught
                 logger.debug(f"  [Qdrant] Failed resolving missing hit names: {_e}")
 
         for entry in normalized_hits:
@@ -807,7 +809,7 @@ class RetrievalService:
                 )
                 for n in missing:
                     n["entity_type"] = cores.get(n["node_id"], {}).get("type", "")
-            except Exception as _e:
+            except Exception as _e:  # pylint: disable=broad-exception-caught
                 logger.debug(f"  [Qdrant] entity_type backfill failed: {_e}")
 
         logger.info(
@@ -862,7 +864,7 @@ class RetrievalService:
             merged.append(node)
         return merged
 
-    async def hybrid_search(self, query: str, top_k: int = 50) -> List[dict]:
+    async def hybrid_search(self, query: str, top_k: int = 50) -> List[dict]:  # pylint: disable=too-many-nested-blocks,too-many-locals,too-many-branches,too-many-statements
         """
         Entity-First Retrieval Pipeline:
 
@@ -922,7 +924,7 @@ class RetrievalService:
         filtered_by_length = []
         filtered_by_stopwords = []
 
-        query_entities = [e for e in llm_entities_raw]
+        query_entities = list(llm_entities_raw)
 
         if filtered_by_stopwords or filtered_by_length:
             logger.info(f"  [Entity Filter] Raw LLM entities: {llm_entities_raw}")
@@ -961,7 +963,7 @@ class RetrievalService:
 
         # STEP 1: ENTITY NAME MATCHING - Find nodes by extracted entity names
         # This is critical for comparison questions where we need both entities
-        if query_entities:
+        if query_entities:  # pylint: disable=too-many-nested-blocks
             t_entity_start = time.perf_counter()
             try:
                 # Normalize to lowercase so lookups match stored (lowercase) names
@@ -1006,7 +1008,7 @@ class RetrievalService:
                                     v["_variant_of"] = node_name
                                     variant_nodes.append(v)
                                     _seen_variant_keys.add(_v_key)
-                        except Exception as e:
+                        except Exception as e:  # pylint: disable=broad-exception-caught
                             logger.debug(f"  [Variant] Failed for {node_name}: {e}")
 
                 if variant_nodes:
@@ -1054,7 +1056,7 @@ class RetrievalService:
                                 _n["isolated_contexts"] = _c.get(
                                     "isolated_contexts", []
                                 )
-                    except Exception as _e:
+                    except Exception as _e:  # pylint: disable=broad-exception-caught
                         logger.debug(
                             f"  [Entity] Qdrant content enrichment failed: {_e}"
                         )
@@ -1068,7 +1070,7 @@ class RetrievalService:
                         f"  [Entity] Found {len(entity_nodes)} nodes by name: "
                         f"{[n['name'] for n in entity_nodes]}"
                     )
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.warning(f"  [Entity] Name matching failed: {e}")
             t_entity = time.perf_counter() - t_entity_start
             logger.info(f"  [⏱️ Timing] Entity name matching: {t_entity:.2f}s")
@@ -1100,7 +1102,7 @@ class RetrievalService:
                 logger.info(
                     f"  [Keyword] Added {len(_all_keyword_nodes)} Typesense BM25 matches"
                 )
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning(f"  [Keyword] Typesense BM25 search failed: {e}")
 
         # STEP 2: VECTOR SEARCH (always runs)
@@ -1142,7 +1144,7 @@ class RetrievalService:
                             v["_variant_of"] = vnode_name
                             vector_variant_nodes.append(v)
                             node_names_found.add(_vv_key)
-                except Exception as e:
+                except Exception as e:  # pylint: disable=broad-exception-caught
                     logger.debug(f"  [Variant] Failed for {vnode_name}: {e}")
 
             if vector_variant_nodes:
@@ -1158,7 +1160,7 @@ class RetrievalService:
                     f"{[n['name'] for n in vector_nodes]}"
                 )
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning(f"  [Vector] Vector search failed: {e}")
 
         t_vector = time.perf_counter() - t_vector_start
@@ -1324,12 +1326,12 @@ class RetrievalService:
         self,
         query: str,
         top_k: int = 50,
-        max_hops: int = 10,
-        filter_docs: bool = True,
+        max_hops: int = 10,  # pylint: disable=unused-argument
+        filter_docs: bool = True,  # pylint: disable=unused-argument
     ) -> tuple[str | None, list[dict]]:
         """Entry-point alias for the primary structured sub-question pipeline.
 
-        The ``max_hops`` and ``filter_docs`` parameters are accepted for call-site
+        The ``_max_hops`` and ``_filter_docs`` parameters are accepted for call-site
         compatibility but are no longer operative — the primary pipeline
         (``retrieve_with_iterative_loop``) manages its own hop budget and candidate
         filtering internally.  They are retained in the signature so callers do
@@ -1337,7 +1339,7 @@ class RetrievalService:
         """
         return await self.retrieve_with_iterative_loop(query, top_k=top_k)
 
-    async def _apply_reranker_logging(
+    async def _apply_reranker_logging(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches
         self,
         query: str,
         candidates: list[dict],
@@ -1345,7 +1347,7 @@ class RetrievalService:
         question_attribute: str | None = None,
         expected_entity_types: list[str] | None = None,
         score_threshold: float | None = None,
-    ) -> list[dict]:
+    ) -> list[dict]:  # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Rank candidates and return the top_n highest-scoring ones.
 
         When RERANKER_ENABLED is True, scores using the local model
@@ -1444,7 +1446,7 @@ class RetrievalService:
 
         return candidates
 
-    async def retrieve_with_iterative_loop(
+    async def retrieve_with_iterative_loop(  # pylint: disable=too-many-nested-blocks,too-many-locals,too-many-branches,too-many-statements,unused-argument
         self,
         query: str,
         top_k: int = 50,
@@ -1527,7 +1529,7 @@ class RetrievalService:
                             )
                             if name:
                                 surfaced_names.add(name)
-                except Exception as _exp_err:
+                except Exception as _exp_err:  # pylint: disable=broad-exception-caught
                     logger.warning(f"  [IterLoop] Graph expansion failed: {_exp_err}")
 
                 docs = selected_docs + expanded

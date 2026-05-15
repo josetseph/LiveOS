@@ -1,3 +1,6 @@
+"""FastAPI application entry point: routes, middleware, and startup hooks."""
+
+# pylint: disable=wrong-import-order,wrong-import-position,import-outside-toplevel
 import uuid
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -11,9 +14,7 @@ setup_logging()
 from app.core.database import get_db  # noqa: E402
 from app.models.note import Note  # noqa: E402
 from app.schemas.extraction import NoteInput  # noqa: E402
-from app.schemas.feedback import FeedbackCreate, FeedbackResponse  # noqa: E402
 from app.schemas.note import CreateNoteInput  # noqa: E402
-from app.services.feedback import feedback_service  # noqa: E402
 from app.services.graph import graph_service  # noqa: E402
 from app.workflows.chat import chat_workflow  # noqa: E402
 from app.workflows.ingestion import ingestion_workflow  # noqa: E402
@@ -53,7 +54,7 @@ def _parse_date_str(s: str) -> datetime:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         pass
 
     try:
@@ -64,7 +65,7 @@ def _parse_date_str(s: str) -> datetime:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         pass
 
     return datetime.now(timezone.utc)
@@ -116,6 +117,7 @@ async def trace_id_middleware(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup_event():
+    """Initialize external services and database tables on application startup."""
     logger.info("Application startup: LiveOS Brain API online")
 
 
@@ -167,37 +169,30 @@ async def delete_file(file_key: str):
 
 @app.get("/")
 async def root():
+    """Root endpoint returning a simple service-status greeting."""
     logger.debug("Health check hit")
     return {"message": "LiveOS Brain is online", "status": "active"}
 
 
 @app.get("/health")
 async def health_check():
+    """Health-check endpoint confirming the API is running."""
     connected = graph_service.verify_connection()
     return {"status": "healthy", "graph": "connected" if connected else "unavailable"}
 
 
 class ChatInput(BaseModel):
+    """Request body for the chat endpoint."""
+
     query: str
 
 
 @app.post("/api/v1/chat")
-async def chat(input: ChatInput):
+async def chat(body: ChatInput):
     """
     Chat with your Brain: Vector Search -> Rerank -> Synthesis.
     """
-    return await chat_workflow.chat(input.query)
-
-
-@app.post("/api/v1/feedback", response_model=FeedbackResponse)
-async def submit_feedback(
-    feedback_input: FeedbackCreate,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Persist user feedback for retrieval-quality analysis and future ingestion.
-    """
-    return await feedback_service.create_feedback(db, feedback_input)
+    return await chat_workflow.chat(body.query)
 
 
 @app.get("/api/v1/graph/summary")
@@ -434,10 +429,10 @@ async def get_note_ingestion_status(note_id: str, db: AsyncSession = Depends(get
             select(Note.id, Note.processed, Note.failed).where(Note.id == note_id)
         )
         row = result.one_or_none()
-    except TimeoutError:
+    except TimeoutError as exc:
         raise HTTPException(
             status_code=503, detail="Database temporarily unavailable, retry shortly"
-        )
+        ) from exc
 
     if row is None:
         return {"error": "Note not found"}, 404

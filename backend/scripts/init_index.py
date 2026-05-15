@@ -1,5 +1,5 @@
 """
-init_typesense.py — Ensure the Typesense collection exists and is ready.
+init_index.py — Ensure the Typesense collection exists and is ready.
 
 TypesenseService._ensure_collection() handles creation automatically on first
 use; this script just forces an eager initialisation so the CI/startup init
@@ -20,7 +20,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fi
     wait=wait_fixed(2),
     retry=retry_if_exception_type(ConnectionError),
 )
-def init_typesense() -> None:
+def init_index() -> None:
     print("⏳ Initializing Typesense collection...")
     if not typesense_service.is_available():
         raise ConnectionError("Typesense not reachable — retrying...")
@@ -29,4 +29,4 @@ def init_typesense() -> None:
 
 
 if __name__ == "__main__":
-    init_typesense()
+    init_index()

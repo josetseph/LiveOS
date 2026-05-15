@@ -18,9 +18,9 @@ if _scripts_dir not in sys.path:
 from alembic.config import Config  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.core.database import engine  # noqa: E402
-from init_kuzu import init_kuzu  # noqa: E402
-from init_qdrant import init_qdrant  # noqa: E402
-from init_typesense import init_typesense  # noqa: E402
+from init_graph import init_graph  # noqa: E402
+from init_vectors import init_vectors  # noqa: E402
+from init_index import init_index  # noqa: E402
 
 
 # 1. Wait for Postgres
@@ -57,10 +57,10 @@ def run_migrations():
         sys.exit(1)
 
 
-# 3. Init MinIO
+# 3. Init RustFS
 @retry(stop=stop_after_attempt(10), wait=wait_fixed(2))
-def init_minio():
-    print("⏳ Check MinIO & Create Bucket...")
+def init_storage():
+    print("⏳ Check RustFS & Create Bucket...")
     s3 = boto3.client(
         "s3",
         endpoint_url=settings.R2_ENDPOINT_URL,
@@ -106,17 +106,17 @@ async def main():
     # Run Migrations
     run_migrations()
 
-    # Check MinIO
-    init_minio()
+    # Check RustFS
+    init_storage()
 
     # Initialize Qdrant
-    init_qdrant()
+    init_vectors()
 
     # Initialize Kuzu (embedded — creates DB dir + schema)
-    init_kuzu()
+    init_graph()
 
     # Initialize Typesense
-    init_typesense()
+    init_index()
 
     print(
         "\n✨ Local Stack Initialized Successfully! You are fully offline-capable now.\n"

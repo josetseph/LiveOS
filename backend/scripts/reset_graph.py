@@ -1,5 +1,5 @@
 """
-reset_kuzu.py — Delete the embedded Kuzu graph database directory.
+reset_graph.py — Delete the embedded Kuzu graph database directory.
 
 Removes the entire kuzu_graph data directory so the next startup of
 GraphService will reinitialise a clean schema from scratch.
@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from app.core.config import REPO_ROOT, settings
 
 
-def reset_kuzu() -> None:
+def reset_graph() -> None:
     print("🗑️  Resetting Kuzu graph database...")
     configured_db_path = Path(settings.KUZU_DB_PATH).expanduser()
     if not configured_db_path.is_absolute():
@@ -65,4 +65,4 @@ def reset_kuzu() -> None:
 
 
 if __name__ == "__main__":
-    reset_kuzu()
+    reset_graph()

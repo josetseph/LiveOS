@@ -1,8 +1,8 @@
-"""add feedback table
+"""drop feedback table
 
-Revision ID: 9f3a3d9b5a10
-Revises: 201356773e75
-Create Date: 2026-04-01 12:00:00.000000
+Revision ID: c7e92f1b3d04
+Revises: 043653ceaf21
+Create Date: 2026-05-14 00:00:00.000000
 
 """
 
@@ -11,13 +11,17 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision = "9f3a3d9b5a10"
-down_revision = "201356773e75"
+revision = "c7e92f1b3d04"
+down_revision = "043653ceaf21"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
+    op.drop_table("feedback")
+
+
+def downgrade() -> None:
     op.create_table(
         "feedback",
         sa.Column("id", sa.String(), nullable=False),
@@ -32,7 +36,3 @@ def upgrade() -> None:
         sa.CheckConstraint("relevance BETWEEN 1 AND 5", name="feedback_relevance_ck"),
         sa.CheckConstraint("quality BETWEEN 1 AND 5", name="feedback_quality_ck"),
     )
-
-
-def downgrade() -> None:
-    op.drop_table("feedback")

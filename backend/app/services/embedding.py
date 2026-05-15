@@ -1,3 +1,5 @@
+"""Provider-agnostic embedding service for document and query vector generation."""
+# pylint: disable=wrong-import-order
 import os
 
 from app.core.config import settings
@@ -147,7 +149,7 @@ class EmbeddingService:
                 )
                 return contains[0]
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning(f"[Embedding] Could not list models for resolution: {e}")
 
         logger.warning(f"[Embedding] Using configured model '{configured_model}' as-is")

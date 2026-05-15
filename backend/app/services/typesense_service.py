@@ -1,3 +1,4 @@
+"""Typesense keyword search service for fast BM25 node retrieval."""
 from __future__ import annotations
 
 from typing import Any
@@ -22,6 +23,7 @@ _COLLECTION_SCHEMA = {
 
 
 class TypesenseService:
+    """Typesense client managing the liveos_nodes collection for BM25 keyword search."""
     def __init__(self) -> None:
         self._enabled = True
         self.collection = settings.TYPESENSE_COLLECTION_NAME
@@ -42,7 +44,7 @@ class TypesenseService:
                 }
             )
             self._ensure_collection()
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             self._enabled = False
             self.client = None
             logger.warning(
@@ -54,25 +56,27 @@ class TypesenseService:
         collection_name = settings.TYPESENSE_COLLECTION_NAME
         try:
             self.client.collections[collection_name].retrieve()
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             try:
                 schema = dict(_COLLECTION_SCHEMA)
                 schema["name"] = collection_name
                 self.client.collections.create(schema)
                 logger.info(f"[Typesense] Created collection '{collection_name}'")
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning(f"[Typesense] Collection creation failed: {exc}")
 
     def is_available(self) -> bool:
+        """Return True if Typesense is reachable and the service is enabled."""
         if not self._enabled or not self.client:
             return False
         try:
             self.client.collections[settings.TYPESENSE_COLLECTION_NAME].retrieve()
             return True
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             return False
 
     def search_nodes(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Run a BM25 keyword search across name, type, context, and relationship fields."""
         if not self.is_available():
             return []
 
@@ -90,7 +94,7 @@ class TypesenseService:
                     "per_page": limit,
                 }
             )
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug(f"Typesense search failed: {exc}")
             return []
 
@@ -105,7 +109,7 @@ class TypesenseService:
 
     # ── Write helpers ──────────────────────────────────────────────────────────
 
-    def index_node(
+    def index_node(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         node_id: str,
         name: str,
@@ -113,7 +117,7 @@ class TypesenseService:
         isolated_contexts_text: str = "",
         relationship_natural_language: str = "",
         community_level: int | None = None,
-    ) -> None:
+    ) -> None:  # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Index (or re-index) one node document in Typesense."""
         if not self.is_available():
             return
@@ -133,7 +137,7 @@ class TypesenseService:
             self.client.collections[
                 settings.TYPESENSE_COLLECTION_NAME
             ].documents.upsert(doc)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(f"Typesense index_node failed for {node_id}: {exc}")
 
     def update_node_community(
@@ -171,7 +175,7 @@ class TypesenseService:
                 self.client.collections[settings.TYPESENSE_COLLECTION_NAME].documents[
                     node_id
                 ].update(doc)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             _msg = str(exc).lower()
             # Match genuine HTTP 404 only — not field-level "not found in the document"
             # errors which are actually 400s from a missing required schema field.
@@ -192,7 +196,7 @@ class TypesenseService:
             self.client.collections[settings.TYPESENSE_COLLECTION_NAME].documents[
                 node_id
             ].delete()
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             if "404" in str(exc) or "not found" in str(exc).lower():
                 return
             logger.warning(f"Typesense delete_node failed for {node_id}: {exc}")

@@ -1,3 +1,5 @@
+"""S3-compatible cloud storage utilities for file upload, retrieval, and deletion."""
+# pylint: disable=wrong-import-order
 from aioboto3 import session as aioboto3_session
 from app.core.config import settings
 from app.core.log import get_logger
@@ -71,7 +73,7 @@ async def send_files(file, file_key, file_type):
             logger.info(f"Successfully uploaded file to S3: {file_key}")
             logger.info(f"Upload response: {upload_file_response}")
             return upload_file_response
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(f"Error uploading file to S3: {file_key} - {e}")
         return {"error": str(e)}
 
@@ -91,7 +93,7 @@ def get_files(folder_slash_filename: str):
     return url  # Return the CloudFront URL
 
 
-async def send_files_multipart(file, file_key, file_type, part_size=MAX_FILE_SIZE):
+async def send_files_multipart(file, file_key, file_type, part_size=MAX_FILE_SIZE):  # pylint: disable=too-many-locals
     """
     Upload a large file to S3 using multipart upload for better performance.
     Falls back to regular upload for smaller files.
@@ -154,7 +156,7 @@ async def send_files_multipart(file, file_key, file_type, part_size=MAX_FILE_SIZ
             logger.info(f"Successfully completed multipart upload for: {file_key}")
             return complete_response
 
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(f"Error in multipart upload for {file_key}: {e}")
         # Try to abort the multipart upload if it was initiated
         if upload_id:
@@ -166,7 +168,7 @@ async def send_files_multipart(file, file_key, file_type, part_size=MAX_FILE_SIZ
                         UploadId=upload_id,
                     )
                     logger.info(f"Aborted multipart upload {upload_id} for {file_key}")
-            except Exception as abort_error:
+            except Exception as abort_error:  # pylint: disable=broad-exception-caught
                 logger.warning(
                     f"Failed to abort multipart upload {upload_id} for {file_key}: {abort_error}"
                 )
@@ -194,6 +196,6 @@ async def delete_files(file_key: str):
             )
             logger.info(f"Successfully deleted file from S3: {file_key}")
             return delete_file_response
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error(f"Error deleting file from S3: {file_key} - {e}")
         return {"error": str(e)}

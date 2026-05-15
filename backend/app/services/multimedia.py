@@ -1,4 +1,8 @@
+"""Multimedia processing: image captioning, audio transcription, and PDF text extraction."""
+
+# pylint: disable=wrong-import-order,import-outside-toplevel
 import os
+import csv
 
 import torch
 from app.core.config import settings
@@ -10,6 +14,8 @@ logger = get_logger("MultimediaService")
 
 
 class MultimediaService:
+    """Extract text from images (Florence-2), audio (Whisper), and PDFs; falls back gracefully if models are absent."""
+
     def __init__(self):
         self.models_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), f"../../{settings.MODELS_PATH}")
@@ -50,7 +56,7 @@ class MultimediaService:
 
         logger.info(f"Downloading remote file: {path_or_url}...")
         try:
-            response = requests.get(path_or_url)
+            response = requests.get(path_or_url, timeout=300)
             response.raise_for_status()
 
             # Create temp file
@@ -127,7 +133,7 @@ class MultimediaService:
             logger.info(f"Florence Description: {description}")
             return description
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error(f"Florence Failed: {e}")
             return f"Image Description Failed: {e}"
         finally:
@@ -139,8 +145,6 @@ class MultimediaService:
         Transcribes audio using Whisper.
         Handles local paths and R2 URLs.
         """
-        import os
-
         self._load_whisper()
         import librosa
 
@@ -193,8 +197,6 @@ class MultimediaService:
         Extract text from a PDF using only the native text layer (PyMuPDF).
         OCR fallback is intentionally disabled.
         """
-        import os
-
         local_path = self._download_temp_file(pdf_path)
         extracted_text = []
 
@@ -222,11 +224,11 @@ class MultimediaService:
             except ImportError:
                 logger.error("PyMuPDF (fitz) not installed.")
                 return "PDF extraction unavailable: PyMuPDF (fitz) is not installed."
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.error(f"PyMuPDF failed: {e}")
                 return f"PDF extraction failed: {e}"
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             return f"PDF Extraction Failed: {e}"
         finally:
             if (
@@ -240,8 +242,6 @@ class MultimediaService:
         """
         Extract text from a Word document (.docx) using native parsing only.
         """
-        import os
-
         local_path = self._download_temp_file(docx_path)
         parts = []
 
@@ -274,7 +274,7 @@ class MultimediaService:
 
             except ImportError:
                 return "Word extraction unavailable: python-docx is not installed."
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.error(f"DOCX extraction failed: {e}")
                 return f"Word extraction failed: {e}"
 
@@ -286,19 +286,21 @@ class MultimediaService:
             ):
                 os.remove(local_path)
 
-    def extract_text_from_spreadsheet(self, sheet_path: str) -> str:
+    def extract_text_from_spreadsheet(
+        self, sheet_path: str
+    ) -> (
+        str
+    ):  # pylint: disable=too-many-return-statements,too-many-nested-blocks,too-many-locals,too-many-branches
         """
         Extract text from spreadsheet-like files using native parsing:
         - .xlsx via openpyxl
         - .csv/.tsv via stdlib csv
         """
-        import csv
-        import os
 
         local_path = self._download_temp_file(sheet_path)
         lower_path = local_path.lower()
 
-        try:
+        try:  # pylint: disable=too-many-nested-blocks
             if lower_path.endswith(".xlsx"):
                 try:
                     from openpyxl import load_workbook
@@ -333,7 +335,7 @@ class MultimediaService:
                     return (
                         "Spreadsheet extraction unavailable: openpyxl is not installed."
                     )
-                except Exception as e:
+                except Exception as e:  # pylint: disable=broad-exception-caught
                     logger.error(f"XLSX extraction failed: {e}")
                     return f"Spreadsheet extraction failed: {e}"
 

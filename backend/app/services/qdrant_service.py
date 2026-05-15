@@ -1,3 +1,5 @@
+"""Qdrant vector database service for node, relationship, and context storage and retrieval."""
+# pylint: disable=wrong-import-order
 from __future__ import annotations
 
 import uuid
@@ -19,6 +21,7 @@ logger = get_logger("QdrantService")
 
 
 class QdrantService:
+    """Qdrant vector store managing node-core, relationship, and isolated-context collections."""
     def __init__(self) -> None:
         self._enabled = True
         try:
@@ -27,13 +30,14 @@ class QdrantService:
                 port=settings.QDRANT_PORT,
                 api_key=settings.QDRANT_API_KEY,
             )
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             self._enabled = False
             self.client = None
             logger.warning(f"Qdrant client init failed, disabling Qdrant path: {exc}")
 
     @property
     def collections(self) -> list[str]:
+        """Return the list of Qdrant collection names searched during retrieval."""
         # node_cores is included in vector search when nodes have a merged-context
         # vector (written by _update_node_summary). The merged vector embeds all
         # accumulated isolated contexts as a single passage, enabling multi-constraint
@@ -46,17 +50,19 @@ class QdrantService:
         ]
 
     def is_available(self) -> bool:
+        """Return True if Qdrant is reachable and the service is enabled."""
         if not self._enabled or not self.client:
             return False
         try:
             self.client.get_collections()
             return True
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             return False
 
     def search_all_collections(
         self, query_vector: list[float], limit: int, min_score: float
     ) -> list[dict[str, Any]]:
+        """Search all Qdrant collections and merge the resulting scored hits."""
         if not self.is_available() or not self.client:
             return []
 
@@ -78,18 +84,19 @@ class QdrantService:
                             "payload": point.payload or {},
                         }
                     )
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.debug(f"Qdrant search failed for {collection}: {exc}")
         return hits
 
-    def search_node_cores(
+    def search_node_cores(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         query_vector: list[float],
         limit: int,
         min_score: float,
         node_type: str | None = None,
         community_level: int | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, Any]]:  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Search the node-cores collection with optional type and community-level filters."""
         if not self.is_available() or not self.client:
             return []
 
@@ -113,7 +120,7 @@ class QdrantService:
                 query_filter=query_filter,
                 with_payload=True,
             )
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug(f"Qdrant node core search failed: {exc}")
             return []
 
@@ -124,7 +131,7 @@ class QdrantService:
 
     # ── Write helpers ──────────────────────────────────────────────────────────
 
-    def upsert_node_core(
+    def upsert_node_core(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         node_id: str,
         name: str,
@@ -133,7 +140,7 @@ class QdrantService:
         description: str = "",
         community_level: int | None = None,
         extra_payload: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> None:  # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Upsert one point in node_cores (one point per node).
 
         ``community_level`` is set only for community nodes (the level they ARE at).
@@ -165,7 +172,7 @@ class QdrantService:
                     )
                 ],
             )
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(f"Qdrant upsert_node_core failed for {node_id}: {exc}")
 
     def upsert_node_items(
@@ -216,7 +223,7 @@ class QdrantService:
                 points.append(PointStruct(id=point_id, vector=vector, payload=payload))
             if points:
                 self.client.upsert(collection_name=collection_name, points=points)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(
                 f"Qdrant upsert_node_items failed for {collection_name}/{node_id}: {exc}"
             )
@@ -246,12 +253,12 @@ class QdrantService:
                     )
                 ],
             )
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(
                 f"Qdrant append_node_item failed for {collection_name}/{node_id}: {exc}"
             )
 
-    def upsert_node_relationship(
+    def upsert_node_relationship(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         relationship_id: str,
         natural_language: str,
@@ -259,7 +266,7 @@ class QdrantService:
         source_node_id: str,
         target_node_id: str,
         is_community_rel: bool = False,
-    ) -> None:
+    ) -> None:  # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Upsert one point in node_relationships.
 
         ``is_community_rel`` marks membership relationships created during Leiden
@@ -286,7 +293,7 @@ class QdrantService:
                     )
                 ],
             )
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(
                 f"Qdrant upsert_node_relationship failed for {relationship_id}: {exc}"
             )
@@ -308,7 +315,7 @@ class QdrantService:
                 ids=[point_id],
                 with_payload=True,
             )
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug(
                 f"Qdrant get_node_content_by_id core failed for {node_id}: {exc}"
             )
@@ -341,7 +348,7 @@ class QdrantService:
                         break
                     offset = next_offset
                 return items
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.debug(f"Qdrant scroll failed for {collection}/{node_id}: {exc}")
                 return []
 
@@ -398,7 +405,7 @@ class QdrantService:
                 nid = payload.get("node_id")
                 if nid:
                     cores_by_nodeid[nid] = payload
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug(f"Qdrant get_nodes_content_by_ids cores failed: {exc}")
 
         def _bulk_scroll(collection: str) -> dict[str, list[str]]:
@@ -430,7 +437,7 @@ class QdrantService:
                         break
                     offset = next_offset
                 return result
-            except Exception as exc:
+            except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.debug(f"Qdrant bulk scroll failed for {collection}: {exc}")
                 return {}
 
@@ -489,7 +496,7 @@ class QdrantService:
                 if next_offset is None:
                     break
                 offset = next_offset
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug(f"Qdrant list_all_community_payloads failed: {exc}")
         return rows
 
@@ -515,7 +522,7 @@ class QdrantService:
                     )
                 ),
             )
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(f"Qdrant delete_community_relationships failed: {exc}")
 
     def find_node_id_by_name(self, name: str) -> str | None:
@@ -544,7 +551,7 @@ class QdrantService:
             if results:
                 return (results[0].payload or {}).get("node_id")
             return None
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug(f"[Qdrant] find_node_id_by_name failed for '{name}': {exc}")
             return None
 
@@ -599,7 +606,7 @@ class QdrantService:
                 if next_offset is None:
                     break
                 offset = next_offset
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug(f"[Qdrant] find_node_ids_by_names failed: {exc}")
         return result_map
 
@@ -653,7 +660,7 @@ class QdrantService:
                     seen.add(key)
                     unique.append(r)
             return unique
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.debug(f"[Qdrant] get_relationships_for_node_ids failed: {exc}")
             return []
 
@@ -681,7 +688,7 @@ class QdrantService:
                         )
                     ),
                 )
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(f"Qdrant delete_node failed for {node_id}: {exc}")
 
 

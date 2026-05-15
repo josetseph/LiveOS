@@ -1,7 +1,7 @@
 """add failed field to notes
 
 Revision ID: b1c2d3e4f5a6
-Revises: 9f3a3d9b5a10
+Revises: 201356773e75
 Create Date: 2026-04-16 00:00:00.000000
 
 """
@@ -11,7 +11,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "b1c2d3e4f5a6"
-down_revision = "9f3a3d9b5a10"
+down_revision = "201356773e75"
 branch_labels = None
 depends_on = None
 
