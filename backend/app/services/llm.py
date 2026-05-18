@@ -1351,8 +1351,7 @@ class LLMService:
         }
 
     # Reasoning rules ported from benchmark v4/v5 (the 0.74-scoring pipeline).
-    # Injected into BENCHMARK_MODE prompt and personal mode to enforce correct
-    # answer-type discipline, comparison direction, specificity, and past/present.
+    # Enforces correct answer-type discipline, comparison direction, specificity, and past/present.
     _REASONING_RULES = """
         REASONING RULES — apply these before writing your answer:
 

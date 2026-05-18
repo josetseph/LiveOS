@@ -101,7 +101,7 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
 
         if not answer:
             answer = (
-                "I couldn't find any relevant context in your brain to answer that."
+                "I couldn't find any relevant information in the knowledge base to answer that."
                 if not unique_docs
                 else "I couldn't find enough information to answer that."
             )

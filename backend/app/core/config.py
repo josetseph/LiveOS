@@ -175,11 +175,6 @@ class Settings(BaseSettings):
     # Change via .env: INGESTION_AGENT_CONCURRENCY=4
     INGESTION_AGENT_CONCURRENCY: int = 2  # override to >1 for non-Gemini providers
 
-    # ── Benchmark Mode ────────────────────────────────────────────────────────
-    # When True, uses factual/objective prompts instead of personal narrative.
-    # Set to True only when testing with external datasets (HotpotQA, MuSiQue).
-    BENCHMARK_MODE: bool = True
-
     # ── Embedding Instructions ────────────────────────────────────────────────
     # When True, uses LLM to generate query-specific embedding instructions for
     # Qwen3 models. Adds ~0.1-0.2 s per query but may improve recall precision.

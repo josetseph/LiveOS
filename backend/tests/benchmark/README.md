@@ -2,39 +2,6 @@
 
 This directory contains tools for evaluating LiveOS retrieval and answer quality against standardized multi-hop reasoning datasets.
 
-## Important: Benchmark Mode
-
-LiveOS is designed for **personal knowledge management** with prompts that address the user as "You" and build personal narratives. This causes issues when testing with Wikipedia-style benchmark data.
-
-### Enable Benchmark Mode
-
-Before ingesting benchmark data, enable `BENCHMARK_MODE` in your environment:
-
-```bash
-# Option 1: Environment variable
-export BENCHMARK_MODE=true
-
-# Option 2: In your .env file
-BENCHMARK_MODE=true
-```
-
-**What Benchmark Mode Does:**
-- **Ingestion**: Uses third-person, objective summaries instead of "You did X"
-- **Retrieval**: Returns factual answers without personal framing
-- **Prompts**: Removes "Second Brain" persona and "peer" language
-
-**When to Use:**
-- ✅ Testing with HotpotQA, MuSiQue, or other external datasets
-- ✅ Academic evaluation and research benchmarks
-- ❌ NOT for personal notes (disable for normal usage)
-
-**After Benchmarking:**
-```bash
-# Disable benchmark mode for normal usage
-unset BENCHMARK_MODE
-# or set BENCHMARK_MODE=false in .env
-```
-
 ## Datasets
 
 ### 1. HotpotQA (Recommended Starting Point) ⭐ Local Data Available

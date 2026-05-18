@@ -34,7 +34,6 @@ def patch_settings(monkeypatch):
     from app.core import config
 
     monkeypatch.setattr(config.settings, "LLM_PROVIDER", "lm_studio", raising=False)
-    monkeypatch.setattr(config.settings, "BENCHMARK_MODE", False, raising=False)
 
 
 # ---------------------------------------------------------------------------

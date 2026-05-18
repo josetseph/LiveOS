@@ -604,158 +604,7 @@ async def summarization_node(state: IngestionState):
     return {"logs": logs, "status": "INDEXED"}
 
 
-# 3. Router logic
-async def refinement_node(state: IngestionState):
-    """
-    Tier 2: The Refiner — always runs, iterative audit passes (max 10).
-    Each pass shows the model what has been extracted so far and asks what was
-    missed. Stops early as soon as a pass finds nothing new.
-    """
-    if not state.get("extraction"):
-        return {}  # Nothing to refine
-
-    logs = state["logs"]
-    logger.info("[Agent] Refinement (iterative audit) starting...")
-
-    def _build_audit_prompt(extraction, pass_num):
-        existing_names = [n.name for n in extraction.nodes]
-        if settings.BENCHMARK_MODE:
-            return f"""<system_role>
-You are a Named Entity Completeness Auditor running pass {pass_num} of an iterative extraction loop.
-Review the already-extracted nodes against the Source Text and identify anything missed.
-</system_role>
-
-<audit_tasks>
-TASK 1 — MISSING NODES:
-Identify any named entity, concept, or work not yet in <already_extracted>.
-Especially items in lists, tables, ranked sequences, or dynasty lineages — each is a separate node.
-Format: {{"name": "...", "type": "...", "isolated_context": "verbatim sentence(s)"}}
-Do NOT repeat already-extracted names.
-
-
-TASK 2 — MISSING RELATIONSHIPS (PRIMARY FOCUS):
-⚠️ REQUIRED: Extract ALL factual connections between nodes in <already_extracted> plus any new nodes.
-This is the most important task — the first pass likely missed many relationships.
-Check every pair of nodes: if there is any factual link in the text, create a relationship.
-source_name and target_name must EXACTLY match a node name.
-Format: {{"source_name": "...", "target_name": "...", "relationship_type": "snake_case_verb",
-  "strength": 8, "confidence": 8, "relevance": 7, "natural_language": "X did Y.", "context": "verbatim"}}
-Relationship types: born_in, directed, wrote, starred_in, located_in, part_of, succeeded_by,
-married_to, founded, member_of, participated_in, and any specific verb from the text.
-
-TASK 3 — THIN CONTEXT ENRICHMENT:
-For already-extracted nodes with no finite verb in isolated_context (and not a verbatim list record),
-enrich by copying surrounding verbatim sentences. Return as nodes with the same name.
-</audit_tasks>
-
-<zero_tolerance>
-- Copy all dates, numbers, ranges EXACTLY.
-- Copy proper nouns verbatim.
-- isolated_context must be verbatim. Never paraphrase.
-</zero_tolerance>
-
-<already_extracted>
-{existing_names}
-</already_extracted>
-
-<source_text>
-{state['content']}
-</source_text>
-"""
-        return f"""<system_role>
-You are a Quality Assurance Auditor running pass {pass_num} of an iterative extraction loop.
-Review the already-extracted nodes against the Source Text and identify anything missed.
-</system_role>
-
-<audit_tasks>
-TASK 1 — MISSED NODES:
-Identify overlooked nodes: people, places, tools, organizations, events, abstract themes,
-actionable tasks, emotional traits, external references. Each node:
-{{"name": "...", "type": "...", "isolated_context": "verbatim sentence(s)"}}
-Do NOT repeat already-extracted names.
-
-
-TASK 2 — MISSING RELATIONSHIPS (PRIMARY FOCUS):
-⚠️ REQUIRED: Extract ALL factual connections between the nodes listed in <already_extracted>
-plus any new nodes from Task 1. The first pass likely missed most relationships — find them all.
-source_name and target_name must match a node name exactly.
-Format: {{"source_name": "...", "target_name": "...", "relationship_type": "snake_case_verb",
-  "strength": 7, "confidence": 8, "relevance": 6, "natural_language": "X does Y.", "context": "verbatim"}}
-</audit_tasks>
-
-<zero_tolerance>
-- Copy all dates, times, numbers EXACTLY.
-- Copy proper nouns verbatim.
-- isolated_context must be verbatim. Never paraphrase.
-</zero_tolerance>
-
-<already_extracted>
-{existing_names}
-</already_extracted>
-
-<source_text>
-{state['content']}
-</source_text>
-"""
-
-    def _merge_patch(extraction, patch):
-        """Merge a patch extraction into the running extraction, deduplicating by name."""
-        added_nodes = 0
-        added_rels = 0
-        existing_names = {n.name.lower() for n in extraction.nodes}
-
-        for n in patch.nodes or []:
-            if n.name and n.name.strip() and n.name.lower() not in existing_names:
-                extraction.nodes.append(n)
-                existing_names.add(n.name.lower())
-                added_nodes += 1
-
-        for rel in patch.relationships or []:
-            extraction.relationships.append(rel)
-            added_rels += 1
-
-        return added_nodes, added_rels
-
-    extraction = state["extraction"]
-    MAX_PASSES = 1  # pylint: disable=invalid-name
-    for pass_num in range(1, MAX_PASSES + 1):
-        logs.append(
-            f"[{datetime.now().strftime('%H:%M:%S')}] REFINE: Pass {pass_num} (max {MAX_PASSES})..."
-        )
-        try:
-            prompt = _build_audit_prompt(extraction, pass_num)
-            patch = await asyncio.to_thread(
-                llm_service.ingestion_extract_structured,
-                prompt,
-                Extraction,
-                0.1,
-            )
-            if patch:
-                added_nodes, added_rels = _merge_patch(extraction, patch)
-                logger.info(
-                    f"  [Refiner] Pass {pass_num}: +{added_nodes} nodes, +{added_rels} relationships."
-                )
-                logs.append(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] REFINE: Pass {pass_num} "
-                    f"+{added_nodes} nodes, +{added_rels} rels."
-                )
-                if added_nodes == 0 and added_rels == 0:
-                    logger.info(f"  [Refiner] Pass {pass_num}: nothing new — stopping.")
-                    break
-            else:
-                logs.append(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] REFINE: Pass {pass_num} — no response."
-                )
-                break
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logs.append(f"WARN: Refinement pass {pass_num} failed: {e}")
-            logger.warning(f"  [Refiner] Pass {pass_num} failed: {e}")
-            break
-
-    return {"logs": logs, "status": "REFINED", "extraction": extraction}
-
-
-def should_continue_after_extraction(state: IngestionState):
+def should_route_after_extraction(state: IngestionState):
     """Route the graph after extraction: 'end' on error, 'store' otherwise."""
     if state.get("errors"):
         return "end"
@@ -774,11 +623,9 @@ workflow.add_node("summarization", summarization_node)
 # Define Edges
 workflow.set_entry_point("multimodal")
 workflow.add_edge("multimodal", "extraction")
-
-# Single-prompt extraction path: no second LLM refinement pass.
 workflow.add_conditional_edges(
     "extraction",
-    should_continue_after_extraction,
+    should_route_after_extraction,
     {"store": "storage", "end": END},
 )
 
