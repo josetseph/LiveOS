@@ -272,16 +272,45 @@ Knowledge graph: 9,636 nodes / 8,238 relationships — ingested with `gemma3:4b`
 - **Gemini Flash Lite is the interactive production choice.** 18.10 s mean, 59% EM, 76% fuzzy — 4.4× faster than Gemma3:4b with nearly double the accuracy.
 - **Gemma3:4b under-performs on reasoning, not retrieval.** Its retrieval precision (0.351) is the highest of the three — but EM at full-recall is only 24%, versus 62% for Flash Lite. The model retrieves correctly and then fails to reason over what it retrieved.
 
+### After Optimizations — Gemma4:e4b
+
+Post-Final Implementation pipeline optimizations evaluated with Gemma4:e4b against the same HotPotQA benchmark. Improvements include refined answer synthesis, more targeted retrieval, reduced inter-query overhead, and an updated knowledge graph (fixing the Animorphs KB gap).
+
+| Metric | Final Implementation | After Optimizations | Δ |
+|---|---|---|---|
+| **Exact Match (EM)** | 58.0% | **62.0%** | +4 pp |
+| **Fuzzy Match** | 81.0% | **81.0%** | — |
+| **Token F1** | 0.7366 | 0.7358 | −0.001 |
+| **Contains expected** | 74.0% | 74.0% | — |
+| **Hard failures** | 19 | 19 | — |
+| **Fuzzy-only** | 23 | **19** | −4 |
+| **Avg response time** | 212.10 s | 231.17 s | +19 s |
+| **Retrieval Recall** | **0.715** | 0.610 | −0.105 |
+| **Retrieval Precision** | 0.349 | **0.361** | +0.012 |
+| **Retrieval F1** | **0.469** | 0.453 | −0.016 |
+| **EM at full recall (Rc=1.0)** | 50% | **75%** | +25 pp |
+| **EM at zero recall (Rc=0.0)** | 56% | **71%** | +15 pp |
+| **Wall clock (100 Qs)** | ~8.75 h | **~6.5 h** | −2.25 h |
+
+**Key takeaways:**
+
+- **EM improves 4 pp (58% → 62%) with no change in fuzzy match** — gains are at the answer precision boundary, not in semantic correctness.
+- **Answer synthesis at full recall dramatically improved.** EM at Rc=1.0 jumped 25 pp (50% → 75%), reversing the prior counter-intuitive result where excessive context hurt exact match.
+- **Retrieval is more precise but less exhaustive.** Precision improved (+0.012) while recall dropped (−0.105) — the pipeline is more targeted, surfacing fewer gold documents overall but synthesising more accurately from the ones it finds.
+- **Wall clock cut by 26%** — near-elimination of inter-query overhead reduced total wall clock from ~8.75 h to ~6.5 h.
+- **Animorphs KB gap resolved** — the one question that failed in every prior run is now correctly answered (EM ✓, Rc=1.0, 146 s).
+
 ### Historical Architecture Progression
 
-| Approach | Graph DB | Search | LLM | EM | Avg response |
-|---|---|---|---|---|---|
-| Sub Questions (Feb 2026) | Neo4j | Elasticsearch | Gemini 3 Flash Preview | 62% | 50.5 s |
-| Joint Approach (Mar 2026) | Neo4j | Elasticsearch | Gemini Flash Lite | 61% | ~43 s |
-| Final Implementation (May 2026) | **Kuzu** | **Typesense** | Gemini Flash Lite | **59%** | **18.10 s** |
-| Final Implementation (May 2026) | **Kuzu** | **Typesense** | Gemma4:e4b (local) | **58%** | 212.10 s |
+| Approach | Graph DB | Search | LLM | EM | Fuzzy | Avg response |
+|---|---|---|---|---|---|---|
+| Sub Questions (Feb 2026) | Neo4j | Elasticsearch | Gemini 3 Flash Preview | 62% | 75% | 50.5 s |
+| Joint Approach (Mar 2026) | Neo4j | Elasticsearch | Gemini Flash Lite | 61% | — | ~43 s |
+| Final Implementation (May 2026) | **Kuzu** | **Typesense** | Gemini Flash Lite | **59%** | 76% | **18.10 s** |
+| Final Implementation (May 2026) | **Kuzu** | **Typesense** | Gemma4:e4b (local) | 58% | **81%** | 212.10 s |
+| After Optimizations (May 2026) | **Kuzu** | **Typesense** | Gemma4:e4b (local) | **62%** | **81%** | 231.17 s |
 
-The move from Neo4j + Elasticsearch to Kuzu + Typesense cut response time from ~43 s to 18.10 s (2.4×) while maintaining near-identical accuracy, and eliminated all external graph database and search service dependencies.
+The move from Neo4j + Elasticsearch to Kuzu + Typesense cut response time from ~43 s to 18.10 s (2.4×) while maintaining near-identical accuracy, and eliminated all external graph database and search service dependencies. Post-Final Implementation pipeline optimizations pushed Gemma4:e4b to **62% EM** — the highest exact match of any fully local configuration evaluated.
 
 ---
 

@@ -1143,8 +1143,9 @@ class IngestionWorkflow:
             )
         raw = (
             llm_service.reason(
-                prompt, model=llm_service._get_ingestion_model()
-            )  # pylint: disable=protected-access
+                prompt,
+                model=llm_service._get_ingestion_model(),  # pylint: disable=protected-access
+            )
             or ""
         )
         return self._parse_name_summary(raw)
@@ -1195,8 +1196,9 @@ class IngestionWorkflow:
             )
         raw = (
             llm_service.reason(
-                prompt, model=llm_service._get_ingestion_model()
-            )  # pylint: disable=protected-access
+                prompt,
+                model=llm_service._get_ingestion_model(),  # pylint: disable=protected-access
+            )
             or ""
         )
         return self._parse_name_summary(raw)
