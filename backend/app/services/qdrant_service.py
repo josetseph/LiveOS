@@ -1,4 +1,5 @@
 """Qdrant vector database service for node, relationship, and context storage and retrieval."""
+
 # pylint: disable=wrong-import-order
 from __future__ import annotations
 
@@ -22,7 +23,20 @@ logger = get_logger("QdrantService")
 
 class QdrantService:
     """Qdrant vector store managing node-core, relationship, and isolated-context collections."""
-    def __init__(self) -> None:
+
+    def __init__(
+        self,
+        col_cores: str | None = None,
+        col_relationships: str | None = None,
+        col_contexts: str | None = None,
+    ) -> None:
+        self._col_cores = col_cores or settings.QDRANT_COLLECTION_NODE_CORES
+        self._col_rels = (
+            col_relationships or settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS
+        )
+        self._col_contexts = (
+            col_contexts or settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS
+        )
         self._enabled = True
         try:
             self.client = QdrantClient(
@@ -43,11 +57,7 @@ class QdrantService:
         # accumulated isolated contexts as a single passage, enabling multi-constraint
         # queries to match whole-node content rather than one sentence at a time.
         # Nodes without a merged vector simply don't appear in search results.
-        return [
-            settings.QDRANT_COLLECTION_NODE_CORES,
-            settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS,
-            settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
-        ]
+        return [self._col_cores, self._col_rels, self._col_contexts]
 
     def is_available(self) -> bool:
         """Return True if Qdrant is reachable and the service is enabled."""
@@ -95,7 +105,9 @@ class QdrantService:
         min_score: float,
         node_type: str | None = None,
         community_level: int | None = None,
-    ) -> list[dict[str, Any]]:  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ) -> list[
+        dict[str, Any]
+    ]:  # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Search the node-cores collection with optional type and community-level filters."""
         if not self.is_available() or not self.client:
             return []
@@ -113,7 +125,7 @@ class QdrantService:
         query_filter = Filter(must=must) if must else None
         try:
             result = self.client.query_points(
-                collection_name=settings.QDRANT_COLLECTION_NODE_CORES,
+                collection_name=self._col_cores,
                 query=query_vector,
                 limit=limit,
                 score_threshold=min_score,
@@ -149,7 +161,7 @@ class QdrantService:
         """
         if not self.is_available() or not self.client:
             return
-        collection = settings.QDRANT_COLLECTION_NODE_CORES
+        collection = self._col_cores
         payload: dict[str, Any] = {
             "node_id": node_id,
             "name": name,
@@ -274,7 +286,7 @@ class QdrantService:
         """
         if not self.is_available() or not self.client:
             return
-        collection = settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS
+        collection = self._col_rels
         payload: dict[str, Any] = {
             "natural_language": natural_language,
             "source_node_id": source_node_id,
@@ -311,7 +323,7 @@ class QdrantService:
         point_id = str(uuid.uuid5(uuid.NAMESPACE_OID, node_id))
         try:
             cores = self.client.retrieve(
-                collection_name=settings.QDRANT_COLLECTION_NODE_CORES,
+                collection_name=self._col_cores,
                 ids=[point_id],
                 with_payload=True,
             )
@@ -356,9 +368,7 @@ class QdrantService:
             # No node_cores entry, but isolated_contexts may still exist in the
             # sub-item collection (e.g. node was written by _update_node_summary
             # which never calls upsert_node_core). Return what we can.
-            isolated_only = _scroll_contents(
-                settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS
-            )
+            isolated_only = _scroll_contents(self._col_contexts)
             if not isolated_only:
                 return None
             return {
@@ -378,9 +388,7 @@ class QdrantService:
             "type": core_payload.get("type", ""),
             "description": core_payload.get("description", ""),
             "community_level": core_payload.get("community_level"),
-            "isolated_contexts": _scroll_contents(
-                settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS
-            ),
+            "isolated_contexts": _scroll_contents(self._col_contexts),
         }
 
     def get_nodes_content_by_ids(self, node_ids: list[str]) -> dict[str, dict]:
@@ -396,7 +404,7 @@ class QdrantService:
         cores_by_nodeid: dict[str, dict] = {}
         try:
             cores = self.client.retrieve(
-                collection_name=settings.QDRANT_COLLECTION_NODE_CORES,
+                collection_name=self._col_cores,
                 ids=point_ids,
                 with_payload=True,
             )
@@ -441,7 +449,7 @@ class QdrantService:
                 logger.debug(f"Qdrant bulk scroll failed for {collection}: {exc}")
                 return {}
 
-        contexts_by_id = _bulk_scroll(settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS)
+        contexts_by_id = _bulk_scroll(self._col_contexts)
 
         result: dict[str, dict] = {}
         for nid in node_ids:
@@ -471,7 +479,7 @@ class QdrantService:
             offset = None
             while True:
                 results, next_offset = self.client.scroll(
-                    collection_name=settings.QDRANT_COLLECTION_NODE_CORES,
+                    collection_name=self._col_cores,
                     scroll_filter=Filter(
                         must=[
                             FieldCondition(
@@ -510,7 +518,7 @@ class QdrantService:
             return
         try:
             self.client.delete(
-                collection_name=settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS,
+                collection_name=self._col_rels,
                 points_selector=FilterSelector(
                     filter=Filter(
                         must=[
@@ -535,7 +543,7 @@ class QdrantService:
             return None
         try:
             results, _ = self.client.scroll(
-                collection_name=settings.QDRANT_COLLECTION_NODE_CORES,
+                collection_name=self._col_cores,
                 scroll_filter=Filter(
                     must=[
                         FieldCondition(
@@ -581,7 +589,7 @@ class QdrantService:
             offset = None
             while True:
                 results, next_offset = self.client.scroll(
-                    collection_name=settings.QDRANT_COLLECTION_NODE_CORES,
+                    collection_name=self._col_cores,
                     scroll_filter=_scroll_filter,
                     limit=500,
                     offset=offset,
@@ -632,7 +640,7 @@ class QdrantService:
                 offset = None
                 while True:
                     points, next_offset = self.client.scroll(
-                        collection_name=settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS,
+                        collection_name=self._col_rels,
                         scroll_filter=scroll_filter,
                         limit=500,
                         offset=offset,
@@ -671,10 +679,10 @@ class QdrantService:
 
         try:
             self.client.delete(
-                collection_name=settings.QDRANT_COLLECTION_NODE_CORES,
+                collection_name=self._col_cores,
                 points_selector=[str(uuid.uuid5(uuid.NAMESPACE_OID, node_id))],
             )
-            for collection_name in (settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,):
+            for collection_name in (self._col_contexts,):
                 self.client.delete(
                     collection_name=collection_name,
                     points_selector=FilterSelector(

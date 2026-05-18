@@ -25,6 +25,7 @@ import remarkGfm from "remark-gfm";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ShaderBackground } from "@/components/shader-background";
+import { useKB } from "@/lib/kb-context";
 import type { FilePreview, NotePreview } from "@/lib/types";
 
 interface Message {
@@ -74,6 +75,7 @@ function makeLinkRenderer(
 }
 
 export default function ChatPage() {
+  const { currentKB, currentKBName } = useKB();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -138,7 +140,7 @@ export default function ChatPage() {
     setIsLoading(true);
 
     try {
-      const response = await api.chat(input);
+      const response = await api.chat(input, currentKB);
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
@@ -262,6 +264,11 @@ export default function ChatPage() {
                   Clear Chat
                 </button>
               )}
+              {/* Active KB badge */}
+              <div className="flex items-center gap-1 rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1.5">
+                <Database className="h-3 w-3 text-purple-400" />
+                <span className="text-xs text-purple-300 font-medium">{currentKBName}</span>
+              </div>
               <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
                 <Database className="h-3 w-3 text-green-400" />
                 <span className="text-xs text-white/70">Postgres</span>

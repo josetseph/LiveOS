@@ -16,6 +16,7 @@ from app.models.note import Note  # noqa: E402
 from app.schemas.extraction import NoteInput  # noqa: E402
 from app.schemas.note import CreateNoteInput  # noqa: E402
 from app.services.graph import graph_service  # noqa: E402
+from app.services.kb_registry import KBContext, kb_registry  # noqa: E402
 from app.workflows.chat import chat_workflow  # noqa: E402
 from app.workflows.ingestion import ingestion_workflow  # noqa: E402
 from fastapi import (  # noqa: E402
@@ -24,6 +25,7 @@ from fastapi import (  # noqa: E402
     FastAPI,
     File,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -34,6 +36,26 @@ from sqlalchemy import delete, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 logger = get_logger("API")  # App logger; avoid uvicorn.access formatter expectations
+
+
+# ---------------------------------------------------------------------------
+# KB dependency
+# ---------------------------------------------------------------------------
+
+
+def get_kb(
+    kb: str = Query(default="default", description="Knowledge base name or slug")
+) -> KBContext:
+    """FastAPI dependency: resolve the requested KB from the registry.
+
+    Pass ``?kb=<name>`` in the query string.  Omitting the parameter selects
+    the default knowledge base, which is backward-compatible with all existing
+    clients.
+    """
+    ctx = kb_registry.get_kb_by_name(kb)
+    if ctx is None:
+        raise HTTPException(status_code=404, detail=f"Knowledge base '{kb}' not found")
+    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -175,9 +197,9 @@ async def root():
 
 
 @app.get("/health")
-async def health_check():
+async def health_check(kb: KBContext = Depends(get_kb)):
     """Health-check endpoint confirming the API is running."""
-    connected = graph_service.verify_connection()
+    connected = kb.graph.verify_connection()
     return {"status": "healthy", "graph": "connected" if connected else "unavailable"}
 
 
@@ -188,19 +210,19 @@ class ChatInput(BaseModel):
 
 
 @app.post("/api/v1/chat")
-async def chat(body: ChatInput):
+async def chat(body: ChatInput, kb: KBContext = Depends(get_kb)):
     """
     Chat with your Brain: Vector Search -> Rerank -> Synthesis.
     """
-    return await chat_workflow.chat(body.query)
+    return await kb.get_chat_workflow().chat(body.query)
 
 
 @app.get("/api/v1/graph/summary")
-async def get_graph_summary():
+async def get_graph_summary(kb: KBContext = Depends(get_kb)):
     """
     Fetch top themes and nodes for the sidebar.
     """
-    rows = graph_service.execute_query("""
+    rows = kb.graph.execute_query("""
         MATCH (n:Node)
         WHERE n.kind IN ['indexable', 'note'] AND n.name IS NOT NULL
         RETURN n.id AS node_id, n.name AS name, n.type AS type
@@ -210,49 +232,49 @@ async def get_graph_summary():
 
 
 @app.get("/api/v1/graph/visualization")
-async def get_graph_visualization():
+async def get_graph_visualization(kb: KBContext = Depends(get_kb)):
     """
     Fetch nodes and edges for 2D Force Graph.
     """
-    return graph_service.get_full_graph()
+    return kb.graph.get_full_graph()
 
 
 @app.get("/api/v1/graph/3d/overview")
-async def graph_3d_overview():
+async def graph_3d_overview(kb: KBContext = Depends(get_kb)):
     """
     Return all community nodes with pre-computed 3D positions.
     Used by the exploration view to render the LOD overview (community spheres only).
     Individual member nodes are fetched lazily via /community/{id}.
     """
-    return graph_service.get_3d_overview()
+    return kb.graph.get_3d_overview()
 
 
 @app.get("/api/v1/graph/3d/community/{community_id}")
-async def graph_3d_community(community_id: str):
+async def graph_3d_community(community_id: str, kb: KBContext = Depends(get_kb)):
     """
     Return member nodes and intra-community edges for one community.
     Called by the frontend when the camera flies into a community's radius.
     """
-    return graph_service.get_community_members(community_id)
+    return kb.graph.get_community_members(community_id)
 
 
 @app.get("/api/v1/graph/3d/full")
-async def graph_3d_full():
+async def graph_3d_full(kb: KBContext = Depends(get_kb)):
     """
     Return ALL nodes and ALL edges for the flat spring-layout 3D graph.
     Every Indexable + Community node with pre-computed positions is included.
     Used by the new flat renderer that shows everything at once.
     """
-    return graph_service.get_full_3d_graph()
+    return kb.graph.get_full_3d_graph()
 
 
 @app.get("/api/v1/graph/3d/node/{node_id}")
-async def graph_3d_node_detail(node_id: str):
+async def graph_3d_node_detail(node_id: str, kb: KBContext = Depends(get_kb)):
     """
     Return full detail for a single Indexable node (description, facts, status).
     Called on-demand when the user clicks a card in the 3D graph.
     """
-    detail = graph_service.get_node_detail(node_id)
+    detail = kb.graph.get_node_detail(node_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Node not found")
     return detail
@@ -265,6 +287,7 @@ async def graph_3d_node_detail(node_id: str):
 async def create_note(
     note_input: CreateNoteInput,
     db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
 ):
     """
     Create a new note in Postgres WITHOUT ingestion.
@@ -282,6 +305,7 @@ async def create_note(
         content=note_input.content,
         created_at=c_at,
         processed=False,
+        kb_id=kb.kb_id,
     )
     db.add(new_note)
     await db.commit()
@@ -295,6 +319,7 @@ async def ingest_existing_note(
     note_id: str,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
 ):
     """
     Trigger ingestion for an existing note.
@@ -318,7 +343,9 @@ async def ingest_existing_note(
         created_at=note.created_at.isoformat() if note.created_at else None,
     )
 
-    background_tasks.add_task(ingestion_workflow.process_note, note_data, note_id)
+    background_tasks.add_task(
+        kb.get_ingestion_workflow().process_note, note_data, note_id
+    )
 
     return {
         "note_id": note_id,
@@ -332,6 +359,7 @@ async def ingest_note(
     note_data: NoteInput,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
 ):
     """
     Create and ingest a new note (legacy combined endpoint for batch scripts).
@@ -353,7 +381,9 @@ async def ingest_note(
     if not note_data.skip_ingestion:
         if note_data.created_at is None:
             note_data.created_at = c_at.isoformat()
-        background_tasks.add_task(ingestion_workflow.process_note, note_data, note_id)
+        background_tasks.add_task(
+            kb.get_ingestion_workflow().process_note, note_data, note_id
+        )
         status = "processing_started"
     else:
         status = "saved_without_ingestion"
@@ -373,14 +403,15 @@ async def get_notes(
     processed: bool | None = None,
     failed: bool | None = None,
     db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
 ):
     """
-    Get all notes sorted by creation date (newest first).
+    Get notes for the active KB, sorted by creation date (newest first).
     Optionally filter by processed/failed status.
     """
     base_query = select(Note)
 
-    filters = []
+    filters = [Note.kb_id == kb.kb_id]
     if search:
         term = f"%{search}%"
         filters.append((Note.title.ilike(term)) | (Note.content.ilike(term)))
@@ -391,9 +422,7 @@ async def get_notes(
     if failed is not None:
         filters.append(Note.failed == failed)
 
-    if filters:
-        base_query = base_query.where(*filters)
-
+    base_query = base_query.where(*filters)
     query = base_query.order_by(Note.created_at.desc())
     result = await db.execute(query)
     notes = result.scalars().all()
@@ -479,14 +508,16 @@ async def update_note(
 
 
 @app.delete("/api/v1/notes/{note_id}")
-async def delete_note(note_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_note(
+    note_id: str, db: AsyncSession = Depends(get_db), kb: KBContext = Depends(get_kb)
+):
     """
     Delete a note from Postgres and the graph.
     """
     await db.execute(delete(Note).where(Note.id == note_id))
     await db.commit()
 
-    graph_service.execute_query(
+    kb.graph.execute_query(
         "MATCH (n:Node {id: $id}) WHERE n.kind = 'note' DETACH DELETE n",
         {"id": note_id},
     )
@@ -498,15 +529,94 @@ async def delete_note(note_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/v1/admin/rebuild-communities")
-async def rebuild_communities(background_tasks: BackgroundTasks):
+async def rebuild_communities(
+    background_tasks: BackgroundTasks, kb: KBContext = Depends(get_kb)
+):
     """
     Trigger a full Leiden community detection pass in the background.
 
     Useful when community detection was cancelled or never ran after ingestion.
     The job runs asynchronously; poll the server logs for progress.
     """
-    background_tasks.add_task(ingestion_workflow.rebuild_leiden_communities)
+    background_tasks.add_task(kb.get_ingestion_workflow().rebuild_leiden_communities)
     return {
         "status": "started",
         "message": "Leiden community recompute triggered. Check server logs for progress.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Knowledge-base management
+# ---------------------------------------------------------------------------
+
+
+class CreateKBInput(BaseModel):
+    """Request body for creating a new knowledge base."""
+
+    name: str
+
+
+class RenameKBInput(BaseModel):
+    """Request body for renaming a knowledge base."""
+
+    name: str
+
+
+@app.get("/api/v1/kb")
+async def list_knowledge_bases():
+    """List all registered knowledge bases."""
+    return {"knowledge_bases": kb_registry.list_kbs()}
+
+
+@app.post("/api/v1/kb", status_code=201)
+async def create_knowledge_base(body: CreateKBInput):
+    """Create a new knowledge base.
+
+    Provision separate Kuzu, Qdrant, and Typesense stores for the new KB.
+    The KB is immediately available for ingestion and retrieval via ``?kb=<name>``.
+    """
+    if not body.name or not body.name.strip():
+        raise HTTPException(
+            status_code=400, detail="Knowledge base name must not be empty"
+        )
+    ctx = kb_registry.create_kb(body.name.strip())
+    return {
+        "id": ctx.kb_id,
+        "name": ctx.name,
+        "message": f"Knowledge base '{ctx.name}' created. Use ?kb={ctx.name} to target it.",
+    }
+
+
+@app.delete("/api/v1/kb/{kb_id}", status_code=204)
+async def delete_knowledge_base(kb_id: str):
+    """Delete a knowledge base and all its associated data.
+
+    This permanently drops the Kuzu directory, Qdrant collections, and Typesense
+    collection for the specified KB. The default KB cannot be deleted.
+    """
+    if kb_id == "default":
+        raise HTTPException(
+            status_code=400, detail="The default knowledge base cannot be deleted"
+        )
+    deleted = kb_registry.delete_kb(kb_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail=f"Knowledge base '{kb_id}' not found"
+        )
+
+
+@app.patch("/api/v1/kb/{kb_id}")
+async def rename_knowledge_base(kb_id: str, body: RenameKBInput):
+    """Rename a knowledge base. The slug and UUID are unchanged; only the display name is updated."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name must not be empty")
+    try:
+        success = kb_registry.rename_kb(kb_id, name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not success:
+        raise HTTPException(
+            status_code=404, detail=f"Knowledge base '{kb_id}' not found"
+        )
+    return {"id": kb_id, "name": name}

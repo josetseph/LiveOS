@@ -10,6 +10,7 @@ import React, {
 } from "react";
 import dynamic from "next/dynamic";
 import { api } from "@/lib/api";
+import { useKB } from "@/lib/kb-context";
 import type { KnowledgeNode } from "@/components/graph3d/types";
 import { nodeColor } from "@/components/graph3d/nodeColors";
 import * as THREE from "three";
@@ -84,9 +85,11 @@ class ErrorBoundary extends Component<
 function NodeDetailModal({
   node,
   onClose,
+  kb,
 }: {
   node: KnowledgeNode;
   onClose: () => void;
+  kb: string;
 }) {
   const color = nodeColor(node.node_type);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -98,7 +101,7 @@ function NodeDetailModal({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setFetching(true);
     api
-      .getNodeDetail(node.node_id)
+      .getNodeDetail(node.node_id, kb)
       .then((d) => {
         if (!cancelled) setDetail({ ...node, ...d });
       })
@@ -355,6 +358,7 @@ function HUD({
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Graph3DPage() {
+  const { currentKB } = useKB();
   const [graphData, setGraphData] = useState<{
     nodes: object[];
     links: object[];
@@ -653,7 +657,7 @@ export default function Graph3DPage() {
   // Fetch and adapt data: nodes need `id` field, edges become `links`
   useEffect(() => {
     api
-      .getGraph3DFull()
+      .getGraph3DFull(currentKB)
       .then(({ nodes, edges }) => {
         const nodeIdSet = new Set(nodes.map((n) => n.node_id));
         setGraphData({
@@ -1169,6 +1173,7 @@ export default function Graph3DPage() {
         <NodeDetailModal
           node={selectedNode}
           onClose={() => setSelectedNode(null)}
+          kb={currentKB}
         />
       )}
     </div>

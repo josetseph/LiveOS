@@ -33,6 +33,7 @@ Cypher translation notes
 - Dynamic :REL_TYPE         -> :SEMANTIC_REL with r.rel_type = $rel_type
 - n =~ 'pattern'            -> regexp_matches(n, 'pattern')
 """
+
 # pylint: disable=too-many-lines,import-outside-toplevel
 
 import re
@@ -42,7 +43,7 @@ from pathlib import Path
 import kuzu
 from app.core.config import REPO_ROOT, settings
 from app.core.log import get_logger
-from app.services.qdrant_service import qdrant_service
+from app.services.qdrant_service import QdrantService, qdrant_service
 
 logger = get_logger("GraphService")
 
@@ -108,14 +109,16 @@ _SCHEMA_STMTS = [
 
 class GraphService:
     """Kuzu-backed graph database service managing nodes, relationships, and community membership."""
-    def __init__(self):
-        db_path = Path(settings.KUZU_DB_PATH).expanduser()
-        if not db_path.is_absolute():
-            db_path = REPO_ROOT / db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._migrate_legacy_db_path(db_path)
 
-        self.db = kuzu.Database(str(db_path))
+    def __init__(self, db_path: str | None = None, qdrant: QdrantService | None = None):
+        self._qdrant = qdrant or qdrant_service
+        _db_path = Path(db_path or settings.KUZU_DB_PATH).expanduser()
+        if not _db_path.is_absolute():
+            _db_path = REPO_ROOT / _db_path
+        _db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_db_path(_db_path)
+
+        self.db = kuzu.Database(str(_db_path))
         self.conn = kuzu.Connection(self.db)
         self._lock = threading.RLock()
         self._init_schema()
@@ -160,7 +163,7 @@ class GraphService:
 
     def resolve_node_id(self, name: str) -> str | None:
         """Resolve a node name to its stable node_id via Qdrant node_cores."""
-        return qdrant_service.find_node_id_by_name(name)
+        return self._qdrant.find_node_id_by_name(name)
 
     def verify_connection(self) -> bool:
         """Verify the Kuzu connection by running a lightweight test query."""
@@ -268,7 +271,7 @@ class GraphService:
         node_ids = [
             nid
             for n in node_names
-            if (nid := qdrant_service.find_node_id_by_name(n.lower().strip()))
+            if (nid := self._qdrant.find_node_id_by_name(n.lower().strip()))
         ]
         if len(node_ids) < 2:
             return []
@@ -332,7 +335,7 @@ class GraphService:
         self.execute_query(
             "MATCH (c:Node) WHERE c.kind = 'community' DETACH DELETE c", {}
         )
-        qdrant_service.delete_community_relationships()
+        self._qdrant.delete_community_relationships()
         return community_ids
 
     def set_node_community_membership(
@@ -394,7 +397,7 @@ class GraphService:
         try:
             summary_text = summary or name or community_id
             summary_vector = _emb.embed_documents([summary_text])[0]
-            qdrant_service.upsert_node_core(
+            self._qdrant.upsert_node_core(
                 node_id=community_id,
                 name=name,
                 node_type="community",
@@ -420,7 +423,7 @@ class GraphService:
         row = dict(rows[0])
 
         try:
-            content = qdrant_service.get_node_content_by_id(node_id)
+            content = self._qdrant.get_node_content_by_id(node_id)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(
                 f"[Graph] get_node_storage_payload Qdrant fetch failed for {node_id}: {exc}"
@@ -428,7 +431,7 @@ class GraphService:
             content = None
 
         try:
-            rels = qdrant_service.get_relationships_for_node_ids([node_id])
+            rels = self._qdrant.get_relationships_for_node_ids([node_id])
             relationship_natural_language = [
                 r["natural_language"] for r in rels if r.get("natural_language")
             ]
@@ -457,7 +460,7 @@ class GraphService:
         if not normalized_names:
             return []
 
-        name_to_id = qdrant_service.find_node_ids_by_names(normalized_names)
+        name_to_id = self._qdrant.find_node_ids_by_names(normalized_names)
         id_to_name = {nid: name for name, nid in name_to_id.items() if nid and name}
         if not id_to_name:
             return []
@@ -527,7 +530,7 @@ class GraphService:
 
         node_ids = [row["node_id"] for row in nodes_data if row.get("node_id")]
         content_map = (
-            qdrant_service.get_nodes_content_by_ids(node_ids) if node_ids else {}
+            self._qdrant.get_nodes_content_by_ids(node_ids) if node_ids else {}
         )
 
         nodes = []
@@ -1292,7 +1295,7 @@ class GraphService:
 
         community_ids = [r["community_id"] for r in rows if r.get("community_id")]
         content_map = (
-            qdrant_service.get_nodes_content_by_ids(community_ids)
+            self._qdrant.get_nodes_content_by_ids(community_ids)
             if community_ids
             else {}
         )
@@ -1342,7 +1345,7 @@ class GraphService:
         )
         orphan_ids = [r["node_id"] for r in orphan_rows if r.get("node_id")]
         orphan_content = (
-            qdrant_service.get_nodes_content_by_ids(orphan_ids) if orphan_ids else {}
+            self._qdrant.get_nodes_content_by_ids(orphan_ids) if orphan_ids else {}
         )
 
         from app.utils.graph_layout import (
@@ -1402,7 +1405,9 @@ class GraphService:
             "orphan_edges": orphan_edges,
         }
 
-    def get_community_members(self, community_id: str) -> dict:  # pylint: disable=too-many-locals
+    def get_community_members(
+        self, community_id: str
+    ) -> dict:  # pylint: disable=too-many-locals
         """Return nodes and edges belonging to a single community for focused 3-D display."""
         node_rows = self.execute_query(
             """
@@ -1438,7 +1443,7 @@ class GraphService:
 
         node_ids = [row["node_id"] for row in node_rows if row.get("node_id")]
         content_map = (
-            qdrant_service.get_nodes_content_by_ids(node_ids) if node_ids else {}
+            self._qdrant.get_nodes_content_by_ids(node_ids) if node_ids else {}
         )
 
         cluster_radius = CLUSTER_RADIUS_BASE * _math.sqrt(max(len(node_ids), 1))
@@ -1511,7 +1516,7 @@ class GraphService:
         if not nid:
             return None
 
-        content_map = qdrant_service.get_nodes_content_by_ids([nid])
+        content_map = self._qdrant.get_nodes_content_by_ids([nid])
         c = content_map.get(nid, {})
 
         return {

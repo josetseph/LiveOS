@@ -6,7 +6,7 @@ import time
 from app.core.database import AsyncSessionLocal
 from app.core.log import get_logger
 from app.models.note import Note
-from app.services.retrieval import retrieval_service
+from app.services.retrieval import RetrievalService, retrieval_service
 from sqlalchemy import select
 
 logger = get_logger("ChatWorkflow")
@@ -24,6 +24,9 @@ def _doc_passage(doc: dict) -> str:
 class ChatWorkflow:  # pylint: disable=too-few-public-methods
     """Iterative research-loop workflow: retrieve, synthesise, and attribute sources per turn."""
 
+    def __init__(self, retrieval: RetrievalService | None = None) -> None:
+        self._retrieval = retrieval or retrieval_service
+
     async def chat(self, user_query: str) -> dict:
         """
         Research-style retrieval loop:
@@ -38,7 +41,7 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
 
         # ── Research loop retrieval ──────────────────────────────────────────
         t0 = time.perf_counter()
-        final_answer, all_docs = await retrieval_service.retrieve_with_self_correction(
+        final_answer, all_docs = await self._retrieval.retrieve_with_self_correction(
             user_query, top_k=50, max_hops=10, filter_docs=False
         )
         logger.info(

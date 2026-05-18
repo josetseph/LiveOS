@@ -18,6 +18,7 @@ A personal knowledge graph and multi-hop question-answering system. Notes — in
 10. [Local Model Setup](#local-model-setup)
 11. [Environment Variables](#environment-variables)
 12. [Running the Stack](#running-the-stack)
+13. [Knowledge Bases](#knowledge-bases)
 
 ---
 
@@ -31,6 +32,7 @@ LiveOS Brain is a personal AI knowledge base. You write notes — plain text, vo
 4. **Detects communities** of related entities using the Leiden algorithm
 5. **Indexes** everything into a vector store (Qdrant), a full-text search engine (Typesense), and a graph database (Kuzu)
 6. **Answers questions** conversationally via an iterative retrieval loop that walks the graph, accumulates findings across hops, and synthesises a final answer
+7. **Isolates knowledge** into multiple named knowledge bases — each with its own graph, vector store, and full-text index
 
 The system is designed to run entirely locally. All LLM inference, embedding, and reranking can run on local hardware via Ollama or LM Studio. Cloud LLM providers (Gemini, OpenAI, Anthropic, HuggingFace) are also supported and switchable via environment variables.
 
@@ -78,6 +80,7 @@ The system is designed to run entirely locally. All LLM inference, embedding, an
 | Embedding | `qwen3-embedding:0.6b` (local) | 1024-dim; requires Qwen3 instruction prefix for queries |
 | Reranker | `qwen3-reranker-0.6b` (local) | Cross-encoder; filters top-10 candidates before LLM context window |
 | LLM | Configurable | Ollama, LM Studio, Gemini, OpenAI, Anthropic, or HuggingFace |
+| Multi-KB | `KBRegistry` (JSON-persisted) | Each KB has its own Kuzu graph, Qdrant collections, and Typesense collection; notes are isolated per KB in Postgres |
 
 ---
 
@@ -209,6 +212,7 @@ Built with Next.js 15 (App Router) and Tailwind CSS. Three main views:
 | `/chat` | Conversational interface — markdown rendering, file previews, thumbs up/down feedback, source citations |
 | `/graph` | 2D force-directed graph visualisation of the knowledge graph |
 | `/graph-3d` | 3D graph visualisation |
+| `/kb` | Knowledge base manager — create, rename, switch, and delete knowledge bases |
 
 The notes editor supports:
 - Plain text with Markdown preview
@@ -357,11 +361,12 @@ Run database migrations:
 alembic upgrade head
 ```
 
-Initialise Qdrant collections and Typesense schema:
+Initialise Qdrant collections, Typesense schema, and the graph store:
 
 ```sh
-python scripts/init_qdrant.py
-python scripts/init_typesense.py
+python scripts/init_vectors.py
+python scripts/init_index.py
+python scripts/init_graph.py
 ```
 
 Start the API server:
@@ -462,7 +467,7 @@ source venv/bin/activate
 python scripts/reset_all.py
 ```
 
-Individual reset scripts exist for each store: `reset_qdrant.py`, `reset_typesense.py`, `reset_kuzu.py`, `reset_postgres.py`, `reset_minio.py`, `reset_ingestion.py`.
+Individual reset scripts exist for each store: `reset_vectors.py`, `reset_index.py`, `reset_graph.py`, `reset_database.py`, `reset_storage.py`, `reset_ingestion.py`.
 
 ### Benchmark evaluation
 
@@ -473,3 +478,34 @@ python tests/benchmark/evaluate.py
 ```
 
 Results are written to `Results/` as JSON + Markdown reports.
+
+---
+
+## Knowledge Bases
+
+LiveOS supports multiple isolated knowledge bases. Each KB maintains its own:
+
+- **Kuzu graph** — separate database directory under `data/kuzu/<slug>/`
+- **Qdrant collections** — `<slug>_node_cores`, `<slug>_node_relationships`, `<slug>_node_isolated_contexts`
+- **Typesense collection** — `<slug>_nodes`
+- **Notes** — filtered by `kb_id` in PostgreSQL
+
+KBs are managed by `KBRegistry` (`backend/app/services/kb_registry.py`), a JSON-persisted singleton at `data/kb_registry.json`. The `default` KB always exists and cannot be deleted or renamed — it maps to the original single-KB configuration.
+
+The active KB is selected via a `?kb=<slug>` query parameter on all API endpoints. The frontend stores the active KB in `localStorage` and displays its name in the sidebar. All routes — notes, chat, graph — are automatically scoped to the active KB.
+
+To manage knowledge bases, open `/kb` in the frontend or use the API:
+
+```sh
+# List all KBs
+GET /api/v1/kb
+
+# Create a KB
+POST /api/v1/kb          { "name": "Work" }
+
+# Rename a KB
+PATCH /api/v1/kb/{id}    { "name": "New Name" }
+
+# Delete a KB (drops all data)
+DELETE /api/v1/kb/{id}
+```

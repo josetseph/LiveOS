@@ -22,12 +22,14 @@ import remarkGfm from "remark-gfm";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ShaderBackground } from "@/components/shader-background";
+import { useKB } from "@/lib/kb-context";
 import type { Note, FilePreview } from "@/lib/types";
 
 
 type ProcessedFilter = "all" | "ingested" | "ingesting" | "saved" | "failed";
 
 export default function NotesPage() {
+  const { currentKB, currentKBName } = useKB();
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedNote, setSelectedNote] = useState<Note | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -148,7 +150,7 @@ export default function NotesPage() {
         failed = false;
       }
       // "all" → no filters
-      const data = await api.getNotes(search, processed, failed);
+      const data = await api.getNotes(search, processed, failed, currentKB);
       setNotes(data);
     } catch (error) {
       console.error("Error fetching notes:", error);
@@ -177,7 +179,7 @@ export default function NotesPage() {
 
     try {
       // Create note immediately in database (with processed=False)
-      const newNote = await api.createNote("", new Date().toISOString());
+      const newNote = await api.createNote("", new Date().toISOString(), currentKB);
 
       // Refresh notes list and select the new note
       await fetchNotes(searchQuery, processedFilter);
@@ -198,7 +200,7 @@ export default function NotesPage() {
 
     try {
       setIsSaving(true);
-      await api.ingestNote(selectedNote.id);
+      await api.ingestNote(selectedNote.id, currentKB);
       // Track as in-flight — polling will update state when done
       setIngestingNoteIds((prev) => new Set([...prev, selectedNote.id]));
       // Optimistically clear any previous failure flag
@@ -279,7 +281,7 @@ export default function NotesPage() {
     if (!confirmDelete) return;
 
     try {
-      await api.deleteNote(selectedNote.id);
+      await api.deleteNote(selectedNote.id, currentKB);
       setSelectedNote(null);
       await fetchNotes(searchQuery, processedFilter);
     } catch (error) {
@@ -483,7 +485,14 @@ export default function NotesPage() {
       <div className="relative z-10 flex w-80 flex-col border-r border-white/10 bg-black/50 backdrop-blur-xl">
         <div className="border-b border-white/10 p-4">
           <div className="mb-4 flex items-center justify-between">
-            <h1 className="text-xl font-bold text-white">Notes</h1>
+            <div>
+              <h1 className="text-xl font-bold text-white">Notes</h1>
+              {currentKB !== "default" && (
+                <p className="text-[10px] text-purple-400 font-medium mt-0.5">
+                  KB: {currentKBName}
+                </p>
+              )}
+            </div>
             <button
               onClick={handleCreateNote}
               disabled={isSaving}

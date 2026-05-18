@@ -4,6 +4,7 @@ import "./globals.css";
 import { Sidebar } from "@/components/sidebar";
 import { CustomCursor } from "@/components/custom-cursor";
 import { GrainOverlay } from "@/components/grain-overlay";
+import { KBProvider } from "@/lib/kb-context";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -45,10 +46,12 @@ export default function RootLayout({
         <link rel="apple-touch-icon" href="/logo-black-background.png" />
       </head>
       <body className={`${inter.variable} font-sans antialiased`}>
-        <CustomCursor />
-        <GrainOverlay />
-        <Sidebar />
-        <main className="ml-20 min-h-screen">{children}</main>
+        <KBProvider>
+          <CustomCursor />
+          <GrainOverlay />
+          <Sidebar />
+          <main className="ml-20 min-h-screen">{children}</main>
+        </KBProvider>
       </body>
     </html>
   );

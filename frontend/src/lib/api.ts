@@ -1,7 +1,12 @@
 import axios from "axios";
-import type { NoteStatus } from "@/lib/types";
+import type { KnowledgeBase, NoteStatus } from "@/lib/types";
 
 const API_BASE_URL = "http://localhost:8000/api/v1";
+
+/** Append ?kb=<name> when targeting a non-default knowledge base. */
+function kbParam(kb: string): string {
+  return kb && kb !== "default" ? `?kb=${encodeURIComponent(kb)}` : "";
+}
 
 /** Thin wrappers so each method is one line instead of three. */
 const http = {
@@ -11,14 +16,20 @@ const http = {
     axios.post(`${API_BASE_URL}${path}`, data).then((r) => r.data),
   put: (path: string, data?: unknown) =>
     axios.put(`${API_BASE_URL}${path}`, data).then((r) => r.data),
+  patch: (path: string, data?: unknown) =>
+    axios.patch(`${API_BASE_URL}${path}`, data).then((r) => r.data),
   del: (path: string) =>
     axios.delete(`${API_BASE_URL}${path}`).then((r) => r.data),
 };
 
 export const api = {
-  async chat(query: string) {
-    return http.post("/chat", { query });
+  // ── Chat ────────────────────────────────────────────────────────────────
+
+  async chat(query: string, kb = "default") {
+    return http.post(`/chat${kbParam(kb)}`, { query });
   },
+
+  // ── File storage ─────────────────────────────────────────────────────────
 
   async upload(file: File) {
     const formData = new FormData();
@@ -29,28 +40,26 @@ export const api = {
     return response.data;
   },
 
+  async deleteFile(fileKey: string) {
+    return http.del(`/files/${encodeURIComponent(fileKey)}`);
+  },
+
+  // ── Notes (Postgres — not KB-scoped except ingest/delete) ───────────────
+
   async ingest(data: {
     content: string;
     created_at?: string;
     skip_ingestion?: boolean;
-  }) {
-    return http.post("/ingest", data);
+  }, kb = "default") {
+    return http.post(`/ingest${kbParam(kb)}`, data);
   },
 
-  async getSummary() {
-    return http.get("/graph/summary");
-  },
-
-  async getGraphData() {
-    return http.get("/graph/visualization");
-  },
-
-  async getNotes(search?: string, processed?: boolean, failed?: boolean) {
+  async getNotes(search?: string, processed?: boolean, failed?: boolean, kb = "default") {
     const params: Record<string, unknown> = {};
     if (search) params.search = search;
     if (processed !== undefined) params.processed = processed;
     if (failed !== undefined) params.failed = failed;
-    return http.get("/notes", params);
+    return http.get(`/notes${kbParam(kb)}`, params);
   },
 
   async getNote(id: string) {
@@ -61,25 +70,35 @@ export const api = {
     return http.get(`/notes/${id}/status`);
   },
 
-  async createNote(content: string, created_at?: string) {
-    return http.post("/notes", { content, created_at });
+  async createNote(content: string, created_at?: string, kb = "default") {
+    return http.post(`/notes${kbParam(kb)}`, { content, created_at });
   },
 
   async updateNote(id: string, content: string, created_at?: string) {
     return http.put(`/notes/${id}`, { content, created_at });
   },
 
-  async ingestNote(id: string) {
-    return http.post(`/notes/${id}/ingest`);
+  /** Ingest an existing note into the given KB (default KB if omitted). */
+  async ingestNote(id: string, kb = "default") {
+    return http.post(`/notes/${id}/ingest${kbParam(kb)}`);
   },
 
-  async deleteNote(id: string) {
-    return http.del(`/notes/${id}`);
+  /** Delete note from Postgres and from the given KB's graph. */
+  async deleteNote(id: string, kb = "default") {
+    return http.del(`/notes/${id}${kbParam(kb)}`);
   },
 
-  async deleteFile(fileKey: string) {
-    return http.del(`/files/${encodeURIComponent(fileKey)}`);
+  // ── Graph summary ─────────────────────────────────────────────────────────
+
+  async getSummary(kb = "default") {
+    return http.get(`/graph/summary${kbParam(kb)}`);
   },
+
+  async getGraphData(kb = "default") {
+    return http.get(`/graph/visualization${kbParam(kb)}`);
+  },
+
+  // ── Feedback ──────────────────────────────────────────────────────────────
 
   async submitFeedback(payload: {
     query: string;
@@ -92,6 +111,8 @@ export const api = {
     return http.post("/feedback", payload);
   },
 
+  // ── Health ───────────────────────────────────────────────────────────────
+
   async getHealth() {
     const response = await axios.get("http://localhost:8000/health");
     return response.data;
@@ -99,7 +120,7 @@ export const api = {
 
   // ── 3D Exploration graph ──────────────────────────────────────────────────
 
-  async getGraph3DOverview(): Promise<{
+  async getGraph3DOverview(kb = "default"): Promise<{
     communities: Array<{
       community_id: string;
       name: string;
@@ -127,10 +148,10 @@ export const api = {
       type: string;
     }>;
   }> {
-    return http.get("/graph/3d/overview");
+    return http.get(`/graph/3d/overview${kbParam(kb)}`);
   },
 
-  async getGraph3DCommunity(communityId: string): Promise<{
+  async getGraph3DCommunity(communityId: string, kb = "default"): Promise<{
     nodes: Array<{
       node_id: string;
       name: string;
@@ -151,10 +172,10 @@ export const api = {
       natural_language: string;
     }>;
   }> {
-    return http.get(`/graph/3d/community/${communityId}`);
+    return http.get(`/graph/3d/community/${communityId}${kbParam(kb)}`);
   },
 
-  async getGraph3DFull(): Promise<{
+  async getGraph3DFull(kb = "default"): Promise<{
     nodes: Array<{
       node_id: string;
       name: string;
@@ -172,10 +193,10 @@ export const api = {
       type: string;
     }>;
   }> {
-    return http.get("/graph/3d/full");
+    return http.get(`/graph/3d/full${kbParam(kb)}`);
   },
 
-  async getNodeDetail(nodeId: string): Promise<{
+  async getNodeDetail(nodeId: string, kb = "default"): Promise<{
     node_id: string;
     name: string;
     node_type: string;
@@ -186,6 +207,24 @@ export const api = {
     status?: string;
     community_id?: string;
   }> {
-    return http.get(`/graph/3d/node/${nodeId}`);
+    return http.get(`/graph/3d/node/${nodeId}${kbParam(kb)}`);
+  },
+
+  // ── Knowledge-base management ─────────────────────────────────────────────
+
+  async listKBs(): Promise<{ knowledge_bases: KnowledgeBase[] }> {
+    return http.get("/kb");
+  },
+
+  async createKB(name: string): Promise<{ id: string; name: string; message: string }> {
+    return http.post("/kb", { name });
+  },
+
+  async renameKB(id: string, name: string): Promise<{ id: string; name: string }> {
+    return http.patch(`/kb/${id}`, { name });
+  },
+
+  async deleteKB(id: string): Promise<void> {
+    return http.del(`/kb/${id}`);
   },
 };

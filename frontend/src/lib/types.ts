@@ -28,3 +28,14 @@ export type NoteStatus = {
     failed: boolean;
     status: string;
 };
+
+/** Knowledge base metadata returned by GET /api/v1/kb */
+export interface KnowledgeBase {
+    id: string;
+    name: string;
+    slug?: string;
+    kuzu_path?: string;
+    qdrant_col_cores?: string;
+    typesense_collection?: string;
+    created_at: string | null;
+}

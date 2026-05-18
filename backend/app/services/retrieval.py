@@ -1,4 +1,5 @@
 """Hybrid retrieval: vector search, graph traversal, keyword search, and cross-encoder reranking."""
+
 # pylint: disable=too-many-lines,import-outside-toplevel
 import logging
 import os
@@ -8,9 +9,9 @@ from typing import List
 
 from app.core.config import settings
 from app.core.log import get_logger
-from app.services.graph import graph_service
-from app.services.qdrant_service import qdrant_service
-from app.services.typesense_service import typesense_service
+from app.services.graph import GraphService, graph_service
+from app.services.qdrant_service import QdrantService, qdrant_service
+from app.services.typesense_service import TypesenseService, typesense_service
 
 # Suppress noisy tokenizer warnings
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
@@ -20,7 +21,16 @@ logger = get_logger("RetrievalService")
 
 class RetrievalService:
     """Orchestrates multi-stage retrieval: vector → keyword → graph expansion → reranking."""
-    def __init__(self):
+
+    def __init__(
+        self,
+        graph: GraphService | None = None,
+        qdrant: QdrantService | None = None,
+        typesense: TypesenseService | None = None,
+    ):
+        self._graph = graph or graph_service
+        self._qdrant = qdrant or qdrant_service
+        self._typesense = typesense or typesense_service
         self.models_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), f"../../{settings.MODELS_PATH}")
         )
@@ -864,7 +874,11 @@ class RetrievalService:
             merged.append(node)
         return merged
 
-    async def hybrid_search(self, query: str, top_k: int = 50) -> List[dict]:  # pylint: disable=too-many-nested-blocks,too-many-locals,too-many-branches,too-many-statements
+    async def hybrid_search(
+        self, query: str, top_k: int = 50
+    ) -> List[
+        dict
+    ]:  # pylint: disable=too-many-nested-blocks,too-many-locals,too-many-branches,too-many-statements
         """
         Entity-First Retrieval Pipeline:
 

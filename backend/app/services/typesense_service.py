@@ -1,4 +1,5 @@
 """Typesense keyword search service for fast BM25 node retrieval."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -24,9 +25,10 @@ _COLLECTION_SCHEMA = {
 
 class TypesenseService:
     """Typesense client managing the liveos_nodes collection for BM25 keyword search."""
-    def __init__(self) -> None:
+
+    def __init__(self, collection_name: str | None = None) -> None:
         self._enabled = True
-        self.collection = settings.TYPESENSE_COLLECTION_NAME
+        self.collection = collection_name or settings.TYPESENSE_COLLECTION_NAME
         try:
             self.client = typesense.Client(
                 {
@@ -53,7 +55,7 @@ class TypesenseService:
 
     def _ensure_collection(self) -> None:
         """Create the collection if it does not already exist."""
-        collection_name = settings.TYPESENSE_COLLECTION_NAME
+        collection_name = self.collection
         try:
             self.client.collections[collection_name].retrieve()
         except Exception:  # pylint: disable=broad-exception-caught
@@ -70,7 +72,7 @@ class TypesenseService:
         if not self._enabled or not self.client:
             return False
         try:
-            self.client.collections[settings.TYPESENSE_COLLECTION_NAME].retrieve()
+            self.client.collections[self.collection].retrieve()
             return True
         except Exception:  # pylint: disable=broad-exception-caught
             return False
@@ -81,14 +83,11 @@ class TypesenseService:
             return []
 
         try:
-            response = self.client.collections[
-                settings.TYPESENSE_COLLECTION_NAME
-            ].documents.search(
+            response = self.client.collections[self.collection].documents.search(
                 {
                     "q": query,
                     "query_by": (
-                        "name,type,isolated_contexts,"
-                        "relationship_natural_language"
+                        "name,type,isolated_contexts," "relationship_natural_language"
                     ),
                     "query_by_weights": "3,2,1,1",
                     "per_page": limit,
@@ -134,9 +133,7 @@ class TypesenseService:
         if community_level is not None:
             doc["community_level"] = community_level
         try:
-            self.client.collections[
-                settings.TYPESENSE_COLLECTION_NAME
-            ].documents.upsert(doc)
+            self.client.collections[self.collection].documents.upsert(doc)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(f"Typesense index_node failed for {node_id}: {exc}")
 
@@ -167,14 +164,10 @@ class TypesenseService:
                 # document is valid even when it doesn't already exist in the index.
                 doc["name"] = name
                 doc["node_id"] = node_id
-                self.client.collections[
-                    settings.TYPESENSE_COLLECTION_NAME
-                ].documents.upsert(doc)
+                self.client.collections[self.collection].documents.upsert(doc)
             else:
                 # Partial PATCH — only works when the doc already has all required fields.
-                self.client.collections[settings.TYPESENSE_COLLECTION_NAME].documents[
-                    node_id
-                ].update(doc)
+                self.client.collections[self.collection].documents[node_id].update(doc)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             _msg = str(exc).lower()
             # Match genuine HTTP 404 only — not field-level "not found in the document"
@@ -193,9 +186,7 @@ class TypesenseService:
         if not self.is_available():
             return
         try:
-            self.client.collections[settings.TYPESENSE_COLLECTION_NAME].documents[
-                node_id
-            ].delete()
+            self.client.collections[self.collection].documents[node_id].delete()
         except Exception as exc:  # pylint: disable=broad-exception-caught
             if "404" in str(exc) or "not found" in str(exc).lower():
                 return

@@ -11,12 +11,12 @@ from collections import defaultdict
 from app.core.config import settings
 from app.core.log import get_logger
 from app.schemas.extraction import Extraction, NoteInput
-from app.services.graph import graph_service
+from app.services.graph import GraphService, graph_service
 from app.services.embedding import embedding_service
 from app.services.ingestion_tracker import ingestion_tracker as _tracker
 from app.services.llm import llm_service
-from app.services.qdrant_service import qdrant_service
-from app.services.typesense_service import typesense_service
+from app.services.qdrant_service import QdrantService, qdrant_service
+from app.services.typesense_service import TypesenseService, typesense_service
 from app.workflows.agents.ingestion_agent import ingestion_agent
 
 # Hard cap on concurrent ingestion pipelines.
@@ -92,6 +92,16 @@ entity_lock_manager = EntityLockManager()
 
 class IngestionWorkflow:
     """Orchestrates full ingestion: multimedia → LLM extraction → graph → embeddings → communities."""
+
+    def __init__(
+        self,
+        graph: GraphService | None = None,
+        qdrant: QdrantService | None = None,
+        typesense: TypesenseService | None = None,
+    ):
+        self._graph = graph or graph_service
+        self._qdrant = qdrant or qdrant_service
+        self._typesense = typesense or typesense_service
 
     async def process_note(self, note_input: NoteInput, note_id: str = None):
         """Run the full ingestion pipeline for a single note."""
