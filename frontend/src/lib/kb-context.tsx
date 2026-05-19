@@ -21,6 +21,8 @@ interface KBContextValue {
     currentKB: string;
     /** Human-readable display name of the active KB. */
     currentKBName: string;
+    /** True once localStorage has been read on the client. Pages should wait for this before fetching. */
+    isHydrated: boolean;
     /** Switch to a KB by slug and display name. */
     setCurrentKB: (slug: string, displayName?: string) => void;
     /** Update only the display name (e.g. after a rename). */
@@ -30,6 +32,7 @@ interface KBContextValue {
 const KBContext = createContext<KBContextValue>({
     currentKB: "default",
     currentKBName: "default",
+    isHydrated: false,
     setCurrentKB: () => { },
     setCurrentKBName: () => { },
 });
@@ -57,9 +60,11 @@ function writeStorage(kb: StoredKB) {
 
 export function KBProvider({ children }: { children: ReactNode }) {
     const [current, setCurrent] = useState<StoredKB>({ slug: "default", name: "default" });
+    const [isHydrated, setIsHydrated] = useState(false);
 
     useEffect(() => {
         setCurrent(readStorage());
+        setIsHydrated(true);
     }, []);
 
     const setCurrentKB = useCallback((slug: string, displayName?: string) => {
@@ -83,6 +88,7 @@ export function KBProvider({ children }: { children: ReactNode }) {
             value={{
                 currentKB: current.slug,
                 currentKBName: current.name,
+                isHydrated,
                 setCurrentKB,
                 setCurrentKBName,
             }}

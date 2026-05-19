@@ -230,6 +230,31 @@ class GraphService:
             """
         return self.execute_query(query, {"names": names_lower})
 
+    def find_nodes_by_exact_names(self, names: list[str]) -> dict[str, str]:
+        """Batch lookup of indexable nodes by exact lowercase name.
+
+        Returns a name→id mapping.  If multiple nodes share a name (stale
+        duplicates), the lexicographically smallest id is returned so the result
+        is deterministic.  The caller should treat any returned id as the
+        canonical one and avoid minting a fresh UUID.
+        """
+        if not names:
+            return {}
+        normalized = [n.lower().strip() for n in names if n and n.strip()]
+        if not normalized:
+            return {}
+        rows = self.execute_query(
+            "MATCH (n:Node) WHERE n.kind = 'indexable' AND toLower(n.name) IN $names "
+            "RETURN toLower(n.name) AS name, n.id AS id",
+            {"names": normalized},
+        )
+        name_to_id: dict[str, str] = {}
+        for row in sorted(rows, key=lambda r: r.get("id", "")):
+            nm = row.get("name")
+            if nm and nm not in name_to_id:
+                name_to_id[nm] = row["id"]
+        return name_to_id
+
     def find_name_variants(self, base_name: str, limit: int = 5) -> list[dict]:
         """Return name variants for a node using regexp case-insensitive prefix matching."""
         base_lower = base_name.lower().strip()

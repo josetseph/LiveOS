@@ -358,7 +358,7 @@ function HUD({
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Graph3DPage() {
-  const { currentKB } = useKB();
+  const { currentKB, isHydrated } = useKB();
   const [graphData, setGraphData] = useState<{
     nodes: object[];
     links: object[];
@@ -656,6 +656,7 @@ export default function Graph3DPage() {
 
   // Fetch and adapt data: nodes need `id` field, edges become `links`
   useEffect(() => {
+    if (!isHydrated) return;
     api
       .getGraph3DFull(currentKB)
       .then(({ nodes, edges }) => {
@@ -676,7 +677,7 @@ export default function Graph3DPage() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, []);
+  }, [currentKB, isHydrated]);
 
   // Install FPS camera controls once ForceGraph3D is mounted.
   // Poll every 100 ms until graphRef.current exposes camera() + renderer(),

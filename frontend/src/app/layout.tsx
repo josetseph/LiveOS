@@ -5,6 +5,7 @@ import { Sidebar } from "@/components/sidebar";
 import { CustomCursor } from "@/components/custom-cursor";
 import { GrainOverlay } from "@/components/grain-overlay";
 import { KBProvider } from "@/lib/kb-context";
+import { SuppressThreeWarnings } from "@/components/suppress-three-warnings";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -47,6 +48,7 @@ export default function RootLayout({
       </head>
       <body className={`${inter.variable} font-sans antialiased`}>
         <KBProvider>
+          <SuppressThreeWarnings />
           <CustomCursor />
           <GrainOverlay />
           <Sidebar />

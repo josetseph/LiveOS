@@ -61,6 +61,20 @@ def reset_graph() -> None:
     if not deleted_any:
         print("   ℹ️  No Kuzu database files found in configured or legacy paths.")
 
+    # Wipe per-KB Kuzu directories (created by KBRegistry.create_kb at data/kuzu/<slug>).
+    kuzu_root = REPO_ROOT / "data" / "kuzu"
+    if kuzu_root.is_dir():
+        for child in sorted(kuzu_root.iterdir()):
+            key = str(child.resolve())
+            if key in seen:
+                continue  # already handled above
+            seen.add(key)
+            if child.is_dir():
+                shutil.rmtree(child)
+                print(f"   🗑️  Deleted per-KB Kuzu database at '{child}'.")
+            elif child.is_file():
+                child.unlink()
+
     print("✅ Kuzu reset complete. Schema will be recreated on next startup.")
 
 

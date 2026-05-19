@@ -322,8 +322,9 @@ async def ingest_existing_note(
     kb: KBContext = Depends(get_kb),
 ):
     """
-    Trigger ingestion for an existing note.
-    This will process the note in the background and set processed=True when complete.
+    Trigger (or re-trigger) ingestion for an existing note.
+    Always force-reingests — resets processed=False so the pipeline runs regardless
+    of prior ingestion status.
     """
     result = await db.execute(select(Note).where(Note.id == note_id))
     note = result.scalar_one_or_none()
@@ -331,12 +332,9 @@ async def ingest_existing_note(
     if not note:
         return {"error": "Note not found"}, 404
 
-    if note.processed:
-        return {
-            "note_id": note_id,
-            "status": "already_processed",
-            "message": "Note has already been ingested",
-        }
+    # Reset processed flag so the pipeline treats this as a fresh ingestion.
+    note.processed = False
+    await db.commit()
 
     note_data = NoteInput(
         content=note.content,
@@ -512,17 +510,56 @@ async def delete_note(
     note_id: str, db: AsyncSession = Depends(get_db), kb: KBContext = Depends(get_kb)
 ):
     """
-    Delete a note from Postgres and the graph.
+    Delete a note from Postgres, the graph, Qdrant, and Typesense.
+
+    Entity nodes that are referenced ONLY by this note are orphaned after the note
+    is removed, so they are deleted from all stores. Shared entities (referenced by
+    other notes) are left intact.
     """
+    # 1. Find entity node IDs linked exclusively to this note in the graph.
+    rows = kb.graph.execute_query(
+        """
+        MATCH (note:Node {id: $note_id, kind: 'note'})-[:REFERENCES]->(entity:Node)
+        WHERE entity.kind <> 'note'
+          AND NOT EXISTS {
+            MATCH (other:Node {kind: 'note'})-[:REFERENCES]->(entity)
+            WHERE other.id <> $note_id
+          }
+        RETURN entity.id AS entity_id
+        """,
+        {"note_id": note_id},
+    )
+    orphan_ids: list[str] = [r["entity_id"] for r in (rows or []) if r.get("entity_id")]
+
+    # 2. Delete the note row from Postgres.
     await db.execute(delete(Note).where(Note.id == note_id))
     await db.commit()
 
+    # 3. Remove the note node (and all its edges) from the graph.
     kb.graph.execute_query(
         "MATCH (n:Node {id: $id}) WHERE n.kind = 'note' DETACH DELETE n",
         {"id": note_id},
     )
 
-    return {"status": "deleted", "id": note_id}
+    # 4. Delete orphaned entity nodes from graph, Qdrant, and Typesense.
+    for entity_id in orphan_ids:
+        kb.graph.execute_query(
+            "MATCH (n:Node {id: $id}) DETACH DELETE n",
+            {"id": entity_id},
+        )
+        try:
+            kb.qdrant.delete_node(entity_id)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        try:
+            kb.typesense.delete_node(entity_id)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
+    logger.info(
+        f"[delete_note] Deleted note {note_id}; removed {len(orphan_ids)} orphaned entity nodes."
+    )
+    return {"status": "deleted", "id": note_id, "orphans_removed": len(orphan_ids)}
 
 
 # --- Admin ---

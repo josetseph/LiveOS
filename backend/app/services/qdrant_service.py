@@ -10,12 +10,14 @@ from app.core.config import settings
 from app.core.log import get_logger
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
+    Distance,
     FieldCondition,
     Filter,
     FilterSelector,
     MatchAny,
     MatchValue,
     PointStruct,
+    VectorParams,
 )
 
 logger = get_logger("QdrantService")
@@ -48,6 +50,27 @@ class QdrantService:
             self._enabled = False
             self.client = None
             logger.warning(f"Qdrant client init failed, disabling Qdrant path: {exc}")
+            return
+
+        # Ensure all three collections exist for this KB (idempotent).
+        self._ensure_collections()
+
+    def _ensure_collections(self) -> None:
+        """Create any missing Qdrant collections for this KB instance (idempotent)."""
+        try:
+            existing = {c.name for c in self.client.get_collections().collections}
+            for name in (self._col_cores, self._col_rels, self._col_contexts):
+                if name not in existing:
+                    self.client.create_collection(
+                        collection_name=name,
+                        vectors_config=VectorParams(
+                            size=settings.EMBEDDING_DIMENSIONS,
+                            distance=Distance.COSINE,
+                        ),
+                    )
+                    logger.info(f"[Qdrant] Created collection '{name}'")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(f"[Qdrant] Could not ensure collections: {exc}")
 
     @property
     def collections(self) -> list[str]:

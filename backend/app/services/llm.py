@@ -1,5 +1,7 @@
 """Multi-provider LLM service supporting chat, structured extraction, and ingestion routing."""
+
 # pylint: disable=too-many-lines,wrong-import-order,import-outside-toplevel
+import asyncio
 import os
 import re
 from typing import Optional, Type
@@ -19,6 +21,7 @@ logger = get_logger("LLMService")
 
 class LLMService:
     """Multi-provider LLM client supporting structured extraction, generation, and ingestion routing."""
+
     def __init__(self):
         self.device = "mps" if torch.backends.mps.is_available() else "cpu"
         self.models_path = os.path.abspath(
@@ -142,12 +145,14 @@ class LLMService:
             # This allows detect_similarity and other legacy methods to work
             class GeminiChatWrapper:  # pylint: disable=too-few-public-methods
                 """OpenAI-compatible wrapper that routes completion requests through the native Gemini SDK."""
+
                 def __init__(self, native_client):
                     self.native_client = native_client
                     self.chat = self
 
                 class Completions:  # pylint: disable=too-few-public-methods
                     """Inner completions namespace mirroring the OpenAI Completions interface."""
+
                     def __init__(self, native_client):
                         self.native_client = native_client
 
@@ -186,11 +191,13 @@ class LLMService:
                         # Return OpenAI-compatible response structure
                         class Choice:  # pylint: disable=too-few-public-methods
                             """OpenAI-compatible Choice wrapper holding a single candidate message."""
+
                             def __init__(self, text):
                                 self.message = type("Message", (), {"content": text})()
 
                         class Response:  # pylint: disable=too-few-public-methods
                             """OpenAI-compatible response wrapper containing a list of choices."""
+
                             def __init__(self, text):
                                 self.choices = [Choice(text)]
 
@@ -587,7 +594,9 @@ class LLMService:
                     self.provider = original_provider
                     self._init_clients()
                     return result
-                except Exception as fallback_error:  # pylint: disable=broad-exception-caught
+                except (
+                    Exception
+                ) as fallback_error:  # pylint: disable=broad-exception-caught
                     logger.error(f"Fallback extraction failed: {fallback_error}")
                     # Restore original provider
                     self.provider = original_provider
@@ -1030,6 +1039,7 @@ class LLMService:
 
         class QueryAnalysis(BaseModel):
             """Structured output schema for query-analysis: sub-questions and search hints."""
+
             intent: Literal[
                 "search", "summarize", "compare", "explain", "list", "recent", "verify"
             ] = Field(description="Primary intent of the query")
@@ -1132,20 +1142,24 @@ class LLMService:
         """
         try:
             if self.provider == "gemini":
-                response = self.gemini_client.models.generate_content(
-                    model=model or self._get_model_for_task("brain"),
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=temperature,
-                        thinking_config=types.ThinkingConfig(
-                            thinking_budget=0,  # thinking_level="MINIMAL"
-                        ),
+                _gemini_model = model or self._get_model_for_task("brain")
+                _gemini_cfg = types.GenerateContentConfig(
+                    temperature=temperature,
+                    thinking_config=types.ThinkingConfig(
+                        thinking_budget=0,  # thinking_level="MINIMAL"
                     ),
+                )
+                response = await asyncio.to_thread(
+                    self.gemini_client.models.generate_content,
+                    model=_gemini_model,
+                    contents=prompt,
+                    config=_gemini_cfg,
                 )
                 return response.text.strip()
 
             if self.provider == "anthropic":
-                response = self.chat_client.messages.create(
+                response = await asyncio.to_thread(
+                    self.chat_client.messages.create,
                     model=model or self._get_model_for_task("brain"),
                     max_tokens=max_tokens if max_tokens is not None else 8192,
                     temperature=temperature,
@@ -1165,7 +1179,9 @@ class LLMService:
             }
             if max_tokens is not None:
                 _kwargs["max_tokens"] = max_tokens
-            response = self.chat_client.chat.completions.create(**_kwargs)
+            response = await asyncio.to_thread(
+                self.chat_client.chat.completions.create, **_kwargs
+            )
             return response.choices[0].message.content.strip()
 
         except Exception as e:
@@ -1283,7 +1299,7 @@ class LLMService:
         )
 
         try:
-            raw = self.reason(prompt) or ""
+            raw = await asyncio.to_thread(self.reason, prompt) or ""
             logger.info(f"[LLM] iterative_step raw response:\n{raw}")
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning(f"[LLM] iterative_step failed: {e}")
@@ -1468,18 +1484,22 @@ class LLMService:
         model = self._get_ingestion_model()
         try:
             if self.ingestion_provider == "gemini":
-                response = self.i_gemini_client.models.generate_content(
-                    model=model or settings.GEMINI_MODEL,
+                _gemini_model = model or settings.GEMINI_MODEL
+                _gemini_cfg = types.GenerateContentConfig(
+                    temperature=temperature,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                )
+                response = await asyncio.to_thread(
+                    self.i_gemini_client.models.generate_content,
+                    model=_gemini_model,
                     contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=temperature,
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
-                    ),
+                    config=_gemini_cfg,
                 )
                 return response.text.strip()
 
             if self.ingestion_provider == "anthropic":
-                response = self.i_anthropic_client.messages.create(
+                response = await asyncio.to_thread(
+                    self.i_anthropic_client.messages.create,
                     model=settings.ANTHROPIC_MODEL,
                     max_tokens=max_tokens if max_tokens is not None else 8192,
                     temperature=temperature,
@@ -1496,7 +1516,9 @@ class LLMService:
             }
             if max_tokens is not None:
                 _kwargs["max_tokens"] = max_tokens
-            response = self.i_chat_client.chat.completions.create(**_kwargs)
+            response = await asyncio.to_thread(
+                self.i_chat_client.chat.completions.create, **_kwargs
+            )
             content = response.choices[0].message.content
             if not content or not content.strip():
                 raise ValueError(

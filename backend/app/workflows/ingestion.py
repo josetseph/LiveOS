@@ -131,6 +131,7 @@ class IngestionWorkflow:
                 "note_id": note_id,
                 "created_at": None,
                 "errors": [],
+                "workflow": self,  # KB-specific instance so agent nodes write to the right stores
             }
 
             # Use ainvoke because the graph contains async nodes (multimodal_node)
@@ -314,7 +315,7 @@ class IngestionWorkflow:
         query_note = """
         MERGE (n:Node {id: $id}) ON CREATE SET n.kind = 'note'
         """
-        graph_service.execute_query(
+        self._graph.execute_query(
             query_note,
             {"id": note_id},
         )
@@ -370,10 +371,24 @@ class IngestionWorkflow:
                 )
             )
             _batch_id_map: dict[str, str | None] = (
-                qdrant_service.find_node_ids_by_names(_unique_names)
+                self._qdrant.find_node_ids_by_names(_unique_names)
                 if _unique_names
                 else {}
             )
+
+            # Kuzu fallback: for any name Qdrant didn't find, check Kuzu directly.
+            # This prevents minting a fresh UUID when a structural node already
+            # exists from a previous ingestion run whose Qdrant write failed.
+            _qdrant_misses = [n for n, v in _batch_id_map.items() if v is None]
+            if _qdrant_misses:
+                _kuzu_fallback = self._graph.find_nodes_by_exact_names(_qdrant_misses)
+                if _kuzu_fallback:
+                    for _fname, _fid in _kuzu_fallback.items():
+                        _batch_id_map[_fname] = _fid
+                    logger.debug(
+                        f"[Ontology] Kuzu fallback resolved {len(_kuzu_fallback)} "
+                        f"name(s) missing from Qdrant: {list(_kuzu_fallback.keys())}"
+                    )
 
             node_data = []
             seen_in_batch: dict[str, str] = {}  # norm_name → assigned_id
@@ -426,7 +441,7 @@ class IngestionWorkflow:
             """
 
             if node_data:
-                graph_service.execute_query(
+                self._graph.execute_query(
                     query_nodes,
                     {"data": [{"id": d["id"]} for d in node_data], "note_id": note_id},
                 )
@@ -438,7 +453,7 @@ class IngestionWorkflow:
                 # by _update_node_summary with the real description + embedding.
                 for d in node_data:
                     if d["is_new"] and d["embedding"]:
-                        qdrant_service.upsert_node_core(
+                        self._qdrant.upsert_node_core(
                             node_id=d["id"],
                             name=d["name"],
                             node_type=d["type"],
@@ -471,7 +486,7 @@ class IngestionWorkflow:
                 if _tn and _tn not in name_to_id:
                     _rel_missing_names.add(_tn)
             _rel_fallback_ids: dict[str, str | None] = (
-                qdrant_service.find_node_ids_by_names(list(_rel_missing_names))
+                self._qdrant.find_node_ids_by_names(list(_rel_missing_names))
                 if _rel_missing_names
                 else {}
             )
@@ -569,7 +584,7 @@ class IngestionWorkflow:
                     )
 
                     # Create or update relationship with bi-temporal support
-                    result = graph_service.create_or_update_relationship(
+                    result = self._graph.create_or_update_relationship(
                         source_name=source_name_normalized,
                         source_label=source_label,
                         target_name=target_name_normalized,
@@ -623,7 +638,7 @@ class IngestionWorkflow:
                 for (result, nl_text, src_node_id, tgt_node_id), nl_vector in zip(
                     _qdrant_rel_pending, _nl_vectors
                 ):
-                    qdrant_service.upsert_node_relationship(
+                    self._qdrant.upsert_node_relationship(
                         relationship_id=result["relationship_id"],
                         natural_language=nl_text,
                         nl_vector=nl_vector,
@@ -647,7 +662,7 @@ class IngestionWorkflow:
         return title
 
     async def _queue_leiden_recompute_if_due(self, note_id: str) -> None:
-        rows = graph_service.execute_query(
+        rows = self._graph.execute_query(
             """
             MATCH (:Node {id: $note_id})-[*1]-(n:Node)
             WHERE n.kind = 'indexable' AND n.id IS NOT NULL
@@ -745,7 +760,7 @@ class IngestionWorkflow:
             # while Kuzu already has a structural node with this name, reuse that
             # existing graph ID to avoid minting duplicate same-name nodes.
             def _get_existing():
-                return qdrant_service.find_node_id_by_name(name)
+                return self._qdrant.find_node_id_by_name(name)
 
             node_id: str | None = await loop.run_in_executor(None, _get_existing)
             existing_contexts: list[str] = []
@@ -753,7 +768,7 @@ class IngestionWorkflow:
             if node_id:
                 # Fetch existing isolated_contexts from Qdrant
                 def _get_qdrant_contexts():
-                    _content = qdrant_service.get_node_content_by_id(node_id)
+                    _content = self._qdrant.get_node_content_by_id(node_id)
                     return _content or {}
 
                 _existing_content = await loop.run_in_executor(
@@ -767,7 +782,7 @@ class IngestionWorkflow:
             else:
 
                 def _find_existing_graph_id():
-                    _matches = graph_service.find_nodes_by_name([name], fuzzy=False)
+                    _matches = self._graph.find_nodes_by_name([name], fuzzy=False)
                     _candidates = [
                         m.get("node_id")
                         for m in _matches
@@ -795,7 +810,7 @@ class IngestionWorkflow:
                     # entry). Without this, existing_contexts stays [] and the
                     # subsequent Typesense upsert would silently wipe stored contexts.
                     def _get_kuzu_node_contexts():
-                        content = qdrant_service.get_node_content_by_id(node_id)
+                        content = self._qdrant.get_node_content_by_id(node_id)
                         return (content or {}).get("isolated_contexts", [])
 
                     existing_contexts = await loop.run_in_executor(
@@ -814,7 +829,7 @@ class IngestionWorkflow:
                     )
 
                     def _merge_node():
-                        graph_service.execute_query(
+                        self._graph.execute_query(
                             "MERGE (n:Node {id: $node_id}) ON CREATE SET n.kind = 'indexable'"
                             " SET n.name = $name, n.type = $type",
                             {
@@ -844,7 +859,7 @@ class IngestionWorkflow:
 
             # 3. Resolve semantic node type from Qdrant (or fall back to caller-supplied type)
             def _get_node_type():
-                _content = qdrant_service.get_node_content_by_id(node_id)
+                _content = self._qdrant.get_node_content_by_id(node_id)
                 if _content and _content.get("type"):
                     return _content["type"]
                 return (node_type or "thing").lower().strip() or "thing"
@@ -882,7 +897,7 @@ class IngestionWorkflow:
             # 5. Ensure the Kuzu structural node exists with this ID and carry
             # name + type so the graph endpoint never needs Qdrant for display labels.
             def _save_update():
-                graph_service.execute_query(
+                self._graph.execute_query(
                     "MERGE (n:Node {id: $node_id}) ON CREATE SET n.kind = 'indexable'"
                     " SET n.name = $name, n.type = $type",
                     {"node_id": node_id, "name": name, "type": node_type or "unknown"},
@@ -895,8 +910,8 @@ class IngestionWorkflow:
             def _write_qdrant():
                 # Append each new context — existing ones stay in Qdrant untouched
                 for _ctx_text, _ctx_vector in new_ctx_pairs:
-                    qdrant_service.append_node_item(
-                        collection_name=settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
+                    self._qdrant.append_node_item(
+                        collection_name=self._qdrant._col_contexts,
                         node_id=node_id,
                         content=_ctx_text,
                         vector=_ctx_vector,
@@ -919,7 +934,7 @@ class IngestionWorkflow:
 
                 def _write_node_core():
                     merged_vec = embedding_service.embed_documents([merged_ctx_text])[0]
-                    qdrant_service.upsert_node_core(
+                    self._qdrant.upsert_node_core(
                         node_id=node_id,
                         name=name,
                         node_type=node_type,
@@ -936,7 +951,7 @@ class IngestionWorkflow:
             # 7. Write to Typesense
             def _write_es():
                 # Fetch relationship NL sentences from Qdrant (not Kuzu)
-                rel_qdrant = qdrant_service.get_relationships_for_node_ids([node_id])
+                rel_qdrant = self._qdrant.get_relationships_for_node_ids([node_id])
                 rel_nl = " ".join(
                     r.get("natural_language", "")
                     for r in rel_qdrant
@@ -950,8 +965,8 @@ class IngestionWorkflow:
                 if not contexts_text:
                     try:
                         existing_ts = (
-                            typesense_service.client.collections[
-                                settings.TYPESENSE_COLLECTION_NAME
+                            self._typesense.client.collections[
+                                self._typesense.collection
                             ]
                             .documents[node_id]
                             .retrieve()
@@ -959,7 +974,7 @@ class IngestionWorkflow:
                         contexts_text = existing_ts.get("isolated_contexts", "")
                     except Exception:  # pylint: disable=broad-exception-caught
                         pass
-                typesense_service.index_node(
+                self._typesense.index_node(
                     node_id=node_id,
                     name=name,
                     node_type=node_type,
@@ -1269,7 +1284,7 @@ class IngestionWorkflow:
                 f"{'='*70}"
             )
 
-            nodes = graph_service.get_indexable_nodes_for_communities()
+            nodes = self._graph.get_indexable_nodes_for_communities()
             if not nodes:
                 logger.warning(
                     "[Community] No indexable nodes found — aborting Leiden recompute."
@@ -1281,7 +1296,7 @@ class IngestionWorkflow:
             # Enrich structural node rows with content from Qdrant (description, facts)
             _node_ids_for_leiden = [n["node_id"] for n in nodes if n.get("node_id")]
             if _node_ids_for_leiden:
-                _qdrant_content_map = qdrant_service.get_nodes_content_by_ids(
+                _qdrant_content_map = self._qdrant.get_nodes_content_by_ids(
                     _node_ids_for_leiden
                 )
                 for n in nodes:
@@ -1295,14 +1310,14 @@ class IngestionWorkflow:
                     f"enriched with isolated contexts"
                 )
 
-            old_community_ids = graph_service.clear_all_communities()
+            old_community_ids = self._graph.clear_all_communities()
             logger.info(
                 f"[Community] Cleared {len(old_community_ids)} old community nodes "
                 f"(Kuzu + Qdrant + Typesense)"
             )
             for old_community_id in old_community_ids:
-                qdrant_service.delete_node(old_community_id)
-                typesense_service.delete_node(old_community_id)
+                self._qdrant.delete_node(old_community_id)
+                self._typesense.delete_node(old_community_id)
 
             node_ids = [node["node_id"] for node in nodes]
             node_lookup = {node["node_id"]: node for node in nodes}
@@ -1462,7 +1477,7 @@ class IngestionWorkflow:
 
                 community_id = f"community_l{community_level}_{uuid.uuid4().hex}"
 
-                graph_service.create_leiden_community(
+                self._graph.create_leiden_community(
                     community_id=community_id,
                     community_level=community_level,
                     name=name,
@@ -1473,7 +1488,7 @@ class IngestionWorkflow:
                     f"  [Community] Kuzu community node created: '{name}' id={community_id}"
                 )
 
-                typesense_service.index_node(
+                self._typesense.index_node(
                     node_id=community_id,
                     name=name,
                     node_type="community",
@@ -1498,7 +1513,7 @@ class IngestionWorkflow:
                     for nid, nl_text, nl_vec in zip(
                         _valid_nids, _nl_texts, _nl_vectors
                     ):
-                        qdrant_service.upsert_node_relationship(
+                        self._qdrant.upsert_node_relationship(
                             relationship_id=f"community_rel_{community_id}_{nid}",
                             natural_language=nl_text,
                             nl_vector=nl_vec,
@@ -1519,7 +1534,7 @@ class IngestionWorkflow:
                     f"  [Community] ✓ Created L{community_level} community '{name}' "
                     f"(id={community_id}, {len(member_entity_ids)} members)"
                 )
-                graph_service.set_node_community_membership(
+                self._graph.set_node_community_membership(
                     member_entity_ids, community_id, community_level
                 )
                 for nid in member_entity_ids:
@@ -1721,11 +1736,11 @@ class IngestionWorkflow:
             # Community fields are no longer stored on regular nodes — only the NL sentence
             # written above carries that signal for retrieval.
             for node_id in level_assignments:
-                payload = graph_service.get_node_storage_payload(node_id)
+                payload = self._graph.get_node_storage_payload(node_id)
                 if not payload:
                     continue
                 relationship_nl = payload.get("relationship_natural_language") or []
-                typesense_service.update_node_community(
+                self._typesense.update_node_community(
                     node_id=node_id,
                     relationship_natural_language=" ".join(
                         sentence for sentence in relationship_nl if sentence
@@ -1739,11 +1754,9 @@ class IngestionWorkflow:
 
                 # After Leiden has created communities, rerun spring layout so
                 # community nodes are pulled into the correct positions by their members.
-                spring_node_ids, spring_edges = (
-                    graph_service.get_all_node_ids_and_edges()
-                )
+                spring_node_ids, spring_edges = self._graph.get_all_node_ids_and_edges()
                 positions = compute_spring_layout_3d(spring_node_ids, spring_edges)
-                graph_service.store_node_positions(positions)
+                self._graph.store_node_positions(positions)
                 logger.info(
                     f"[Community] Spring layout recomputed after Leiden: "
                     f"{len(positions)} nodes, {len(spring_edges)} edges"

@@ -4,7 +4,7 @@
 import asyncio
 import uuid
 from datetime import datetime
-from typing import List, Optional, TypedDict
+from typing import Any, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
@@ -35,6 +35,7 @@ class IngestionState(TypedDict):
     errors: List[str]
     status: str  # START, MULTIMEDIA_DONE, EXTRACTED, INDEXED
     logs: List[str]
+    workflow: Optional[Any]  # KB-specific IngestionWorkflow instance; None → use global default
 
 
 # 2. Node Functions
@@ -175,12 +176,13 @@ async def multimodal_node(
         # Audio transcripts are synced back to Postgres because audio files are
         # not directly re-readable as text. Other file types can be re-extracted.
         if audio_changed and state.get("note_id"):
-            from app.workflows.ingestion import ingestion_workflow
+            from app.workflows.ingestion import ingestion_workflow as _default_wf
 
+            _wf = state.get("workflow") or _default_wf
             logger.info(
                 f"Syncing audio transcript to Postgres for Note {state['note_id']}..."
             )
-            await ingestion_workflow._update_note_content_postgres(
+            await _wf._update_note_content_postgres(
                 state["note_id"], content
             )
 
@@ -553,12 +555,13 @@ async def storage_node(state: IngestionState):
     created_at = state.get("input").created_at or datetime.now().isoformat()
     custom_title = state.get("input").title  # May be None
 
-    from app.workflows.ingestion import ingestion_workflow
+    from app.workflows.ingestion import ingestion_workflow as _default_wf
 
+    _wf = state.get("workflow") or _default_wf
     try:
         # 1. Write to Kuzu (The Mind)
         title = await asyncio.to_thread(
-            ingestion_workflow._write_ontology,
+            _wf._write_ontology,
             note_id,
             state["content"],
             state["extraction"],
@@ -569,7 +572,7 @@ async def storage_node(state: IngestionState):
         # 2. Sync to Postgres (The Body)
         # Sync Title
         if title:
-            await ingestion_workflow._update_note_title_postgres(note_id, title)
+            await _wf._update_note_title_postgres(note_id, title)
 
         t_end = time.perf_counter()
         logger.info(f"  [Perf] Graph Storage took: {t_end - t_start:.4f}s")
@@ -591,9 +594,10 @@ async def summarization_node(state: IngestionState):
 
     t_start = time.perf_counter()
     logger.info("[Agent] Updating Node Context Indexes (Delta Updates)...")
-    from app.workflows.ingestion import ingestion_workflow
+    from app.workflows.ingestion import ingestion_workflow as _default_wf
 
-    await ingestion_workflow._update_neighborhoods(
+    _wf = state.get("workflow") or _default_wf
+    await _wf._update_neighborhoods(
         state["extraction"].nodes,
         state["content"],
     )

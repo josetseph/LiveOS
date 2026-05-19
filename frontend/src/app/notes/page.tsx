@@ -29,7 +29,7 @@ import type { Note, FilePreview } from "@/lib/types";
 type ProcessedFilter = "all" | "ingested" | "ingesting" | "saved" | "failed";
 
 export default function NotesPage() {
-  const { currentKB, currentKBName } = useKB();
+  const { currentKB, currentKBName, isHydrated } = useKB();
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedNote, setSelectedNote] = useState<Note | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -55,11 +55,12 @@ export default function NotesPage() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
-  // Fetch notes on mount
+  // Fetch notes once KB context is hydrated from localStorage, and re-fetch on KB switch
   useEffect(() => {
+    if (!isHydrated) return;
     fetchNotes(undefined, processedFilter);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [currentKB, isHydrated]);
 
   // Debounced search and filter
   useEffect(() => {
