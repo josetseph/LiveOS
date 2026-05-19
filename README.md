@@ -44,29 +44,30 @@ The system is designed to run entirely locally. All LLM inference, embedding, an
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Next.js Frontend                        │
-│   Notes editor · Chat interface · 3D graph visualisation        │
+│     Notes editor · Chat interface · 3D graph visualisation      │
 └────────────────────────────┬────────────────────────────────────┘
                              │ HTTP (REST, /api/v1/*)
 ┌────────────────────────────▼────────────────────────────────────┐
-│                    FastAPI Backend (uvicorn)                     │
+│                    FastAPI Backend (uvicorn)                    │
 │                                                                 │
-│  ┌─────────────────┐   ┌──────────────────┐                    │
-│  │ Ingestion        │   │ Chat / Retrieval  │                    │
-│  │ Workflow         │   │ Workflow          │                    │
-│  │ (LangGraph)      │   │ (iterative loop)  │                    │
-│  └────────┬─────────┘   └──────────┬───────┘                   │
-│           │                        │                            │
-│  ┌────────▼────────────────────────▼───────┐                   │
-│  │              Service Layer               │                   │
-│  │  LLM · Embedding · Reranker · Graph      │                   │
-│  │  Qdrant · Typesense · Multimedia         │                   │
-│  └────────┬────────────────────────┬───────┘                   │
-└───────────┼────────────────────────┼───────────────────────────┘
-            │                        │
-┌───────────▼──────┐   ┌─────────────▼──────────────────────────┐
-│  Kuzu (embedded) │   │  Docker-managed services                 │
-│  graph database  │   │  Qdrant · Typesense · PostgreSQL · RustFS│
-└──────────────────┘   └────────────────────────────────────────┘
+│          ┌─────────────────┐   ┌──────────────────┐             │
+│          │ Ingestion       │   │ Chat / Retrieval │             │
+│          │ Workflow        │   │ Workflow         │             │
+│          │ (LangGraph)     │   │ (iterative loop) │             │
+│          └────────┬────────┘   └──────────┬───────┘             │
+│                   │                       │                     │
+│          ┌────────▼───────────────────────▼───────┐             │
+│          │              Service Layer             │             │
+│          │  LLM · Embedding · Reranker · Graph    │             │
+│          │  Qdrant · Typesense · Multimedia       │             │
+│          └────────┬────────────────────────┬──────┘             │
+└───────────────────┼────────────────────────┼────────────────────┘
+                    │                        │
+┌───────────────────▼──────┐   ┌─────────────▼────────────────────┐
+│      Kuzu (embedded)     │   │      Docker-managed services     │
+│      graph database      │   │      Qdrant · Typesense          │
+│                          │   │      PostgreSQL · RustFS         │
+└──────────────────────────┘   └──────────────────────────────────┘
 ```
 
 ### Key design decisions
