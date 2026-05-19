@@ -1,46 +1,29 @@
 services:
-  # 1. Typesense Full-Text Search
-  typesense:
-    image: typesense/typesense:27.1
-    container_name: liveos_search
-    restart: unless-stopped
-    environment:
-      - TYPESENSE_DATA_DIR=/data
-      - TYPESENSE_API_KEY=liveos-dev-key
-    ports:
-      - "8108:8108"
-    volumes:
-      - ./data/typesense:/data
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8108'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # 2. Local Postgres (Replaces Supabase)
+  # PostgreSQL Database
   postgres:
-    image: postgres:latest
-    container_name: liveos_db
+    image: postgres:17
+    container_name: liveos-postgres
     restart: unless-stopped
     environment:
+      POSTGRES_DB: liveos
       POSTGRES_USER: user
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: liveos
-      PGDATA: /var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      - "15432:5432"
     volumes:
-      - ./data/local_db:/var/lib/postgresql
+      - ./data/local_db/data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U user -d liveos" ]
+      test: ["CMD-SHELL", "pg_isready -U user -d liveos"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # 3. Local RustFS (S3-compatible object storage, Apache 2.0)
+  # Neo4j removed — graph storage is now embedded Kuzu (no container needed)
+
+  # RustFS Object Storage (S3-compatible, Apache 2.0)
   rustfs:
     image: rustfs/rustfs:latest
-    container_name: liveos_storage
+    container_name: liveos-rustfs
     restart: unless-stopped
     user: "0:0"
     environment:
@@ -52,20 +35,20 @@ services:
       RUSTFS_SECRET_KEY: rustfsadmin
       RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true"
     ports:
-      - "9000:9000" # S3 API
-      - "9001:9001" # Console
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - ./data/rustfs:/data
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9000/health" ]
-      interval: 5s
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 3
 
-  # 4. Qdrant Vector Database
+  # Qdrant Vector Database
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: liveos_vectors
+    container_name: liveos-qdrant
     restart: unless-stopped
     ports:
       - "6333:6333"
@@ -73,4 +56,84 @@ services:
     volumes:
       - ./data/qdrant:/qdrant/storage
 
-  # 5. Typesense is service #1 above
+  # Typesense Full-Text Search
+  typesense:
+    image: typesense/typesense:27.1
+    container_name: liveos-typesense
+    restart: unless-stopped
+    environment:
+      TYPESENSE_DATA_DIR: /data
+      TYPESENSE_API_KEY: liveos-dev-key
+    ports:
+      - "8108:8108"
+    volumes:
+      - ./data/typesense:/data
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8108'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API (FastAPI)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: liveos-backend
+    restart: unless-stopped
+    env_file: ./backend/.env
+    ports:
+      - "8700:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      typesense:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Initialization Service (one-shot — runs once, then exits)
+  init:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: liveos-init
+    env_file: ./backend/.env
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      typesense:
+        condition: service_healthy
+    command: /bin/bash /app/scripts/init.sh
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+    restart: "no"
+
+  # Frontend (Next.js)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: liveos-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:8700"
+    ports:
+      - "3700:3000"
+    depends_on:
+      - backend

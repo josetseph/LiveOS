@@ -5,7 +5,7 @@ echo "🚀 Initializing LiveOS..."
 
 # Wait for services to be ready
 echo "⏳ Waiting for PostgreSQL..."
-until PGPASSWORD=liveos_password psql -h postgres -U liveos -d liveos_brain -c '\q'; do
+until PGPASSWORD=password psql -h postgres -U user -d liveos -c '\q'; do
   sleep 1
 done
 
@@ -15,7 +15,7 @@ until curl -sf http://rustfs:9000/health > /dev/null 2>&1; do
 done
 
 echo "⏳ Waiting for Qdrant..."
-until curl -sf http://qdrant:6333/health > /dev/null 2>&1; do
+until curl -sf http://qdrant:6333/ > /dev/null 2>&1; do
   sleep 1
 done
 

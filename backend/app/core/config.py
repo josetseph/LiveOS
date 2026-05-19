@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str | None = None
 
     # ── Qdrant ───────────────────────────────────────────────────────────────
-    QDRANT_HOST: str = "127.0.0.1"
+    QDRANT_HOST: str = "qdrant"  # Docker service name; override to 127.0.0.1 for local dev
     QDRANT_PORT: int = 6333
     QDRANT_API_KEY: str | None = None
     QDRANT_COLLECTION_NODE_CORES: str = "node_cores"
@@ -114,7 +114,7 @@ class Settings(BaseSettings):
     QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS: str = "node_isolated_contexts"
 
     # ── Typesense ─────────────────────────────────────────────────────────────
-    TYPESENSE_HOST: str = "127.0.0.1"
+    TYPESENSE_HOST: str = "typesense"  # Docker service name; override to 127.0.0.1 for local dev
     TYPESENSE_PORT: int = 8108
     TYPESENSE_API_KEY: str = "liveos-dev-key"
     TYPESENSE_COLLECTION_NAME: str = "liveos_nodes"
@@ -152,20 +152,20 @@ class Settings(BaseSettings):
     BUCKET_NAME: str = "liveos-assets"
     BUCKET_ACCESS_KEY_ID: str = "rustfsadmin"
     BUCKET_SECRET_ACCESS_KEY: str = "rustfsadmin"
-    R2_ENDPOINT_URL: str = "http://localhost:9000"
-    FILES_URL: str = "http://localhost:9000/liveos-assets"
+    R2_ENDPOINT_URL: str = "http://rustfs:9000"  # Docker service name; override to http://localhost:9000 for local dev
+    FILES_URL: str = "http://rustfs:9000/liveos-assets"
     BUCKET_TOKEN: str | None = None
 
     # ── Database (Postgres) ───────────────────────────────────────────────────
-    # Using 127.0.0.1 to avoid IPv6 issues; port 5433 to avoid local Postgres conflict.
+    # Defaults use the Docker service name. Override in .env for local dev.
     DATABASE_TRANSACTION_POOLER_URL: str | None = (
-        "postgresql://user:password@127.0.0.1:5433/liveos"
+        "postgresql://user:password@postgres:5432/liveos"
     )
     DATABASE_SESSION_POOLER_URL: str | None = (
-        "postgresql://user:password@127.0.0.1:5433/liveos"
+        "postgresql://user:password@postgres:5432/liveos"
     )
     DATABASE_DIRECT_CONNECTION_URL: str | None = (
-        "postgresql://user:password@127.0.0.1:5433/liveos"
+        "postgresql://user:password@postgres:5432/liveos"
     )
 
     # ── Logging ───────────────────────────────────────────────────────────────

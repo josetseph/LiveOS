@@ -17,8 +17,9 @@ A knowledge graph and multi-hop question-answering system. Notes — including t
 9. [Runtime Model Switching](#runtime-model-switching)
 10. [Benchmark Results](#benchmark-results)
 11. [Local Setup](#local-setup)
-12. [Local Model Setup](#local-model-setup)
-13. [Environment Variables](#environment-variables)
+12. [Docker Deployment](#docker-deployment)
+13. [Local Model Setup](#local-model-setup)
+14. [Environment Variables](#environment-variables)
 14. [Running the Stack](#running-the-stack)
 15. [Knowledge Bases](#knowledge-bases)
 
@@ -239,10 +240,12 @@ docker compose up -d
 
 | Service | Image | Port | Purpose |
 |---|---|---|---|
-| Typesense | `typesense/typesense:27.1` | 8108 | Full-text search (BM25) |
-| PostgreSQL | `postgres:latest` | 5433 | Notes + processing status |
+| PostgreSQL | `postgres:latest` | 15432 | Notes + processing status |
 | RustFS | `rustfs/rustfs:latest` | 9000 / 9001 | File storage (S3-compatible) |
 | Qdrant | `qdrant/qdrant:latest` | 6333 / 6334 | Vector search |
+| Typesense | `typesense/typesense:27.1` | 8108 | Full-text search (BM25) |
+| Backend | built from `./backend` | 8700 | FastAPI API server |
+| Frontend | built from `./frontend` | 3700 | Next.js UI |
 
 Kuzu is embedded — no container needed. The database files live at `data/kuzu/kuzu_graph`.
 
@@ -407,8 +410,10 @@ cd LiveOS
 
 ### 2. Start infrastructure services
 
+For local development (running the backend and frontend on your machine):
+
 ```sh
-docker compose up -d
+docker compose up -d postgres qdrant typesense rustfs
 ```
 
 ### 3. Backend
@@ -447,6 +452,30 @@ npm run dev
 ```
 
 Open [http://localhost:3700](http://localhost:3700).
+
+---
+
+## Docker Deployment
+
+To run the full stack in Docker (backend + frontend + all services):
+
+```sh
+cp backend/.env.example backend/.env
+# edit backend/.env — set your LLM provider and API keys
+
+docker compose up -d
+```
+
+The production compose file mounts `backend/.env` directly and **automatically overrides the service hostnames** — database, Qdrant, Typesense, and RustFS all resolve correctly inside Docker without touching your `.env`.
+
+The only values you may need to update in `.env` before a Docker deployment are the LLM/embedding URLs, if you're pointing at a local model server. Inside a container, `127.0.0.1` refers to the container itself — use `host.docker.internal` to reach your machine:
+
+| Variable | Dev `.env` value | Docker prod value |
+|---|---|---|
+| `LLM_BASE_URL` | `http://127.0.0.1:1234` | `http://host.docker.internal:1234` |
+| `EMBEDDING_BASE_URL` | `http://127.0.0.1:11434` | `http://host.docker.internal:11434` |
+
+If you use a cloud provider (Gemini, OpenAI, Anthropic) these don't apply — no `.env` changes are needed at all.
 
 ---
 

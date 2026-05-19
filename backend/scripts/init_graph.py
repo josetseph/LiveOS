@@ -32,6 +32,14 @@ def init_graph() -> None:
     if os.path.isdir(db_path) and not os.listdir(db_path):
         os.rmdir(db_path)
 
+    # If the database already exists and is non-empty, another process (the
+    # backend) holds the exclusive lock. Skip init — schema was already applied.
+    if os.path.exists(db_path) and (
+        os.path.isfile(db_path) or (os.path.isdir(db_path) and os.listdir(db_path))
+    ):
+        print(f"✅ Kuzu graph database already initialized at '{db_path}'. Skipping.")
+        return
+
     # Import after the directory fix — graph_service is a module-level singleton
     # that calls kuzu.Database() at import time.
     from app.services.graph import graph_service  # noqa: PLC0415
