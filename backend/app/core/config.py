@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     )
     MAX_POTENTIAL_QUESTIONS: int = 10
     MAX_LOOP_ITERATIONS: int = 10
+    # When True: strict benchmark prompting (exact fact extraction, terse output).
+    # When False: verbose, natural-language answers for general KB use.
+    BENCHMARK_MODE: bool = False
     FALLBACK_MODE: str = "none"  # "none" | "web" | "self"
     TAVILY_API_KEY: str | None = None
 

@@ -139,7 +139,7 @@ export default function Home() {
               </div>
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
                 <Cpu className="h-3 w-3 text-orange-400" />
-                <span className="text-xs text-white/70">MinIO</span>
+                <span className="text-xs text-white/70">RustFS</span>
               </div>
             </div>
           </motion.div>

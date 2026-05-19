@@ -240,7 +240,7 @@ async def fetch_note_title_map(base_url: str) -> dict[str, str]:
             return {}
 
 
-async def query_liveos(question: str, base_url: str = "http://localhost:8000") -> dict:
+async def query_liveos(question: str, base_url: str = "http://localhost:8700") -> dict:
     """Send a question to LiveOS chat endpoint."""
     async with httpx.AsyncClient(timeout=1800.0) as client:
         try:

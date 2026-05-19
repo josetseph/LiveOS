@@ -1,6 +1,10 @@
 """FastAPI application entry point: routes, middleware, and startup hooks."""
 
 # pylint: disable=wrong-import-order,wrong-import-position,import-outside-toplevel
+import asyncio
+import os
+import subprocess
+import tempfile
 import uuid
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -107,7 +111,7 @@ app = FastAPI(title="LiveOS Brain API", version="0.1.0")
 # CORS setup used to allow connections from Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=["http://localhost:3700", "http://localhost:3701"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -141,24 +145,102 @@ async def trace_id_middleware(request: Request, call_next):
 async def startup_event():
     """Initialize external services and database tables on application startup."""
     logger.info("Application startup: LiveOS Brain API online")
+    # Apply any runtime overrides that were saved from a previous session
+    from app.core import runtime_config
+
+    overrides = runtime_config.load()
+    if overrides:
+        runtime_config.apply_to_settings(overrides)
+        logger.info(
+            "Runtime config overrides applied",
+            extra={"overrides": list(overrides.keys())},
+        )
+
+
+_AUDIO_CONTENT_TYPES = {"audio/webm", "audio/ogg", "audio/opus", "audio/x-matroska"}
+_AUDIO_EXTENSIONS = {"webm", "ogg", "opus"}
+
+
+async def _transcode_to_m4a(content: bytes, src_ext: str) -> tuple[bytes, str]:
+    """Transcode audio bytes → AAC/M4A via ffmpeg.
+
+    Returns ``(transcoded_bytes, "m4a")`` on success, or the original
+    ``(content, src_ext)`` if ffmpeg is unavailable or fails (graceful fallback).
+    """
+
+    def _run() -> tuple[bytes, str]:
+        tmp_in = tmp_out = None
+        try:
+            fd, tmp_in = tempfile.mkstemp(suffix=f".{src_ext}")
+            os.write(fd, content)
+            os.close(fd)
+            tmp_out = tmp_in[: tmp_in.rfind(".")] + ".m4a"
+            result = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    tmp_in,
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    tmp_out,
+                ],
+                capture_output=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                with open(tmp_out, "rb") as f:
+                    return f.read(), "m4a"
+            logger.warning(
+                "FFmpeg transcoding failed",
+                extra={"stderr": result.stderr.decode(errors="replace")[:500]},
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "ffmpeg not found on PATH — storing audio without transcoding"
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "ffmpeg transcoding timed out — storing audio without transcoding"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Audio transcoding error", extra={"error": str(exc)})
+        finally:
+            if tmp_in and os.path.exists(tmp_in):
+                os.unlink(tmp_in)
+            if tmp_out and os.path.exists(tmp_out):
+                os.unlink(tmp_out)
+        return content, src_ext
+
+    return await asyncio.to_thread(_run)
 
 
 @app.post("/api/v1/upload")
 async def upload_file(file: UploadFile = File(...)):
     """
     Upload a file to R2 Cloud Storage.
+    Audio files (WebM, OGG, Opus) are transcoded to AAC/M4A so they play in
+    all browsers including Safari, which does not support WebM.
     """
     from app.utils.bucket_storage import get_files, send_files
 
     logger.info(f"Uploading file: {file.filename}")
 
-    # Generate unique key
-    ext = file.filename.split(".")[-1]
-    filename = f"{uuid.uuid4()}.{ext}"
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower()
+    content_type = file.content_type or ""
     content = await file.read()
 
-    # Upload to R2
-    await send_files(content, filename, file.content_type)
+    # Transcode audio to M4A for universal playback compatibility
+    if content_type in _AUDIO_CONTENT_TYPES or ext in _AUDIO_EXTENSIONS:
+        content, ext = await _transcode_to_m4a(content, ext)
+        content_type = "audio/mp4"
+
+    filename = f"{uuid.uuid4()}.{ext}"
+
+    # Upload to storage
+    await send_files(content, filename, content_type)
 
     # Get Public URL
     url = get_files(filename)
@@ -207,6 +289,78 @@ class ChatInput(BaseModel):
     """Request body for the chat endpoint."""
 
     query: str
+
+
+class LLMSettings(BaseModel):
+    """Request body for updating runtime LLM settings."""
+
+    provider: str | None = None
+    model: str | None = None
+    ingestion_model: str | None = None
+    base_url: str | None = None
+
+
+@app.get("/api/v1/settings")
+async def get_runtime_settings():
+    """Return the current effective chat and ingestion LLM settings."""
+    from app.core import runtime_config
+    from app.core.config import settings
+    from app.services.llm import llm_service
+
+    return {
+        "provider": settings.LLM_PROVIDER,
+        "model": llm_service._get_model_for_task("chat") or settings.LLM_MODEL,
+        "ingestion_model": llm_service._get_ingestion_model() or settings.LLM_MODEL,
+        "base_url": settings.LLM_BASE_URL,
+    }
+
+
+@app.patch("/api/v1/settings")
+async def update_runtime_settings(body: LLMSettings):
+    """Update the active LLM provider, model, or base URL without restarting the server.
+
+    Model-only changes take effect immediately (no client reinitialization needed).
+    Provider or base URL changes trigger a full LLM client reinitalization.
+    API keys are never accepted here — configure those in .env.
+    """
+    from app.core import runtime_config
+    from app.core.config import settings
+    from app.services.llm import llm_service
+
+    overrides = runtime_config.load()
+
+    provider_changed = bool(body.provider and body.provider != settings.LLM_PROVIDER)
+    base_url_changed = bool(body.base_url and body.base_url != settings.LLM_BASE_URL)
+
+    if body.provider is not None:
+        overrides["provider"] = body.provider
+        settings.LLM_PROVIDER = body.provider
+    if body.model is not None:
+        overrides["model"] = body.model
+        settings.CHAT_MODEL = body.model
+    if body.ingestion_model is not None:
+        overrides["ingestion_model"] = body.ingestion_model
+        settings.INGESTION_MODEL = body.ingestion_model
+    if body.base_url is not None:
+        overrides["base_url"] = body.base_url
+        settings.LLM_BASE_URL = body.base_url
+
+    runtime_config.save(overrides)
+
+    if provider_changed or base_url_changed:
+        llm_service.provider = settings.LLM_PROVIDER.lower()
+        llm_service._init_clients()
+        logger.info(
+            "LLM clients reinitialized",
+            extra={"provider": llm_service.provider, "base_url": settings.LLM_BASE_URL},
+        )
+
+    return {
+        "provider": settings.LLM_PROVIDER,
+        "model": settings.CHAT_MODEL or settings.LLM_MODEL,
+        "ingestion_model": settings.INGESTION_MODEL or settings.LLM_MODEL,
+        "base_url": settings.LLM_BASE_URL,
+    }
 
 
 @app.post("/api/v1/chat")

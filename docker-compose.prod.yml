@@ -97,7 +97,7 @@ services:
       TYPESENSE_API_KEY: "liveos-dev-key"
       TYPESENSE_COLLECTION_NAME: "liveos_nodes"
     ports:
-      - "8000:8000"
+      - "8700:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -156,9 +156,9 @@ services:
     container_name: liveos-frontend
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_URL: "http://localhost:8000"
+      NEXT_PUBLIC_API_URL: "http://localhost:8700"
     ports:
-      - "3000:3000"
+      - "3700:3000"
     depends_on:
       - backend
 

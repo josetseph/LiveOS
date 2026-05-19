@@ -107,7 +107,7 @@ class RetrievalService:
             if not node_name:
                 return []
 
-            related_nodes = graph_service.get_related_nodes(
+            related_nodes = self._graph.get_related_nodes(
                 node_name=node_name, max_depth=1, min_confidence=0.5
             )
             if not related_nodes:
@@ -123,7 +123,7 @@ class RetrievalService:
             neighbour_content: dict[str, dict] = {}
             if neighbour_id_to_related:
                 try:
-                    neighbour_content = qdrant_service.get_nodes_content_by_ids(
+                    neighbour_content = self._qdrant.get_nodes_content_by_ids(
                         list(neighbour_id_to_related.keys())
                     )
                 except Exception as e:  # pylint: disable=broad-exception-caught
@@ -206,7 +206,7 @@ class RetrievalService:
             src_node_id = node.get("node_id") or node.get("id") or ""
             # All nodes are :Indexable — no label filter needed
             try:
-                related = graph_service.get_related_nodes(
+                related = self._graph.get_related_nodes(
                     node_name=node_name,
                     max_depth=1,
                     min_confidence=0.5,
@@ -259,7 +259,7 @@ class RetrievalService:
                 }
             )
             if _all_node_ids:
-                _qdrant_rels = qdrant_service.get_relationships_for_node_ids(
+                _qdrant_rels = self._qdrant.get_relationships_for_node_ids(
                     _all_node_ids
                 )
                 # Build bidirectional lookup: (src_id, tgt_id) → nl_text
@@ -317,7 +317,7 @@ class RetrievalService:
         ]
         if _neighbor_ids:
             try:
-                _qdrant_neighbor_content = qdrant_service.get_nodes_content_by_ids(
+                _qdrant_neighbor_content = self._qdrant.get_nodes_content_by_ids(
                     _neighbor_ids
                 )
                 for entry in relationship_entries:
@@ -519,7 +519,7 @@ class RetrievalService:
         # attach them to the relevant merged doc.
         if result and selected_neighbor_names:
             try:
-                evidence_rows = graph_service.get_linked_evidence(
+                evidence_rows = self._graph.get_linked_evidence(
                     selected_neighbor_names,
                     limit_per_node=2,
                 )
@@ -682,7 +682,7 @@ class RetrievalService:
             if settings.RERANKER_ENABLED
             else settings.VECTOR_SIMILARITY_THRESHOLD
         )
-        hits = qdrant_service.search_all_collections(
+        hits = self._qdrant.search_all_collections(
             query_vector=query_vector,
             limit=500,  # large ceiling; score_threshold is the real filter
             min_score=_threshold,
@@ -724,7 +724,7 @@ class RetrievalService:
         resolved_names: dict[str, str] = {}
         if unresolved_node_ids:
             try:
-                core_rows = qdrant_service.get_nodes_content_by_ids(
+                core_rows = self._qdrant.get_nodes_content_by_ids(
                     list(unresolved_node_ids)
                 )
                 for _nid, _row in core_rows.items():
@@ -814,7 +814,7 @@ class RetrievalService:
         missing = [n for n in result if not n.get("entity_type") and n.get("node_id")]
         if missing:
             try:
-                cores = qdrant_service.get_nodes_content_by_ids(
+                cores = self._qdrant.get_nodes_content_by_ids(
                     [n["node_id"] for n in missing]
                 )
                 for n in missing:
@@ -829,7 +829,7 @@ class RetrievalService:
 
     async def _search_typesense_by_keyword(self, query: str) -> list[dict]:
         """Search Typesense full-text index and normalize into node-like results."""
-        hits = typesense_service.search_nodes(query=query, limit=100)
+        hits = self._typesense.search_nodes(query=query, limit=100)
         if not hits:
             logger.info("  [Typesense] No BM25 keyword hits.")
             return []
@@ -982,7 +982,7 @@ class RetrievalService:
             try:
                 # Normalize to lowercase so lookups match stored (lowercase) names
                 _normalized_query_entities = [e.lower().strip() for e in query_entities]
-                entity_found = graph_service.find_nodes_by_name(
+                entity_found = self._graph.find_nodes_by_name(
                     names=_normalized_query_entities, fuzzy=True
                 )
                 # Collect ALL matching nodes first — do NOT dedup by name yet.
@@ -1011,7 +1011,7 @@ class RetrievalService:
                         and node_type == "person"
                     ):
                         try:
-                            variants = graph_service.find_name_variants(node_name)
+                            variants = self._graph.find_name_variants(node_name)
                             for v in variants:  # Top 5 variants per name
                                 _v_key = (v["name"] or "").lower().strip()
                                 if (
@@ -1058,7 +1058,7 @@ class RetrievalService:
                 ]
                 if _enrich_ids:
                     try:
-                        _qdrant_content = qdrant_service.get_nodes_content_by_ids(
+                        _qdrant_content = self._qdrant.get_nodes_content_by_ids(
                             _enrich_ids
                         )
                         for _n in _unique_candidates:
@@ -1147,7 +1147,7 @@ class RetrievalService:
             for vnode in vector_nodes:  # Check top vector results
                 vnode_name = vnode.get("name", "")
                 try:
-                    variants = graph_service.find_name_variants(vnode_name)
+                    variants = self._graph.find_name_variants(vnode_name)
                     for v in variants:  # Top 5 variants per name
                         _vv_key = (v["name"] or "").lower().strip()
                         if (
@@ -1203,13 +1203,13 @@ class RetrievalService:
                     _grounding_id_to_name[_gnid] = _gnname
 
             if _grounding_id_to_name:
-                evidence_results = graph_service.get_linked_evidence_by_node_ids(
+                evidence_results = self._graph.get_linked_evidence_by_node_ids(
                     list(_grounding_id_to_name.keys()),
                     limit_per_node=2,
                     node_id_to_name=_grounding_id_to_name,
                 )
             else:
-                evidence_results = graph_service.get_linked_evidence(
+                evidence_results = self._graph.get_linked_evidence(
                     all_node_names, limit_per_node=2
                 )
             for row in evidence_results:
@@ -1342,7 +1342,7 @@ class RetrievalService:
         top_k: int = 50,
         max_hops: int = 10,  # pylint: disable=unused-argument
         filter_docs: bool = True,  # pylint: disable=unused-argument
-    ) -> tuple[str | None, list[dict]]:
+    ) -> tuple[str | None, list[dict], str | None]:
         """Entry-point alias for the primary structured sub-question pipeline.
 
         The ``_max_hops`` and ``_filter_docs`` parameters are accepted for call-site
@@ -1464,7 +1464,7 @@ class RetrievalService:
         self,
         query: str,
         top_k: int = 50,
-    ) -> tuple[str | None, list[dict]]:
+    ) -> tuple[str | None, list[dict], str | None]:
         """
         Iterative retrieval loop — one LLM call per iteration.
 
@@ -1475,7 +1475,7 @@ class RetrievalService:
         Continues until ANSWER is produced or MAX_LOOP_ITERATIONS is hit.
         On exhaustion, synthesizes from accumulated steps using the existing
         final_synthesis_from_sub_results function.
-        Returns (final_answer, all_accumulated_docs).
+        Returns (final_answer, all_accumulated_docs, thinking).
         """
         from app.services.llm import llm_service
 
@@ -1590,6 +1590,7 @@ class RetrievalService:
 
             if result["can_answer"]:
                 final_answer = result["final_answer"]
+                thinking = result.get("thinking")
                 _t_total = time.perf_counter() - _t_start
                 logger.info(
                     f"\n{'='*70}\n"
@@ -1597,9 +1598,10 @@ class RetrievalService:
                     f"  iterations={iteration + 1}\n"
                     f"  answer='{final_answer}'\n"
                     f"  docs_accumulated={len(all_docs)}\n"
+                    f"  thinking={'yes' if thinking else 'no'}\n"
                     f"{'='*70}"
                 )
-                return final_answer, all_docs
+                return final_answer, all_docs, thinking
 
             # Mark this query as tried now that we have processed its results
             if current_query and current_query not in tried_queries:
@@ -1642,7 +1644,7 @@ class RetrievalService:
             f"  best_finding={last_answer!r}\n"
             f"{'='*70}"
         )
-        return last_answer, all_docs
+        return last_answer, all_docs, None
 
 
 retrieval_service = RetrievalService()

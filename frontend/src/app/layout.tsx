@@ -5,6 +5,7 @@ import { Sidebar } from "@/components/sidebar";
 import { CustomCursor } from "@/components/custom-cursor";
 import { GrainOverlay } from "@/components/grain-overlay";
 import { KBProvider } from "@/lib/kb-context";
+import { ChatProvider } from "@/lib/chat-context";
 import { SuppressThreeWarnings } from "@/components/suppress-three-warnings";
 
 const inter = Inter({
@@ -48,11 +49,13 @@ export default function RootLayout({
       </head>
       <body className={`${inter.variable} font-sans antialiased`}>
         <KBProvider>
-          <SuppressThreeWarnings />
-          <CustomCursor />
-          <GrainOverlay />
-          <Sidebar />
-          <main className="ml-20 min-h-screen">{children}</main>
+          <ChatProvider>
+            <SuppressThreeWarnings />
+            <CustomCursor />
+            <GrainOverlay />
+            <Sidebar />
+            <main className="ml-20 min-h-screen">{children}</main>
+          </ChatProvider>
         </KBProvider>
       </body>
     </html>

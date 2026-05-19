@@ -1,7 +1,7 @@
 import axios from "axios";
 import type { KnowledgeBase, NoteStatus } from "@/lib/types";
 
-const API_BASE_URL = "http://localhost:8000/api/v1";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8700/api/v1";
 
 /** Append ?kb=<name> when targeting a non-default knowledge base. */
 function kbParam(kb: string): string {
@@ -114,7 +114,7 @@ export const api = {
   // ── Health ───────────────────────────────────────────────────────────────
 
   async getHealth() {
-    const response = await axios.get("http://localhost:8000/health");
+    const response = await axios.get(`${API_BASE_URL.replace("/api/v1", "")}/health`);
     return response.data;
   },
 
@@ -226,5 +226,20 @@ export const api = {
 
   async deleteKB(id: string): Promise<void> {
     return http.del(`/kb/${id}`);
+  },
+
+  // ── LLM runtime settings ──────────────────────────────────────────────────
+
+  async getLLMSettings(): Promise<{ provider: string; model: string; ingestion_model: string; base_url: string }> {
+    return http.get("/settings");
+  },
+
+  async updateLLMSettings(data: {
+    provider?: string;
+    model?: string;
+    ingestion_model?: string;
+    base_url?: string;
+  }): Promise<{ provider: string; model: string; ingestion_model: string; base_url: string }> {
+    return http.patch("/settings", data);
   },
 };

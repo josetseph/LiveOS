@@ -13,12 +13,13 @@ A personal knowledge graph and multi-hop question-answering system. Notes — in
 5. [Infrastructure](#infrastructure)
 6. [Frontend](#frontend)
 7. [LLM & Model Support](#llm--model-support)
-8. [Benchmark Results](#benchmark-results)
-9. [Local Setup](#local-setup)
-10. [Local Model Setup](#local-model-setup)
-11. [Environment Variables](#environment-variables)
-12. [Running the Stack](#running-the-stack)
-13. [Knowledge Bases](#knowledge-bases)
+8. [Runtime Model Switching](#runtime-model-switching)
+9. [Benchmark Results](#benchmark-results)
+10. [Local Setup](#local-setup)
+11. [Local Model Setup](#local-model-setup)
+12. [Environment Variables](#environment-variables)
+13. [Running the Stack](#running-the-stack)
+14. [Knowledge Bases](#knowledge-bases)
 
 ---
 
@@ -43,7 +44,7 @@ The system is designed to run entirely locally. All LLM inference, embedding, an
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Next.js Frontend                        │
-│   Notes editor · Chat interface · 2D/3D graph visualisation     │
+│   Notes editor · Chat interface · 3D graph visualisation        │
 └────────────────────────────┬────────────────────────────────────┘
                              │ HTTP (REST, /api/v1/*)
 ┌────────────────────────────▼────────────────────────────────────┐
@@ -63,8 +64,8 @@ The system is designed to run entirely locally. All LLM inference, embedding, an
 └───────────┼────────────────────────┼───────────────────────────┘
             │                        │
 ┌───────────▼──────┐   ┌─────────────▼──────────────────────────┐
-│  Kuzu (embedded) │   │  Docker-managed services                │
-│  graph database  │   │  Qdrant · Typesense · PostgreSQL · MinIO│
+│  Kuzu (embedded) │   │  Docker-managed services                 │
+│  graph database  │   │  Qdrant · Typesense · PostgreSQL · RustFS│
 └──────────────────┘   └────────────────────────────────────────┘
 ```
 
@@ -76,7 +77,7 @@ The system is designed to run entirely locally. All LLM inference, embedding, an
 | Full-text search | Typesense | Replaces Elasticsearch — lighter, BM25 + exact match, much simpler to operate |
 | Vector store | Qdrant | Three collections: `node_cores`, `node_relationships`, `node_isolated_contexts` |
 | Relational DB | PostgreSQL | Stores raw notes with processing status; asyncpg for async access |
-| Object store | MinIO | Stores uploaded files (audio, images, PDFs) — R2-compatible API |
+| Object store | RustFS | S3-compatible, Apache 2.0; stores uploaded files (audio, images, PDFs) |
 | Embedding | `qwen3-embedding:0.6b` (local) | 1024-dim; requires Qwen3 instruction prefix for queries |
 | Reranker | `qwen3-reranker-0.6b` (local) | Cross-encoder; filters top-10 candidates before LLM context window |
 | LLM | Configurable | Ollama, LM Studio, Gemini, OpenAI, Anthropic, or HuggingFace |
@@ -95,7 +96,7 @@ Note saved
 [1] Multimedia node
     ├── Audio (.webm/.m4a/.mp3/.wav) → Whisper large-v3-turbo transcription
     ├── Images → Florence-2-large captioning + OCR
-    ├── PDF → pdfplumber text extraction
+    ├── PDF → PyMuPDF text extraction
     └── Word/Excel → python-docx / openpyxl extraction
     │
     ▼
@@ -176,9 +177,12 @@ User query
     │
     ▼
 [3] Response with inline note citations
+    └── Model thinking exposed in collapsible dropdown (when available)
 ```
 
 The loop accumulates findings across iterations. On exhaustion (no `can_answer=True`), the last non-empty FINDING is returned without an additional synthesis call.
+
+If the active LLM exposes reasoning (e.g. `reasoning_content` from LM Studio, or `<think>` tags from models like Gemma4), the thinking is passed through to the frontend and shown in a collapsible "Model thinking" section above the answer.
 
 ---
 
@@ -194,7 +198,7 @@ docker compose up -d
 |---|---|---|---|
 | Typesense | `typesense/typesense:27.1` | 8108 | Full-text search (BM25) |
 | PostgreSQL | `postgres:latest` | 5433 | Notes + processing status |
-| MinIO | `minio/minio:latest` | 9000 / 9001 | File storage (S3-compatible) |
+| RustFS | `rustfs/rustfs:latest` | 9000 / 9001 | File storage (S3-compatible) |
 | Qdrant | `qdrant/qdrant:latest` | 6333 / 6334 | Vector search |
 
 Kuzu is embedded — no container needed. The database files live at `data/kuzu/kuzu_graph`.
@@ -203,23 +207,29 @@ Kuzu is embedded — no container needed. The database files live at `data/kuzu/
 
 ## Frontend
 
-Built with Next.js 15 (App Router) and Tailwind CSS. Three main views:
+Built with Next.js 16 (App Router) and Tailwind CSS.
 
 | Route | Purpose |
 |---|---|
 | `/` | Landing page with navigation |
 | `/notes` | Notes editor — create, edit, search, filter by ingestion status; supports file attachments and voice recording |
 | `/chat` | Conversational interface — markdown rendering, file previews, thumbs up/down feedback, source citations |
-| `/graph` | 2D force-directed graph visualisation of the knowledge graph |
 | `/graph-3d` | 3D graph visualisation |
 | `/kb` | Knowledge base manager — create, rename, switch, and delete knowledge bases |
+| `/settings` | Runtime LLM settings — switch provider, chat model, ingestion model, and server URL without restarting |
 
 The notes editor supports:
 - Plain text with Markdown preview
 - File attachments (images, audio, PDF, Word, Excel)
-- In-browser voice recording (WebM → backend Whisper transcription)
+- In-browser voice recording — audio is transcoded to AAC/M4A server-side on upload, ensuring playback works across all browsers including Safari
 - Per-note ingestion status filter (all / ingested / ingesting / saved / failed)
 - Auto-save on edit
+- Note content segmentation — image, PDF, and audio sections are visually separated with labelled dividers in preview mode
+
+The chat interface supports:
+- Multi-hop answers with inline source citations
+- Collapsible model thinking display (for models that expose reasoning tokens)
+- Note preview modal with segmented content display
 
 ---
 
@@ -232,7 +242,7 @@ The LLM provider is set via `LLM_PROVIDER` in `backend/.env`. The same config fi
 | Provider | `LLM_PROVIDER` value | Notes |
 |---|---|---|
 | Ollama | `ollama` | Default. Runs locally at `http://127.0.0.1:11434` |
-| LM Studio | `lm_studio` | Local OpenAI-compatible server |
+| LM Studio | `lm_studio` | Local OpenAI-compatible server; exposes `reasoning_content` for thinking models |
 | OpenAI | `openai` | Requires `OPENAI_API_KEY` |
 | Google Gemini | `gemini` | Requires `GEMINI_API_KEY` |
 | Anthropic | `anthropic` | Requires `ANTHROPIC_API_KEY` |
@@ -241,6 +251,23 @@ The LLM provider is set via `LLM_PROVIDER` in `backend/.env`. The same config fi
 A separate `INGESTION_LLM_MODEL` can be set to use a different (usually smaller) model for extraction vs. chat — for example, `gemma3:4b` for ingestion and `gemma4:latest` for chat.
 
 An optional `LLM_FALLBACK_PROVIDER` kicks in if the primary provider fails.
+
+---
+
+## Runtime Model Switching
+
+The provider, chat model, ingestion model, and server URL can be changed live from the `/settings` page — no server restart or `.env` edit required.
+
+Changes are persisted to `data/runtime_config.json` and re-applied automatically on the next server start, so they survive restarts. API keys are never stored here — those remain in `backend/.env`.
+
+| Field | What it controls |
+|---|---|
+| Provider | Active LLM backend (`ollama`, `lm_studio`, `gemini`, `openai`, `anthropic`, `huggingface`) |
+| Chat model | Model used for all chat queries (`CHAT_MODEL` — highest-priority override) |
+| Ingestion model | Model used during note ingestion — extraction, entity reasoning (`INGESTION_MODEL`) |
+| Server URL | Base URL for local providers (LM Studio / Ollama) |
+
+Model-only changes take effect on the next request with zero overhead. Provider or server URL changes trigger a full LLM client reinitialisation in-process.
 
 ---
 
@@ -322,9 +349,10 @@ The move from Neo4j + Elasticsearch to Kuzu + Typesense cut response time from ~
 
 ### Prerequisites
 
-- Docker Desktop (for Qdrant, Typesense, PostgreSQL, MinIO)
+- Docker Desktop (for Qdrant, Typesense, PostgreSQL, RustFS)
 - Python 3.11+
 - Node.js 20+
+- ffmpeg (for server-side audio transcoding — `brew install ffmpeg` on macOS)
 - Ollama (for local LLM/embedding inference)
 
 ### 1. Clone and install
@@ -372,7 +400,7 @@ python scripts/init_graph.py
 Start the API server:
 
 ```sh
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8700
 ```
 
 ### 4. Frontend
@@ -383,7 +411,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3700](http://localhost:3700).
 
 ---
 

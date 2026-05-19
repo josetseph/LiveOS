@@ -948,6 +948,63 @@ class LLMService:
 
         return response
 
+    def _reason_step(self, prompt: str) -> tuple[str, str | None]:
+        """
+        Like reason(), but also returns any model thinking/reasoning content.
+
+        Returns:
+            (content, thinking) where thinking is the model's internal chain-of-thought
+            (from reasoning_content field or <think>…</think> tags), stripped from content.
+            thinking is None if the model produced no separate thinking.
+        """
+        thinking: str | None = None
+
+        if self.provider == "gemini":
+            response = self.gemini_client.models.generate_content(
+                model=self._get_model_for_task("reasoning"),
+                contents=prompt,
+            )
+            return response.text or "", None
+
+        if self.provider == "anthropic":
+            response = self.chat_client.messages.create(
+                model=self._get_model_for_task("reasoning"),
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text or "", None
+
+        # Local / LM Studio / OpenAI
+        _model = self._get_model_for_task("reasoning")
+        extra_body = self._with_keep_alive()
+
+        response = self.chat_client.chat.completions.create(
+            model=_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a deep reasoning engine. Analyze the input carefully. Detect conflicts, subtleties, or hidden connections.",  # pylint: disable=line-too-long
+                },
+                {"role": "user", "content": prompt},
+            ],
+            extra_body=extra_body,
+        )
+        message = response.choices[0].message
+        content: str = message.content or ""
+
+        # LM Studio (and some OpenAI-compat servers) expose thinking in reasoning_content
+        thinking = getattr(message, "reasoning_content", None) or None
+
+        # Fallback: extract <think>…</think> blocks embedded in content
+        if not thinking and "<think>" in content:
+            think_match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
+            if think_match:
+                thinking = think_match.group(1).strip()
+                content = re.sub(
+                    r"<think>.*?</think>", "", content, flags=re.DOTALL
+                ).strip()
+
+        return content, thinking
+
     def reason(self, prompt: str, model: str | None = None) -> str:
         """
         Uses the Reasoning Model for complex logic/refinement.
@@ -1265,23 +1322,41 @@ class LLMService:
 
         # ── Build task instructions ───────────────────────────────────────────
         if search_query and docs:
-            task_instructions = (
-                "Assess the current results:\n"
-                "REASONING: <how these documents relate to the question "
-                "and prior findings>\n"
-                "FINDING: <the specific fact(s) extracted from these documents, "
-                "e.g. 'Scott Derrickson is American' or 'Ed Wood was born in 1924'. "
-                "This is NOT the final answer to the original question — just what "
-                "this search found. Always write something; use 'Not found' only "
-                "if nothing in these documents is relevant to the query>\n\n"
-                "Then decide:\n"
-                "  If you have enough information to answer the ORIGINAL QUESTION confidently:\n"
-                "  ANSWER: <the specific answer — see output rules below>\n\n"
-                "  If you need more information:\n"
-                "  NEXT_QUERY: <one specific search query, different from all prior ones>\n\n"
-                f"{self._REASONING_RULES}\n"
-                f"{self._OUTPUT_RULES}"
-            )
+            if settings.BENCHMARK_MODE:
+                task_instructions = (
+                    "Assess the current results:\n"
+                    "REASONING: <how these documents relate to the question "
+                    "and prior findings>\n"
+                    "FINDING: <the specific fact(s) extracted from these documents, "
+                    "e.g. 'Scott Derrickson is American' or 'Ed Wood was born in 1924'. "
+                    "This is NOT the final answer to the original question — just what "
+                    "this search found. Always write something; use 'Not found' only "
+                    "if nothing in these documents is relevant to the query>\n\n"
+                    "Then decide:\n"
+                    "  If you have enough information to answer the ORIGINAL QUESTION confidently:\n"
+                    "  ANSWER: <the specific answer — see output rules below>\n\n"
+                    "  If you need more information:\n"
+                    "  NEXT_QUERY: <one specific search query, different from all prior ones>\n\n"
+                    f"{self._REASONING_RULES}\n"
+                    f"{self._OUTPUT_RULES}"
+                )
+            else:
+                task_instructions = (
+                    "Assess the current results:\n"
+                    "REASONING: <how these documents relate to the question "
+                    "and what you have found so far>\n"
+                    "FINDING: <a summary of what is relevant in these documents — "
+                    "key facts, entities, relationships. Always write something; "
+                    "use 'Not found' only if truly nothing here is relevant>\n\n"
+                    "Then decide:\n"
+                    "  If you have enough information to answer the ORIGINAL QUESTION:\n"
+                    "  ANSWER: <a complete, natural-language answer covering everything "
+                    "relevant you found — see output rules below>\n\n"
+                    "  If you need more information:\n"
+                    "  NEXT_QUERY: <one specific search query, different from all prior ones>\n\n"
+                    f"{self._REASONING_RULES_GENERAL}\n"
+                    f"{self._OUTPUT_RULES_GENERAL}"
+                )
         else:
             task_instructions = (
                 "Output the first search query needed to start answering this question:\n"
@@ -1299,7 +1374,8 @@ class LLMService:
         )
 
         try:
-            raw = await asyncio.to_thread(self.reason, prompt) or ""
+            raw, step_thinking = await asyncio.to_thread(self._reason_step, prompt)
+            raw = raw or ""
             logger.info(f"[LLM] iterative_step raw response:\n{raw}")
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning(f"[LLM] iterative_step failed: {e}")
@@ -1309,6 +1385,7 @@ class LLMService:
                 "can_answer": False,
                 "final_answer": None,
                 "next_query": None,
+                "thinking": None,
             }
 
         # ── Parse response ────────────────────────────────────────────────────
@@ -1318,27 +1395,32 @@ class LLMService:
         final_answer: str | None = None
         next_query: str | None = None
 
-        for line in raw.splitlines():
-            ls = line.strip()
-            ll = ls.lower()
-            if ll.startswith("reasoning:"):
-                reasoning = ls[len("reasoning:") :].strip()
-            elif ll.startswith("finding:"):
-                full_answer = ls[len("finding:") :].strip()
-            elif ll.startswith("full_answer:"):  # backwards compat
-                if not full_answer:
-                    full_answer = ls[len("full_answer:") :].strip()
-            elif ll.startswith("answer:"):
-                val = ls[len("answer:") :].strip()
-                if val.upper() in _non_answers:
-                    logger.info(
-                        "[LLM] iterative_step ANSWER=INSUFFICIENT → need next query"
-                    )
-                else:
-                    can_answer = True
-                    final_answer = val
-            elif ll.startswith("next_query:"):
-                next_query = ls[len("next_query:") :].strip()
+        # Regex-based section extractor — handles:
+        #   * markdown bold: **ANSWER:** or **FINDING:**
+        #   * multi-line section content (FINDING:\ntext on next line)
+        #   * any mix of the above
+        _section_re = re.compile(
+            r"\*{0,3}(REASONING|FINDING|FULL_ANSWER|ANSWER|NEXT_QUERY)\*{0,3}\s*:[ \t]*(.*?)"
+            r"(?=\*{0,3}(?:REASONING|FINDING|FULL_ANSWER|ANSWER|NEXT_QUERY)\*{0,3}\s*:|\Z)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        sections: dict[str, str] = {}
+        for m in _section_re.finditer(raw):
+            key = m.group(1).upper()
+            val = m.group(2).strip()
+            if key not in sections:  # first occurrence wins
+                sections[key] = val
+
+        reasoning = sections.get("REASONING", "")
+        full_answer = sections.get("FINDING", "") or sections.get("FULL_ANSWER", "")
+        answer_val = sections.get("ANSWER", "")
+        next_query_val = sections.get("NEXT_QUERY", "")
+
+        if answer_val and answer_val.upper() not in _non_answers:
+            can_answer = True
+            final_answer = answer_val
+        elif next_query_val:
+            next_query = next_query_val
 
         # ── Post-process ANSWER ───────────────────────────────────────────────
         # Fallback: if the LLM committed FULL_ANSWER but gave neither ANSWER nor
@@ -1364,6 +1446,7 @@ class LLMService:
             "can_answer": can_answer,
             "final_answer": final_answer,
             "next_query": next_query,
+            "thinking": step_thinking,
         }
 
     # Reasoning rules ported from benchmark v4/v5 (the 0.74-scoring pipeline).
@@ -1425,6 +1508,29 @@ class LLMService:
         - Role, title, or position → the role/title only, never the person holding it
         - Location → exact place name as it appears in the source
         - Never answer "Neither" or "Both" unless the question explicitly asks for it
+        - If you cannot answer yet → output NEXT_QUERY, not ANSWER
+        """
+
+    # ── General KB mode rules (BENCHMARK_MODE=False) ──────────────────────────
+    # Used for personal knowledge bases where the goal is a thorough,
+    # natural-language answer — not a single extracted fact.
+
+    _REASONING_RULES_GENERAL = """
+        REASONING RULES:
+        - Trace your findings step by step across all prior searches
+        - Cover all relevant aspects you have found, not just one fact
+        - Note relationships and connections between entities across searches
+        - If multiple searches returned related information, synthesise them
+        """
+
+    _OUTPUT_RULES_GENERAL = """
+        OUTPUT RULES:
+        - Write a complete, natural-language answer covering all relevant things you found
+        - Be thorough — it is better to include more than to leave something out
+        - Organise clearly if there are multiple aspects (e.g. short paragraphs or a list)
+        - Stick strictly to what the documents say — do not invent or infer beyond the evidence
+        - If something relevant could not be found, acknowledge it briefly
+        - Do not pad with filler phrases — every sentence should add information
         - If you cannot answer yet → output NEXT_QUERY, not ANSWER
         """
 

@@ -41,8 +41,10 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
 
         # ── Research loop retrieval ──────────────────────────────────────────
         t0 = time.perf_counter()
-        final_answer, all_docs = await self._retrieval.retrieve_with_self_correction(
-            user_query, top_k=50, max_hops=10, filter_docs=False
+        final_answer, all_docs, thinking = (
+            await self._retrieval.retrieve_with_self_correction(
+                user_query, top_k=50, max_hops=10, filter_docs=False
+            )
         )
         logger.info(
             f"[Chat] Research loop retrieval: {len(all_docs)} docs accumulated "
@@ -132,6 +134,7 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
             "context": unique_docs,
             "information_needs": [user_query],
             "discovered_entities": {},
+            "thinking": thinking,
         }
 
     async def _extract_references(self, docs: list) -> list:

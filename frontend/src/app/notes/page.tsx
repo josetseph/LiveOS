@@ -23,6 +23,7 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ShaderBackground } from "@/components/shader-background";
 import { useKB } from "@/lib/kb-context";
+import { SegmentedNoteContent } from "@/components/segmented-note-content";
 import type { Note, FilePreview } from "@/lib/types";
 
 
@@ -62,8 +63,11 @@ export default function NotesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentKB, isHydrated]);
 
-  // Debounced search and filter
+  // Debounced search and filter — skip until localStorage is hydrated so we
+  // never fetch with the pre-hydration default KB slug.
   useEffect(() => {
+    if (!isHydrated) return;
+
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
     }
@@ -77,7 +81,7 @@ export default function NotesPage() {
         clearTimeout(searchTimeoutRef.current);
       }
     };
-  }, [searchQuery, processedFilter]);
+  }, [searchQuery, processedFilter, isHydrated]);
 
   const handleSaveNote = useCallback(async (note: Note) => {
     // Don't save if content hasn't changed
@@ -347,7 +351,21 @@ export default function NotesPage() {
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+
+      // Pick the best supported audio format.
+      // Safari only supports MP4/AAC; Chrome/Firefox support WebM/Opus.
+      const preferredTypes = [
+        "audio/mp4;codecs=aac", // Safari
+        "audio/mp4",            // Safari fallback
+        "audio/webm;codecs=opus", // Chrome / Firefox
+        "audio/webm",           // Chrome / Firefox fallback
+      ];
+      const mimeType =
+        preferredTypes.find((t) => MediaRecorder.isTypeSupported(t)) ?? "";
+
+      const mediaRecorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
@@ -356,13 +374,15 @@ export default function NotesPage() {
       };
 
       mediaRecorder.onstop = async () => {
+        const actualMime = mediaRecorder.mimeType || mimeType || "audio/webm";
+        const ext = actualMime.includes("mp4") ? "m4a" : "webm";
         const audioBlob = new Blob(audioChunksRef.current, {
-          type: "audio/webm",
+          type: actualMime,
         });
         const audioFile = new File(
           [audioBlob],
-          `recording-${Date.now()}.webm`,
-          { type: "audio/webm" },
+          `recording-${Date.now()}.${ext}`,
+          { type: actualMime },
         );
 
         try {
@@ -911,80 +931,11 @@ export default function NotesPage() {
 
             <div className="flex-1 overflow-y-auto p-6">
               {isPreviewMode ? (
-                <div className="prose prose-invert mx-auto max-w-3xl prose-headings:font-bold prose-headings:text-white prose-h1:text-4xl prose-h1:mt-6 prose-h1:mb-4 prose-h2:text-3xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-2xl prose-h3:mt-4 prose-h3:mb-3 prose-h4:text-xl prose-h4:mt-3 prose-h4:mb-2 prose-p:leading-relaxed prose-p:text-white/90 prose-p:my-3 prose-strong:text-white prose-strong:font-bold prose-em:text-white/90 prose-em:italic prose-a:text-purple-400 prose-a:underline hover:prose-a:text-purple-300 prose-code:text-pink-400 prose-code:bg-white/10 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:before:content-[''] prose-code:after:content-[''] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-l-4 prose-blockquote:border-purple-500/50 prose-blockquote:text-white/80 prose-blockquote:pl-4 prose-blockquote:italic prose-ul:text-white/90 prose-ul:my-3 prose-ol:text-white/90 prose-ol:my-3 prose-li:text-white/90 prose-li:my-1">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      a: ({ children, href, ...props }) => {
-                        const text = children?.toString() || "";
-                        // Check if this is a file link
-                        if (
-                          href &&
-                          (text.startsWith("📎") || text.startsWith("🎤"))
-                        ) {
-                          const filename = text.replace(/^[📎🎤]\s*/, "");
-                          return (
-                            <button
-                              onClick={() => handleFileClick(href, filename)}
-                              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
-                            >
-                              {text}
-                            </button>
-                          );
-                        }
-                        return (
-                          <a href={href} {...props}>
-                            {children}
-                          </a>
-                        );
-                      },
-                      h1: ({ children, ...props }) => (
-                        <h1
-                          className="text-4xl font-bold text-white mt-6 mb-4"
-                          {...props}
-                        >
-                          {children}
-                        </h1>
-                      ),
-                      h2: ({ children, ...props }) => (
-                        <h2
-                          className="text-3xl font-bold text-white mt-5 mb-3"
-                          {...props}
-                        >
-                          {children}
-                        </h2>
-                      ),
-                      h3: ({ children, ...props }) => (
-                        <h3
-                          className="text-2xl font-bold text-white mt-4 mb-3"
-                          {...props}
-                        >
-                          {children}
-                        </h3>
-                      ),
-                      h4: ({ children, ...props }) => (
-                        <h4
-                          className="text-xl font-bold text-white mt-3 mb-2"
-                          {...props}
-                        >
-                          {children}
-                        </h4>
-                      ),
-                      strong: ({ children, ...props }) => (
-                        <strong className="font-bold text-white" {...props}>
-                          {children}
-                        </strong>
-                      ),
-                      em: ({ children, ...props }) => (
-                        <em className="italic text-white/90" {...props}>
-                          {children}
-                        </em>
-                      ),
-                    }}
-                  >
-                    {selectedNote.content || "*Empty note*"}
-                  </ReactMarkdown>
-                </div>
+                <SegmentedNoteContent
+                  content={selectedNote.content}
+                  onFileClick={handleFileClick}
+                  proseClassName="prose prose-invert mx-auto max-w-3xl prose-headings:font-bold prose-headings:text-white prose-h1:text-4xl prose-h1:mt-6 prose-h1:mb-4 prose-h2:text-3xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-2xl prose-h3:mt-4 prose-h3:mb-3 prose-h4:text-xl prose-h4:mt-3 prose-h4:mb-2 prose-p:leading-relaxed prose-p:text-white/90 prose-p:my-3 prose-strong:text-white prose-strong:font-bold prose-em:text-white/90 prose-em:italic prose-a:text-purple-400 prose-a:underline hover:prose-a:text-purple-300 prose-code:text-pink-400 prose-code:bg-white/10 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:before:content-[''] prose-code:after:content-[''] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-l-4 prose-blockquote:border-purple-500/50 prose-blockquote:text-white/80 prose-blockquote:pl-4 prose-blockquote:italic prose-ul:text-white/90 prose-ul:my-3 prose-ol:text-white/90 prose-ol:my-3 prose-li:text-white/90 prose-li:my-1"
+                />
               ) : (
                 <textarea
                   ref={textareaRef}

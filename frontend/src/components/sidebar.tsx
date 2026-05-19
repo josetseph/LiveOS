@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { Home, MessageSquare, FileText, Box, Database } from "lucide-react";
+import { Home, MessageSquare, FileText, Box, Database, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useKB } from "@/lib/kb-context";
 
@@ -13,6 +13,7 @@ const navigation = [
   { name: "Notes", href: "/notes", icon: FileText },
   { name: "Graph", href: "/graph-3d", icon: Box },
   { name: "Knowledge Bases", href: "/kb", icon: Database },
+  { name: "Settings", href: "/settings", icon: Settings },
 ];
 
 export function Sidebar() {

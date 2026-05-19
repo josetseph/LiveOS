@@ -13,10 +13,10 @@ import {
   FileText,
   ExternalLink,
   Trash2,
-  ThumbsUp,
-  ThumbsDown,
   Search,
   Layers,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
@@ -26,14 +26,10 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ShaderBackground } from "@/components/shader-background";
 import { useKB } from "@/lib/kb-context";
+import { useChat } from "@/lib/chat-context";
+import type { Message } from "@/lib/chat-context";
+import { SegmentedNoteContent } from "@/components/segmented-note-content";
 import type { FilePreview, NotePreview } from "@/lib/types";
-
-interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  timestamp: Date;
-}
 
 /** Prose classes shared by the two inline message renderers. */
 const PROSE_CLASSNAME =
@@ -76,17 +72,13 @@ function makeLinkRenderer(
 
 export default function ChatPage() {
   const { currentKB, currentKBName } = useKB();
-  const [messages, setMessages] = useState<Message[]>([]);
+  const { messages, isLoading, sendMessage, clearMessages } = useChat();
   const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
   const [previewNote, setPreviewNote] = useState<NotePreview | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
+  const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [greeting, setGreeting] = useState("Hello!");
-  const [feedbackGiven, setFeedbackGiven] = useState<
-    Record<string, "up" | "down">
-  >({});
-
   useEffect(() => {
     const hour = new Date().getHours();
     if (hour < 12) setGreeting("Good morning!");
@@ -102,64 +94,11 @@ export default function ChatPage() {
     scrollToBottom();
   }, [messages]);
 
-  // Load messages from sessionStorage on mount
-  useEffect(() => {
-    const savedMessages = sessionStorage.getItem("chat-messages");
-    if (savedMessages) {
-      try {
-        const parsed = JSON.parse(savedMessages);
-        setMessages(
-          parsed.map((m: Message) => ({ ...m, timestamp: new Date(m.timestamp) })),
-        );
-      } catch (error) {
-        console.error("Error loading chat messages:", error);
-      }
-    }
-  }, []);
-
-  // Save messages to sessionStorage whenever they change
-  useEffect(() => {
-    if (messages.length > 0) {
-      sessionStorage.setItem("chat-messages", JSON.stringify(messages));
-    }
-  }, [messages]);
-
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
-
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: input,
-      timestamp: new Date(),
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
+    sendMessage(input, currentKB);
     setInput("");
-    setIsLoading(true);
-
-    try {
-      const response = await api.chat(input, currentKB);
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: response.answer || "I couldn't generate a response.",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, assistantMessage]);
-    } catch (error) {
-      console.error("Chat error:", error);
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: "Sorry, I encountered an error. Please try again.",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorMessage]);
-    } finally {
-      setIsLoading(false);
-    }
   };
 
   const handleNoteReference = async (noteId: string) => {
@@ -192,33 +131,7 @@ export default function ChatPage() {
 
   const handleClearChat = () => {
     if (window.confirm("Clear all chat messages? This cannot be undone.")) {
-      setMessages([]);
-      sessionStorage.removeItem("chat-messages");
-    }
-  };
-
-  const handleFeedback = async (
-    assistantMessage: Message,
-    rating: "up" | "down",
-  ) => {
-    const msgIndex = messages.findIndex((m) => m.id === assistantMessage.id);
-    const userMsg = messages
-      .slice(0, msgIndex)
-      .reverse()
-      .find((m) => m.role === "user");
-    if (!userMsg) return;
-
-    setFeedbackGiven((prev) => ({ ...prev, [assistantMessage.id]: rating }));
-
-    try {
-      await api.submitFeedback({
-        query: userMsg.content,
-        response: assistantMessage.content,
-        relevance: rating === "up" ? 5 : 1,
-        quality: rating === "up" ? 5 : 1,
-      });
-    } catch (error) {
-      console.error("Feedback error:", error);
+      clearMessages();
     }
   };
 
@@ -287,7 +200,7 @@ export default function ChatPage() {
               </div>
               <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
                 <Cpu className="h-3 w-3 text-orange-400" />
-                <span className="text-xs text-white/70">MinIO</span>
+                <span className="text-xs text-white/70">RustFS</span>
               </div>
             </div>
           </div>
@@ -349,6 +262,49 @@ export default function ChatPage() {
                     >
                       {message.role === "assistant" ? (
                         <>
+                          {/* Thinking dropdown (only when model returned thinking) */}
+                          {message.thinking && (
+                            <div className="mb-3">
+                              <button
+                                onClick={() => {
+                                  setExpandedThinking((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(message.id)) {
+                                      next.delete(message.id);
+                                    } else {
+                                      next.add(message.id);
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                className="flex items-center gap-1.5 text-xs text-purple-400/80 hover:text-purple-300 transition-colors"
+                              >
+                                {expandedThinking.has(message.id) ? (
+                                  <ChevronUp className="h-3.5 w-3.5" />
+                                ) : (
+                                  <ChevronDown className="h-3.5 w-3.5" />
+                                )}
+                                <span>Model thinking</span>
+                              </button>
+                              <AnimatePresence initial={false}>
+                                {expandedThinking.has(message.id) && (
+                                  <motion.div
+                                    initial={{ height: 0, opacity: 0 }}
+                                    animate={{ height: "auto", opacity: 1 }}
+                                    exit={{ height: 0, opacity: 0 }}
+                                    transition={{ duration: 0.2 }}
+                                    className="overflow-hidden"
+                                  >
+                                    <div className="mt-2 rounded-lg border border-purple-500/20 bg-purple-500/5 px-3 py-2">
+                                      <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-purple-300/70">
+                                        {message.thinking}
+                                      </pre>
+                                    </div>
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
+                            </div>
+                          )}
                           {(() => {
                             // Check if message contains References section (### References or References:)
                             const refMatch = message.content.match(
@@ -425,39 +381,7 @@ export default function ChatPage() {
                       ) : (
                         <p className="whitespace-pre-wrap">{message.content}</p>
                       )}
-                      {message.role === "assistant" && !isLoading && (
-                        <div className="mt-3 flex items-center gap-2 border-t border-white/10 pt-2">
-                          {feedbackGiven[message.id] ? (
-                            <span className="text-xs text-white/40">
-                              {feedbackGiven[message.id] === "up"
-                                ? "👍 Thanks!"
-                                : "👎 Noted"}
-                            </span>
-                          ) : (
-                            <>
-                              <span className="text-xs text-white/40">
-                                Helpful?
-                              </span>
-                              <button
-                                onClick={() => handleFeedback(message, "up")}
-                                className="flex h-6 w-6 items-center justify-center rounded-md text-white/40 transition-all hover:bg-white/10 hover:text-green-400"
-                                title="Good response"
-                                aria-label="Mark as helpful"
-                              >
-                                <ThumbsUp className="h-3.5 w-3.5" />
-                              </button>
-                              <button
-                                onClick={() => handleFeedback(message, "down")}
-                                className="flex h-6 w-6 items-center justify-center rounded-md text-white/40 transition-all hover:bg-white/10 hover:text-red-400"
-                                title="Poor response"
-                                aria-label="Mark as unhelpful"
-                              >
-                                <ThumbsDown className="h-3.5 w-3.5" />
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      )}
+
                     </div>
                     {message.role === "user" && (
                       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white/10">
@@ -560,58 +484,11 @@ export default function ChatPage() {
                 </button>
               </div>
               <div className="max-h-[calc(80vh-80px)] overflow-y-auto p-6">
-                <div className="prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-4xl prose-h1:mt-6 prose-h1:mb-4 prose-h2:text-3xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-2xl prose-h3:mt-4 prose-h3:mb-3 prose-h4:text-xl prose-h4:mt-3 prose-h4:mb-2 prose-p:leading-relaxed prose-p:text-white/90 prose-p:my-3 prose-strong:text-white prose-strong:font-bold prose-em:text-white/90 prose-em:italic prose-a:text-purple-400 prose-a:underline hover:prose-a:text-purple-300 prose-code:text-pink-400 prose-code:bg-white/10 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:before:content-[''] prose-code:after:content-[''] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-l-4 prose-blockquote:border-purple-500/50 prose-blockquote:text-white/80 prose-blockquote:pl-4 prose-blockquote:italic prose-ul:text-white/90 prose-ul:my-3 prose-ol:text-white/90 prose-ol:my-3 prose-li:text-white/90 prose-li:my-1">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      a: makeLinkRenderer(handleFileClick).a,
-                      h1: ({ node: _node, children, ...props }) => (
-                        <h1
-                          className="text-4xl font-bold text-white mt-6 mb-4"
-                          {...props}
-                        >
-                          {children}
-                        </h1>
-                      ),
-                      h2: ({ node: _node, children, ...props }) => (
-                        <h2
-                          className="text-3xl font-bold text-white mt-5 mb-3"
-                          {...props}
-                        >
-                          {children}
-                        </h2>
-                      ),
-                      h3: ({ node: _node, children, ...props }) => (
-                        <h3
-                          className="text-2xl font-bold text-white mt-4 mb-3"
-                          {...props}
-                        >
-                          {children}
-                        </h3>
-                      ),
-                      h4: ({ node: _node, children, ...props }) => (
-                        <h4
-                          className="text-xl font-bold text-white mt-3 mb-2"
-                          {...props}
-                        >
-                          {children}
-                        </h4>
-                      ),
-                      strong: ({ node: _node, children, ...props }) => (
-                        <strong className="font-bold text-white" {...props}>
-                          {children}
-                        </strong>
-                      ),
-                      em: ({ node: _node, children, ...props }) => (
-                        <em className="italic text-white/90" {...props}>
-                          {children}
-                        </em>
-                      ),
-                    }}
-                  >
-                    {previewNote.content || "*Empty note*"}
-                  </ReactMarkdown>
-                </div>
+                <SegmentedNoteContent
+                  content={previewNote.content || "*Empty note*"}
+                  onFileClick={handleFileClick}
+                  proseClassName="prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-4xl prose-h1:mt-6 prose-h1:mb-4 prose-h2:text-3xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-2xl prose-h3:mt-4 prose-h3:mb-3 prose-h4:text-xl prose-h4:mt-3 prose-h4:mb-2 prose-p:leading-relaxed prose-p:text-white/90 prose-p:my-3 prose-strong:text-white prose-strong:font-bold prose-em:text-white/90 prose-em:italic prose-a:text-purple-400 prose-a:underline hover:prose-a:text-purple-300 prose-code:text-pink-400 prose-code:bg-white/10 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:before:content-[''] prose-code:after:content-[''] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-l-4 prose-blockquote:border-purple-500/50 prose-blockquote:text-white/80 prose-blockquote:pl-4 prose-blockquote:italic prose-ul:text-white/90 prose-ul:my-3 prose-ol:text-white/90 prose-ol:my-3 prose-li:text-white/90 prose-li:my-1"
+                />
               </div>
             </motion.div>
           </motion.div>
@@ -711,6 +588,7 @@ export default function ChatPage() {
           </motion.div>
         )}
       </AnimatePresence>
+
     </div>
   );
 }
