@@ -7,19 +7,20 @@ A knowledge graph and multi-hop question-answering system. Notes — including t
 ## Table of Contents
 
 1. [What It Is](#what-it-is)
-2. [Architecture](#architecture)
-3. [Ingestion Pipeline](#ingestion-pipeline)
-4. [Retrieval Pipeline](#retrieval-pipeline)
-5. [Infrastructure](#infrastructure)
-6. [Frontend](#frontend)
-7. [LLM & Model Support](#llm--model-support)
-8. [Runtime Model Switching](#runtime-model-switching)
-9. [Benchmark Results](#benchmark-results)
-10. [Local Setup](#local-setup)
-11. [Local Model Setup](#local-model-setup)
-12. [Environment Variables](#environment-variables)
-13. [Running the Stack](#running-the-stack)
-14. [Knowledge Bases](#knowledge-bases)
+2. [Screenshots](#screenshots)
+3. [Architecture](#architecture)
+4. [Ingestion Pipeline](#ingestion-pipeline)
+5. [Retrieval Pipeline](#retrieval-pipeline)
+6. [Infrastructure](#infrastructure)
+7. [Frontend](#frontend)
+8. [LLM & Model Support](#llm--model-support)
+9. [Runtime Model Switching](#runtime-model-switching)
+10. [Benchmark Results](#benchmark-results)
+11. [Local Setup](#local-setup)
+12. [Local Model Setup](#local-model-setup)
+13. [Environment Variables](#environment-variables)
+14. [Running the Stack](#running-the-stack)
+15. [Knowledge Bases](#knowledge-bases)
 
 ---
 
@@ -36,6 +37,47 @@ LiveOS is an AI-powered knowledge base. You write notes — plain text, voice re
 7. **Isolates knowledge** into multiple named knowledge bases — each with its own graph, vector store, and full-text index
 
 The system is designed to run entirely locally. All LLM inference, embedding, and reranking can run on local hardware via Ollama or LM Studio. Cloud LLM providers (Gemini, OpenAI, Anthropic, HuggingFace) are also supported and switchable via environment variables.
+
+---
+
+## Screenshots
+
+![Home](Platform%20Images/home_view.png)
+
+<table>
+  <tr>
+    <td><img src="Platform%20Images/chat_view.png" alt="Chat interface"/></td>
+    <td><img src="Platform%20Images/notes_page_edit_view.png" alt="Notes editor"/></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Chat interface</em></td>
+    <td align="center"><em>Notes editor</em></td>
+  </tr>
+</table>
+
+![3D Knowledge Graph](Platform%20Images/graph_view.png)
+
+<table>
+  <tr>
+    <td><img src="Platform%20Images/graph_view_node_centered.png" alt="Node-centred graph view"/></td>
+    <td><img src="Platform%20Images/graph_node_view.png" alt="Node detail panel"/></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Node-centred view</em></td>
+    <td align="center"><em>Node detail panel</em></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td><img src="Platform%20Images/knowledge_base_selector_view.png" alt="Knowledge base manager"/></td>
+    <td><img src="Platform%20Images/llm_model_settings_view.png" alt="Runtime model settings"/></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Knowledge base manager</em></td>
+    <td align="center"><em>Runtime model settings</em></td>
+  </tr>
+</table>
 
 ---
 
@@ -384,18 +426,10 @@ Copy the example env and fill in your values:
 cp .env.example .env
 ```
 
-Run database migrations:
+Run all first-time initialisation in one step (migrations, storage bucket, Qdrant collections, Typesense schema, Kuzu graph):
 
 ```sh
-alembic upgrade head
-```
-
-Initialise Qdrant collections, Typesense schema, and the graph store:
-
-```sh
-python scripts/init_vectors.py
-python scripts/init_index.py
-python scripts/init_graph.py
+python scripts/init_local.py
 ```
 
 Start the API server:
@@ -446,6 +480,37 @@ huggingface-cli download Qwen/Qwen3-Reranker-0.6B \
 > **Note:** Florence-2-large requires `trust_remote_code=True` and includes custom modeling code. Do not rename or restructure the downloaded files.
 
 The backend reads models from the path configured by `MODELS_PATH` in `backend/app/core/config.py`, which defaults to `models` relative to the backend root.
+
+### LLM models
+
+The LLM used for chat and ingestion is configured separately and served by one of the supported providers.
+
+**Ollama (local)**
+
+```sh
+ollama pull gemma4:latest          # chat model
+ollama pull gemma3:4b              # ingestion model (smaller, faster)
+ollama pull qwen3-embedding:0.6b   # embedding model (required)
+```
+
+**LM Studio (local)**
+
+1. Open LM Studio and go to the **Discover** tab
+2. Search for a model by name (e.g. `google/gemma-3-4b-it`) and download it
+3. Load the model and start the local server
+4. Set `LLM_PROVIDER=lm_studio` in `backend/.env` — or switch provider live from `/settings`
+
+Models can also be downloaded from [Hugging Face](https://huggingface.co/models) and loaded into LM Studio via **My Models → Load from disk**.
+
+**Cloud providers**
+
+Set the API key in `backend/.env` and configure `LLM_PROVIDER`:
+
+```sh
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=your_key_here
+LLM_MODEL=gemini-2.0-flash-lite
+```
 
 ---
 
@@ -500,13 +565,26 @@ Individual reset scripts exist for each store: `reset_vectors.py`, `reset_index.
 
 ### Benchmark evaluation
 
+Before running the benchmark, enable benchmark mode in `backend/.env`:
+
+```sh
+BENCHMARK_MODE=true
+```
+
+Full instructions — dataset ingestion, evaluation flags, and LLM model setup — are in [`backend/tests/benchmark/README.md`](backend/tests/benchmark/README.md).
+
 ```sh
 cd backend
 source venv/bin/activate
-python tests/benchmark/evaluate.py
+
+# Ingest the benchmark notes
+python tests/benchmark/prepare_dataset.py --dataset hotpotqa
+
+# Run evaluation
+python tests/benchmark/evaluate.py --dataset hotpotqa --verbose
 ```
 
-Results are written to `Results/` as JSON + Markdown reports.
+Results are written to `backend/tests/benchmark/results/` as timestamped JSON files, and to `Results/` as Markdown reports.
 
 ---
 
