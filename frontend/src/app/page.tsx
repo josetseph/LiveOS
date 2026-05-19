@@ -53,7 +53,7 @@ export default function Home() {
             transition={{ duration: 0.8, delay: 0.2 }}
             className="mb-6 bg-linear-to-r from-purple-400 via-pink-400 to-purple-400 bg-clip-text text-6xl font-bold tracking-tight text-transparent md:text-8xl"
           >
-            LiveOS Brain
+            LiveOS
           </motion.h1>
 
           {/* Subtitle */}
@@ -63,7 +63,7 @@ export default function Home() {
             transition={{ duration: 0.8, delay: 0.4 }}
             className="mb-12 text-xl text-white/70 md:text-2xl"
           >
-            Your multimodal, graph-based personal memory system
+            Your multimodal, graph-based knowledge system
           </motion.p>
 
           {/* Features Grid */}

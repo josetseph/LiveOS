@@ -14,7 +14,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "LiveOS Brain",
+  title: "LiveOS",
   description: "Your multimodal, graph-based personal memory system",
   icons: {
     icon: [

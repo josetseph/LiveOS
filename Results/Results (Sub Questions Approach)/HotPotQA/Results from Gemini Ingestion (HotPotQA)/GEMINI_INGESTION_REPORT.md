@@ -1,7 +1,7 @@
 # Gemini Flash (gemini-3-flash-preview) Knowledge Graph Ingestion Report
 
 **Report Date:** February 26, 2026  
-**System:** LiveOS Brain — Personal Knowledge Management System  
+**System:** LiveOS — Personal Knowledge Management System  
 **Model:** Google Gemini API — `gemini-3-flash-preview`  
 **Ingestion Period:** February 25–26, 2026 (Two sessions across two API projects due to daily request limit)
 
@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-This report documents a complete batch ingestion of the HotPotQA benchmark dataset using **Google's Gemini Flash** (`gemini-3-flash-preview`) as the knowledge extraction engine within the LiveOS Brain system. The ingestion successfully processed all **990 notes** from the dataset with a **100% success rate** and zero lost notes, despite encountering a Google API daily request quota limit midway through, which required creating a second API project to continue.
+This report documents a complete batch ingestion of the HotPotQA benchmark dataset using **Google's Gemini Flash** (`gemini-3-flash-preview`) as the knowledge extraction engine within the LiveOS system. The ingestion successfully processed all **990 notes** from the dataset with a **100% success rate** and zero lost notes, despite encountering a Google API daily request quota limit midway through, which required creating a second API project to continue.
 
 Gemini Flash demonstrated dramatically faster throughput compared to previous runs using Gemma3:4B (local inference). The average per-note processing time dropped from **120–180 seconds** (Gemma3:4B) to just **34.28 seconds** — a **3.5–5× speed improvement** — while maintaining comparable or superior extraction quality.
 

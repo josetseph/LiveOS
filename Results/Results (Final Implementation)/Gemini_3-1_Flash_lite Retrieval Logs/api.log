@@ -1,6 +1,6 @@
 2026-05-08 22:05:18 | uvicorn.error | INFO | Started server process [73666]
 2026-05-08 22:05:18 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-08 22:05:18 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-08 22:05:18 | API | INFO | Application startup: LiveOS API online
 2026-05-08 22:05:18 | uvicorn.error | INFO | Application startup complete.
 2026-05-08 22:05:21 | uvicorn.access | INFO | 127.0.0.1:61008 - "GET /api/v1/notes HTTP/1.1" 200
 2026-05-08 22:05:47 | uvicorn.access | INFO | 127.0.0.1:61011 - "POST /api/v1/chat HTTP/1.1" 200

@@ -1,6 +1,6 @@
 2026-05-04 19:46:29 | uvicorn.error | INFO | Started server process [53706]
 2026-05-04 19:46:29 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-04 19:46:29 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-04 19:46:29 | API | INFO | Application startup: LiveOS API online
 2026-05-04 19:46:29 | uvicorn.error | INFO | Application startup complete.
 2026-05-04 19:46:37 | uvicorn.access | INFO | 127.0.0.1:54582 - "POST /api/v1/notes HTTP/1.1" 200
 2026-05-04 19:46:37 | uvicorn.access | INFO | 127.0.0.1:54582 - "POST /api/v1/notes/3417d560-a1cb-4765-bc8d-af7e077b6333/ingest HTTP/1.1" 200
@@ -616,7 +616,7 @@ TimeoutError
 2026-05-04 20:52:42 | uvicorn.access | INFO | 127.0.0.1:53154 - "POST /api/v1/notes/bc289f72-07c2-4300-b0ef-1f7691993bde/ingest HTTP/1.1" 200
 2026-05-04 21:19:54 | uvicorn.error | INFO | Started server process [38125]
 2026-05-04 21:19:54 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-04 21:19:54 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-04 21:19:54 | API | INFO | Application startup: LiveOS API online
 2026-05-04 21:19:54 | uvicorn.error | INFO | Application startup complete.
 2026-05-04 21:19:55 | uvicorn.access | INFO | 127.0.0.1:54115 - "POST /api/v1/notes HTTP/1.1" 200
 2026-05-04 21:19:55 | uvicorn.access | INFO | 127.0.0.1:54115 - "POST /api/v1/notes/2475e665-157e-4ba4-a0ed-8c7a58b466ea/ingest HTTP/1.1" 200
@@ -4773,11 +4773,11 @@ Exception: Ingestion Agent Failed: ['Extraction failed: 8 validation errors for 
 2026-05-05 16:25:26 | uvicorn.error | INFO | Finished server process [38125]
 2026-05-05 16:25:34 | uvicorn.error | INFO | Started server process [68357]
 2026-05-05 16:25:34 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-05 16:25:34 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-05 16:25:34 | API | INFO | Application startup: LiveOS API online
 2026-05-05 16:25:34 | uvicorn.error | INFO | Application startup complete.
 2026-05-05 16:25:40 | uvicorn.error | INFO | Started server process [68606]
 2026-05-05 16:25:40 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-05 16:25:40 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-05 16:25:40 | API | INFO | Application startup: LiveOS API online
 2026-05-05 16:25:40 | uvicorn.error | INFO | Application startup complete.
 2026-05-05 16:26:20 | uvicorn.error | INFO | Shutting down
 2026-05-05 16:26:20 | uvicorn.error | INFO | Waiting for application shutdown.
@@ -4785,7 +4785,7 @@ Exception: Ingestion Agent Failed: ['Extraction failed: 8 validation errors for 
 2026-05-05 16:26:20 | uvicorn.error | INFO | Finished server process [68606]
 2026-05-05 16:26:27 | uvicorn.error | INFO | Started server process [70724]
 2026-05-05 16:26:27 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-05 16:26:27 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-05 16:26:27 | API | INFO | Application startup: LiveOS API online
 2026-05-05 16:26:27 | uvicorn.error | INFO | Application startup complete.
 2026-05-05 16:26:39 | uvicorn.error | INFO | Shutting down
 2026-05-05 16:26:39 | uvicorn.error | INFO | Waiting for application shutdown.
@@ -4793,7 +4793,7 @@ Exception: Ingestion Agent Failed: ['Extraction failed: 8 validation errors for 
 2026-05-05 16:26:39 | uvicorn.error | INFO | Finished server process [70724]
 2026-05-05 16:26:46 | uvicorn.error | INFO | Started server process [71278]
 2026-05-05 16:26:46 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-05 16:26:46 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-05 16:26:46 | API | INFO | Application startup: LiveOS API online
 2026-05-05 16:26:46 | uvicorn.error | INFO | Application startup complete.
 2026-05-05 16:26:52 | uvicorn.error | INFO | Shutting down
 2026-05-05 16:26:52 | uvicorn.error | INFO | Waiting for application shutdown.
@@ -4801,7 +4801,7 @@ Exception: Ingestion Agent Failed: ['Extraction failed: 8 validation errors for 
 2026-05-05 16:26:52 | uvicorn.error | INFO | Finished server process [71278]
 2026-05-05 16:26:59 | uvicorn.error | INFO | Started server process [71675]
 2026-05-05 16:26:59 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-05 16:26:59 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-05 16:26:59 | API | INFO | Application startup: LiveOS API online
 2026-05-05 16:26:59 | uvicorn.error | INFO | Application startup complete.
 2026-05-05 16:27:32 | uvicorn.access | INFO | 127.0.0.1:55570 - "GET /api/v1/health HTTP/1.1" 404
 2026-05-05 16:27:39 | API | DEBUG | Health check hit
@@ -4812,11 +4812,11 @@ Exception: Ingestion Agent Failed: ['Extraction failed: 8 validation errors for 
 2026-05-05 17:30:12 | uvicorn.error | INFO | Finished server process [71675]
 2026-05-05 17:30:20 | uvicorn.error | INFO | Started server process [83801]
 2026-05-05 17:30:20 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-05 17:30:20 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-05 17:30:20 | API | INFO | Application startup: LiveOS API online
 2026-05-05 17:30:20 | uvicorn.error | INFO | Application startup complete.
 2026-05-05 17:30:26 | uvicorn.error | INFO | Started server process [84064]
 2026-05-05 17:30:26 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-05 17:30:26 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-05 17:30:26 | API | INFO | Application startup: LiveOS API online
 2026-05-05 17:30:26 | uvicorn.error | INFO | Application startup complete.
 2026-05-05 17:30:33 | uvicorn.access | INFO | 127.0.0.1:57390 - "POST /api/v1/notes HTTP/1.1" 200
 2026-05-05 17:30:33 | uvicorn.access | INFO | 127.0.0.1:57390 - "POST /api/v1/notes/1c225b38-6a08-4788-9339-d8371eb356f8/ingest HTTP/1.1" 200

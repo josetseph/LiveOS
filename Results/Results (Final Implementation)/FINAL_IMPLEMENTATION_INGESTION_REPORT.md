@@ -23,7 +23,7 @@
 
 ## 1. Executive Summary
 
-This report documents the batch ingestion of the HotPotQA benchmark dataset using **Gemma3:4b** (local, via Ollama) as the knowledge extraction engine and `qwen3-embedding:0.6b` (also local, via Ollama) as the embedding model within the LiveOS Brain system. The ingestion ran across three sessions on May 4–5, 2026, processing **990 notes** (990 successful; 1 temporary Pydantic failure in Session 2 retried and recovered in Session 3).
+This report documents the batch ingestion of the HotPotQA benchmark dataset using **Gemma3:4b** (local, via Ollama) as the knowledge extraction engine and `qwen3-embedding:0.6b` (also local, via Ollama) as the embedding model within the LiveOS system. The ingestion ran across three sessions on May 4–5, 2026, processing **990 notes** (990 successful; 1 temporary Pydantic failure in Session 2 retried and recovered in Session 3).
 
 This run represents the **Final Implementation** architecture — a heavily refactored codebase relative to all prior approaches. Key structural changes include: migration from Neo4j to **Kuzu** (embedded graph database), replacement of Elasticsearch with **Typesense** for full-text search, consolidation of the two-call-per-note LLM pattern (extract + title) into a **single extraction call**, removal of the post-ingestion **similarity detection** step, introduction of a **predicate cleaning** function that strips entity name tokens from relationship types, and deletion of the `node_facts` and `node_questions` Qdrant collections (both collections were removed from Qdrant entirely).
 

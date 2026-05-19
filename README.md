@@ -1,6 +1,6 @@
-# LiveOS Brain
+# LiveOS
 
-A personal knowledge graph and multi-hop question-answering system. Notes — including text, audio, images, PDFs, and other documents — are automatically extracted into a structured knowledge graph. A conversational interface then answers questions over the graph using an iterative retrieval loop that traverses entity relationships across multiple notes.
+A knowledge graph and multi-hop question-answering system. Notes — including text, audio, images, PDFs, and other documents — are automatically extracted into a structured knowledge graph. A conversational interface then answers questions over the graph using an iterative retrieval loop that traverses entity relationships across multiple notes.
 
 ---
 
@@ -25,7 +25,7 @@ A personal knowledge graph and multi-hop question-answering system. Notes — in
 
 ## What It Is
 
-LiveOS Brain is a personal AI knowledge base. You write notes — plain text, voice recordings, images, PDFs, Word documents, spreadsheets — and the system:
+LiveOS is an AI-powered knowledge base. You write notes — plain text, voice recordings, images, PDFs, Word documents, spreadsheets — and the system:
 
 1. **Extracts** entities, relationships, and concepts from the note using an LLM
 2. **Deduplicates** entities across notes using node IDs and name normalisation

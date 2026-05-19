@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Initializing LiveOS Brain..."
+echo "🚀 Initializing LiveOS..."
 
 # Wait for services to be ready
 echo "⏳ Waiting for PostgreSQL..."
@@ -30,4 +30,4 @@ echo "✅ All services ready!"
 cd /app
 python scripts/init_local.py
 
-echo "🎉 LiveOS Brain is ready!"
+echo "🎉 LiveOS is ready!"

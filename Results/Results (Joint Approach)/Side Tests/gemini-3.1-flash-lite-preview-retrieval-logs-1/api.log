@@ -1,6 +1,6 @@
 2026-03-20 14:02:42 | uvicorn.error | INFO | Started server process [73568]
 2026-03-20 14:02:42 | uvicorn.error | INFO | Waiting for application startup.
-2026-03-20 14:02:42 | API | INFO | Application startup: LiveOS Brain API online
+2026-03-20 14:02:42 | API | INFO | Application startup: LiveOS API online
 2026-03-20 14:02:42 | uvicorn.error | INFO | Application startup complete.
 2026-03-20 14:19:00 | uvicorn.access | INFO | 127.0.0.1:55519 - "POST /api/v1/chat HTTP/1.1" 200
 2026-03-20 14:19:25 | uvicorn.access | INFO | 127.0.0.1:55575 - "POST /api/v1/chat HTTP/1.1" 200
@@ -108,11 +108,11 @@
 2026-03-20 18:06:53 | uvicorn.error | INFO | Finished server process [73568]
 2026-03-20 18:07:02 | uvicorn.error | INFO | Started server process [2623]
 2026-03-20 18:07:02 | uvicorn.error | INFO | Waiting for application startup.
-2026-03-20 18:07:02 | API | INFO | Application startup: LiveOS Brain API online
+2026-03-20 18:07:02 | API | INFO | Application startup: LiveOS API online
 2026-03-20 18:07:02 | uvicorn.error | INFO | Application startup complete.
 2026-03-20 18:07:09 | uvicorn.error | INFO | Started server process [2889]
 2026-03-20 18:07:09 | uvicorn.error | INFO | Waiting for application startup.
-2026-03-20 18:07:09 | API | INFO | Application startup: LiveOS Brain API online
+2026-03-20 18:07:09 | API | INFO | Application startup: LiveOS API online
 2026-03-20 18:07:09 | uvicorn.error | INFO | Application startup complete.
 2026-03-20 18:52:57 | uvicorn.error | INFO | Shutting down
 2026-03-20 18:52:57 | uvicorn.error | INFO | Waiting for application shutdown.
@@ -120,7 +120,7 @@
 2026-03-20 18:52:57 | uvicorn.error | INFO | Finished server process [2889]
 2026-03-20 18:53:09 | uvicorn.error | INFO | Started server process [63355]
 2026-03-20 18:53:09 | uvicorn.error | INFO | Waiting for application startup.
-2026-03-20 18:53:09 | API | INFO | Application startup: LiveOS Brain API online
+2026-03-20 18:53:09 | API | INFO | Application startup: LiveOS API online
 2026-03-20 18:53:09 | uvicorn.error | INFO | Application startup complete.
 2026-03-20 18:53:09 | uvicorn.error | ERROR | Traceback (most recent call last):
   File "/Users/joey/Projects/LiveOS/backend/venv/lib/python3.11/site-packages/uvicorn/_compat.py", line 30, in asyncio_run

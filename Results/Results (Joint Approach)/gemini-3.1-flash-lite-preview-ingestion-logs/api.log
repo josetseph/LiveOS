@@ -1,6 +1,6 @@
 2026-03-24 08:40:06 | uvicorn.error | INFO | Started server process [13840]
 2026-03-24 08:40:06 | uvicorn.error | INFO | Waiting for application startup.
-2026-03-24 08:40:06 | API | INFO | Application startup: LiveOS Brain API online
+2026-03-24 08:40:06 | API | INFO | Application startup: LiveOS API online
 2026-03-24 08:40:06 | uvicorn.error | INFO | Application startup complete.
 2026-03-24 08:40:09 | uvicorn.access | INFO | 127.0.0.1:53235 - "POST /api/v1/ingest HTTP/1.1" 200
 2026-03-24 08:41:05 | uvicorn.access | INFO | 127.0.0.1:53367 - "POST /api/v1/ingest HTTP/1.1" 200

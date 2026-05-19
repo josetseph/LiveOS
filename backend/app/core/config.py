@@ -16,7 +16,7 @@ class Settings(BaseSettings):
         env_file=str(BACKEND_DIR / ".env"), env_file_encoding="utf-8", extra="ignore"
     )
 
-    PROJECT_NAME: str = "LiveOS Brain"
+    PROJECT_NAME: str = "LiveOS"
     API_V1_STR: str = "/api/v1"
 
     # ── Kuzu (embedded graph database) ──────────────────────────────────────

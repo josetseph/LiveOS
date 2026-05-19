@@ -1,6 +1,6 @@
 2026-05-13 03:16:01 | uvicorn.error | INFO | Started server process [77783]
 2026-05-13 03:16:01 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-13 03:16:01 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-13 03:16:01 | API | INFO | Application startup: LiveOS API online
 2026-05-13 03:16:01 | uvicorn.error | INFO | Application startup complete.
 2026-05-13 03:16:01 | uvicorn.error | INFO | Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 2026-05-13 03:16:07 | uvicorn.access | INFO | 127.0.0.1:59849 - "POST /api/v1/notes HTTP/1.1" 200
@@ -3172,7 +3172,7 @@ Exception: Ingestion Agent Failed: ["Extraction failed: 1 validation error for E
 2026-05-14 01:25:09 | uvicorn.error | INFO | Finished server process [77783]
 2026-05-14 01:25:33 | uvicorn.error | INFO | Started server process [49574]
 2026-05-14 01:25:33 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-14 01:25:33 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-14 01:25:33 | API | INFO | Application startup: LiveOS API online
 2026-05-14 01:25:33 | uvicorn.error | INFO | Application startup complete.
 2026-05-14 01:25:33 | uvicorn.error | INFO | Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 2026-05-14 01:26:57 | uvicorn.access | INFO | 127.0.0.1:65264 - "POST /api/v1/notes HTTP/1.1" 200
@@ -4196,7 +4196,7 @@ Exception: Ingestion Agent Failed: ["Extraction failed: 1 validation error for E
 2026-05-14 22:05:21 | uvicorn.access | INFO | 127.0.0.1:51082 - "POST /api/v1/notes/27535717-1d56-4baa-af97-ce0bce30deb1/ingest HTTP/1.1" 200
 2026-05-15 00:01:08 | uvicorn.error | INFO | Started server process [94219]
 2026-05-15 00:01:08 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-15 00:01:08 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-15 00:01:08 | API | INFO | Application startup: LiveOS API online
 2026-05-15 00:01:08 | uvicorn.error | INFO | Application startup complete.
 2026-05-15 00:01:08 | uvicorn.error | INFO | Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 2026-05-15 00:01:11 | uvicorn.access | INFO | 127.0.0.1:55256 - "GET /api/v1/notes/27535717-1d56-4baa-af97-ce0bce30deb1/status HTTP/1.1" 200
@@ -4289,7 +4289,7 @@ Traceback (most recent call last):
 asyncio.exceptions.CancelledError
 2026-05-15 00:04:31 | uvicorn.error | INFO | Started server process [238]
 2026-05-15 00:04:31 | uvicorn.error | INFO | Waiting for application startup.
-2026-05-15 00:04:31 | API | INFO | Application startup: LiveOS Brain API online
+2026-05-15 00:04:31 | API | INFO | Application startup: LiveOS API online
 2026-05-15 00:04:31 | uvicorn.error | INFO | Application startup complete.
 2026-05-15 00:04:31 | uvicorn.error | INFO | Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 2026-05-15 00:04:32 | uvicorn.access | INFO | 127.0.0.1:55471 - "GET /api/v1/notes/49cbdf63-cc07-4cdd-a2d5-e5fda95d373e/status HTTP/1.1" 200

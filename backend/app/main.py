@@ -106,7 +106,7 @@ def _parse_date_str(s: str) -> datetime:
 request_trace_id: ContextVar[str] = ContextVar("request_trace_id", default="")
 
 
-app = FastAPI(title="LiveOS Brain API", version="0.1.0")
+app = FastAPI(title="LiveOS API", version="0.1.0")
 
 # CORS setup used to allow connections from Next.js frontend
 app.add_middleware(
@@ -144,7 +144,7 @@ async def trace_id_middleware(request: Request, call_next):
 @app.on_event("startup")
 async def startup_event():
     """Initialize external services and database tables on application startup."""
-    logger.info("Application startup: LiveOS Brain API online")
+    logger.info("Application startup: LiveOS API online")
     # Apply any runtime overrides that were saved from a previous session
     from app.core import runtime_config
 
@@ -275,7 +275,7 @@ async def delete_file(file_key: str):
 async def root():
     """Root endpoint returning a simple service-status greeting."""
     logger.debug("Health check hit")
-    return {"message": "LiveOS Brain is online", "status": "active"}
+    return {"message": "LiveOS is online", "status": "active"}
 
 
 @app.get("/health")

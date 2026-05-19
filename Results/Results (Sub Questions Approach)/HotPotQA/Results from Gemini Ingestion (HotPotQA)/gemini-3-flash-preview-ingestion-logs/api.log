@@ -1,6 +1,6 @@
 2026-02-25 05:27:49 | uvicorn.error | INFO | Started server process [48516]
 2026-02-25 05:27:49 | uvicorn.error | INFO | Waiting for application startup.
-2026-02-25 05:27:49 | API | INFO | Application startup: LiveOS Brain API online
+2026-02-25 05:27:49 | API | INFO | Application startup: LiveOS API online
 2026-02-25 05:27:49 | uvicorn.error | INFO | Application startup complete.
 2026-02-25 05:28:06 | uvicorn.access | INFO | 127.0.0.1:56632 - "POST /api/v1/ingest HTTP/1.1" 200
 2026-02-25 05:28:54 | uvicorn.access | INFO | 127.0.0.1:56687 - "POST /api/v1/ingest HTTP/1.1" 200
@@ -32,7 +32,7 @@
 2026-02-25 05:39:23 | uvicorn.error | INFO | Finished server process [48516]
 2026-02-25 05:39:32 | uvicorn.error | INFO | Started server process [61146]
 2026-02-25 05:39:32 | uvicorn.error | INFO | Waiting for application startup.
-2026-02-25 05:39:32 | API | INFO | Application startup: LiveOS Brain API online
+2026-02-25 05:39:32 | API | INFO | Application startup: LiveOS API online
 2026-02-25 05:39:32 | uvicorn.error | INFO | Application startup complete.
 2026-02-25 05:39:32 | uvicorn.access | INFO | 127.0.0.1:57921 - "POST /api/v1/ingest HTTP/1.1" 200
 2026-02-25 05:40:03 | uvicorn.access | INFO | 127.0.0.1:58013 - "POST /api/v1/ingest HTTP/1.1" 200
@@ -51,7 +51,7 @@
 2026-02-25 05:44:43 | uvicorn.error | INFO | Finished server process [61146]
 2026-02-25 05:44:50 | uvicorn.error | INFO | Started server process [66906]
 2026-02-25 05:44:50 | uvicorn.error | INFO | Waiting for application startup.
-2026-02-25 05:44:50 | API | INFO | Application startup: LiveOS Brain API online
+2026-02-25 05:44:50 | API | INFO | Application startup: LiveOS API online
 2026-02-25 05:44:50 | uvicorn.error | INFO | Application startup complete.
 2026-02-25 05:44:50 | uvicorn.access | INFO | 127.0.0.1:58609 - "POST /api/v1/ingest HTTP/1.1" 200
 2026-02-25 05:45:36 | uvicorn.access | INFO | 127.0.0.1:58742 - "POST /api/v1/ingest HTTP/1.1" 200
@@ -63,7 +63,7 @@
 2026-02-25 05:46:43 | uvicorn.error | INFO | Finished server process [66906]
 2026-02-25 05:46:50 | uvicorn.error | INFO | Started server process [69068]
 2026-02-25 05:46:50 | uvicorn.error | INFO | Waiting for application startup.
-2026-02-25 05:46:50 | API | INFO | Application startup: LiveOS Brain API online
+2026-02-25 05:46:50 | API | INFO | Application startup: LiveOS API online
 2026-02-25 05:46:50 | uvicorn.error | INFO | Application startup complete.
 2026-02-25 05:46:50 | uvicorn.access | INFO | 127.0.0.1:58878 - "POST /api/v1/ingest HTTP/1.1" 200
 2026-02-25 05:47:13 | uvicorn.access | INFO | 127.0.0.1:58934 - "POST /api/v1/ingest HTTP/1.1" 200
@@ -81,7 +81,7 @@
 2026-02-25 05:51:09 | uvicorn.error | INFO | Finished server process [69068]
 2026-02-25 05:51:15 | uvicorn.error | INFO | Started server process [73959]
 2026-02-25 05:51:15 | uvicorn.error | INFO | Waiting for application startup.
-2026-02-25 05:51:15 | API | INFO | Application startup: LiveOS Brain API online
+2026-02-25 05:51:15 | API | INFO | Application startup: LiveOS API online
 2026-02-25 05:51:15 | uvicorn.error | INFO | Application startup complete.
 2026-02-25 05:51:15 | uvicorn.access | INFO | 127.0.0.1:59404 - "POST /api/v1/ingest HTTP/1.1" 200
 2026-02-25 05:51:43 | uvicorn.access | INFO | 127.0.0.1:59470 - "POST /api/v1/ingest HTTP/1.1" 200
@@ -95,7 +95,7 @@
 2026-02-25 05:53:48 | uvicorn.error | INFO | Finished server process [73959]
 2026-02-25 05:53:56 | uvicorn.error | INFO | Started server process [76875]
 2026-02-25 05:53:56 | uvicorn.error | INFO | Waiting for application startup.
-2026-02-25 05:53:56 | API | INFO | Application startup: LiveOS Brain API online
+2026-02-25 05:53:56 | API | INFO | Application startup: LiveOS API online
 2026-02-25 05:53:56 | uvicorn.error | INFO | Application startup complete.
 2026-02-25 05:53:57 | uvicorn.access | INFO | 127.0.0.1:59757 - "POST /api/v1/ingest HTTP/1.1" 200
 2026-02-25 05:54:23 | uvicorn.access | INFO | 127.0.0.1:59840 - "POST /api/v1/ingest HTTP/1.1" 200
@@ -737,7 +737,7 @@
 2026-02-25 16:24:21 | uvicorn.error | INFO | Finished server process [76875]
 2026-02-25 16:24:34 | uvicorn.error | INFO | Started server process [28455]
 2026-02-25 16:24:34 | uvicorn.error | INFO | Waiting for application startup.
-2026-02-25 16:24:34 | API | INFO | Application startup: LiveOS Brain API online
+2026-02-25 16:24:34 | API | INFO | Application startup: LiveOS API online
 2026-02-25 16:24:34 | uvicorn.error | INFO | Application startup complete.
 2026-02-25 16:24:42 | uvicorn.access | INFO | 127.0.0.1:59172 - "POST /api/v1/ingest HTTP/1.1" 200
 2026-02-25 16:25:27 | uvicorn.access | INFO | 127.0.0.1:59254 - "POST /api/v1/ingest HTTP/1.1" 200
@@ -957,7 +957,7 @@ Exception: Ingestion Agent Failed: ["Storage failed: 429 RESOURCE_EXHAUSTED. {'e
 2026-02-26 05:34:12 | uvicorn.error | INFO | Finished server process [28455]
 2026-02-26 05:34:32 | uvicorn.error | INFO | Started server process [18986]
 2026-02-26 05:34:32 | uvicorn.error | INFO | Waiting for application startup.
-2026-02-26 05:34:32 | API | INFO | Application startup: LiveOS Brain API online
+2026-02-26 05:34:32 | API | INFO | Application startup: LiveOS API online
 2026-02-26 05:34:32 | uvicorn.error | INFO | Application startup complete.
 2026-02-26 05:34:34 | uvicorn.access | INFO | 127.0.0.1:62010 - "POST /api/v1/ingest HTTP/1.1" 200
 2026-02-26 05:35:25 | uvicorn.access | INFO | 127.0.0.1:62123 - "POST /api/v1/ingest HTTP/1.1" 200

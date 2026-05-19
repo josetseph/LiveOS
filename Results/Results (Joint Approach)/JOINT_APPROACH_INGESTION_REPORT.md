@@ -25,7 +25,7 @@
 
 ## 1. Executive Summary
 
-This report documents the batch ingestion of the HotPotQA benchmark dataset using **Google's Gemini Flash Lite** (`gemini-3.1-flash-lite-preview`) as the knowledge extraction engine and `qwen3-embedding:0.6b` (via Ollama) as the embedding model within the LiveOS Brain system. The ingestion ran across two continuous sessions on March 24–25, 2026, processing **991 notes** from the 990-note target dataset (one note re-processed across session boundary via `--resume`).
+This report documents the batch ingestion of the HotPotQA benchmark dataset using **Google's Gemini Flash Lite** (`gemini-3.1-flash-lite-preview`) as the knowledge extraction engine and `qwen3-embedding:0.6b` (via Ollama) as the embedding model within the LiveOS system. The ingestion ran across two continuous sessions on March 24–25, 2026, processing **991 notes** from the 990-note target dataset (one note re-processed across session boundary via `--resume`).
 
 **Key results:**
 
