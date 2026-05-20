@@ -4,11 +4,8 @@
 import os
 import csv
 
-import torch
 from app.core.config import settings
 from app.core.log import get_logger
-from PIL import Image
-from transformers import AutoModelForCausalLM, AutoModelForSpeechSeq2Seq, AutoProcessor
 
 logger = get_logger("MultimediaService")
 
@@ -30,6 +27,7 @@ class MultimediaService:
         self.whisper_processor = None
 
     def _load_whisper(self):
+        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
         if not self.whisper_model:
             model_path = os.path.join(self.models_path, settings.MODEL_WHISPER_LOCAL)
             logger.info(
@@ -69,6 +67,7 @@ class MultimediaService:
             raise e
 
     def _load_florence(self):
+        from transformers import AutoModelForCausalLM, AutoProcessor
         if not self.florence_model:
             model_path = os.path.join(self.models_path, settings.MODEL_FLORENCE_LOCAL)
             logger.info(
@@ -84,11 +83,13 @@ class MultimediaService:
                 model_path, trust_remote_code=True
             )
 
-    def describe_image(self, image_path: str) -> str:
+    def describe_image(self, image_path: str) -> str:  # pylint: disable=too-many-locals
         """
         Generates a detailed description using Florence vision model.
         Handles local paths and R2 URLs.
         """
+        import torch
+        from PIL import Image
         self._load_florence()
 
         local_path = self._download_temp_file(image_path)

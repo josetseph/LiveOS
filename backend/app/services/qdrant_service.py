@@ -73,6 +73,11 @@ class QdrantService:
             logger.warning(f"[Qdrant] Could not ensure collections: {exc}")
 
     @property
+    def col_contexts(self) -> str:
+        """Name of the isolated-contexts collection for this KB instance."""
+        return self._col_contexts
+
+    @property
     def collections(self) -> list[str]:
         """Return the list of Qdrant collection names searched during retrieval."""
         # node_cores is included in vector search when nodes have a merged-context

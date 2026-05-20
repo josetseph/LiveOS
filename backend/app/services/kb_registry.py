@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -13,7 +14,10 @@ from app.core.config import REPO_ROOT, settings
 from app.core.log import get_logger
 from app.services.graph import GraphService, graph_service
 from app.services.qdrant_service import QdrantService, qdrant_service
+from app.services.retrieval import RetrievalService
 from app.services.typesense_service import TypesenseService, typesense_service
+from app.workflows.chat import ChatWorkflow
+from app.workflows.ingestion import IngestionWorkflow
 
 logger = get_logger("KBRegistry")
 
@@ -41,37 +45,32 @@ class KBContext:
     def _ensure_lazy(self) -> None:
         """Initialize retrieval_service, ingestion_workflow, and chat_workflow on first access."""
         if self.retrieval_service is None:
-            from app.services.retrieval import RetrievalService  # avoid circular import
-
             self.retrieval_service = RetrievalService(
                 graph=self.graph,
                 qdrant=self.qdrant,
                 typesense=self.typesense,
             )
         if self.ingestion_workflow is None:
-            from app.workflows.ingestion import (
-                IngestionWorkflow,
-            )  # avoid circular import
-
             self.ingestion_workflow = IngestionWorkflow(
                 graph=self.graph,
                 qdrant=self.qdrant,
                 typesense=self.typesense,
             )
         if self.chat_workflow is None:
-            from app.workflows.chat import ChatWorkflow  # avoid circular import
-
             self.chat_workflow = ChatWorkflow(retrieval=self.retrieval_service)
 
     def get_retrieval_service(self):
+        """Return the lazily initialised RetrievalService for this KB."""
         self._ensure_lazy()
         return self.retrieval_service
 
     def get_ingestion_workflow(self):
+        """Return the lazily initialised IngestionWorkflow for this KB."""
         self._ensure_lazy()
         return self.ingestion_workflow
 
     def get_chat_workflow(self):
+        """Return the lazily initialised ChatWorkflow for this KB."""
         self._ensure_lazy()
         return self.chat_workflow
 
@@ -109,7 +108,7 @@ class KBRegistry:
         if not _REGISTRY_FILE.exists():
             return
         try:
-            with open(_REGISTRY_FILE) as f:
+            with open(_REGISTRY_FILE, encoding="utf-8") as f:
                 data = json.load(f)
             for entry in data.get("knowledge_bases", []):
                 self._metadata[entry["id"]] = entry
@@ -120,7 +119,7 @@ class KBRegistry:
         """Persist current KB metadata to the registry JSON file."""
         try:
             _REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(_REGISTRY_FILE, "w") as f:
+            with open(_REGISTRY_FILE, "w", encoding="utf-8") as f:
                 json.dump(
                     {"knowledge_bases": list(self._metadata.values())},
                     f,
@@ -272,21 +271,19 @@ class KBRegistry:
         """Drop Qdrant collections, Typesense collection, and Kuzu directory."""
         # Qdrant
         try:
-            from app.services.qdrant_service import QdrantService as _QS
-
-            _qs = _QS(
+            qs = QdrantService(
                 col_cores=meta["qdrant_col_cores"],
                 col_relationships=meta["qdrant_col_rels"],
                 col_contexts=meta["qdrant_col_contexts"],
             )
-            if _qs.is_available() and _qs.client:
+            if qs.is_available() and qs.client:
                 for col in [
                     meta["qdrant_col_cores"],
                     meta["qdrant_col_rels"],
                     meta["qdrant_col_contexts"],
                 ]:
                     try:
-                        _qs.client.delete_collection(col)
+                        qs.client.delete_collection(col)
                     except Exception:  # pylint: disable=broad-exception-caught
                         pass
         except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -294,12 +291,10 @@ class KBRegistry:
 
         # Typesense
         try:
-            from app.services.typesense_service import TypesenseService as _TS
-
-            _ts = _TS(collection_name=meta["typesense_collection"])
-            if _ts.is_available() and _ts.client:
+            ts = TypesenseService(collection_name=meta["typesense_collection"])
+            if ts.is_available() and ts.client:
                 try:
-                    _ts.client.collections[meta["typesense_collection"]].delete()
+                    ts.client.collections[meta["typesense_collection"]].delete()
                 except Exception:  # pylint: disable=broad-exception-caught
                     pass
         except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -307,8 +302,6 @@ class KBRegistry:
 
         # Kuzu — remove directory tree
         try:
-            import shutil
-
             kuzu_path = Path(meta["kuzu_path"])
             if kuzu_path.exists() and kuzu_path.is_dir():
                 shutil.rmtree(kuzu_path)

@@ -874,11 +874,11 @@ class RetrievalService:
             merged.append(node)
         return merged
 
-    async def hybrid_search(
+    async def hybrid_search(  # pylint: disable=too-many-nested-blocks,too-many-locals,too-many-branches,too-many-statements
         self, query: str, top_k: int = 50
     ) -> List[
         dict
-    ]:  # pylint: disable=too-many-nested-blocks,too-many-locals,too-many-branches,too-many-statements
+    ]:
         """
         Entity-First Retrieval Pipeline:
 

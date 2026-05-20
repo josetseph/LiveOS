@@ -8,7 +8,6 @@ import time
 import uuid
 from collections import defaultdict
 
-from app.core.config import settings
 from app.core.log import get_logger
 from app.schemas.extraction import Extraction, NoteInput
 from app.services.graph import GraphService, graph_service
@@ -911,7 +910,7 @@ class IngestionWorkflow:
                 # Append each new context — existing ones stay in Qdrant untouched
                 for _ctx_text, _ctx_vector in new_ctx_pairs:
                     self._qdrant.append_node_item(
-                        collection_name=self._qdrant._col_contexts,
+                        collection_name=self._qdrant.col_contexts,
                         node_id=node_id,
                         content=_ctx_text,
                         vector=_ctx_vector,
@@ -1455,9 +1454,7 @@ class IngestionWorkflow:
                             name = rn
                         if rs:
                             summary = rs
-                    except (
-                        Exception
-                    ) as _retry_err:  # pylint: disable=broad-exception-caught
+                    except Exception as _retry_err:  # pylint: disable=broad-exception-caught
                         logger.warning(
                             f"[Community] {cluster_label}: name retry failed: {_retry_err}"
                         )

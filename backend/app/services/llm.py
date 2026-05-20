@@ -8,7 +8,6 @@ from typing import Optional, Type
 
 import httpx
 import instructor
-import torch
 from app.core.config import settings
 from app.core.log import get_logger
 from google import genai
@@ -23,6 +22,7 @@ class LLMService:
     """Multi-provider LLM client supporting structured extraction, generation, and ingestion routing."""
 
     def __init__(self):
+        import torch
         self.device = "mps" if torch.backends.mps.is_available() else "cpu"
         self.models_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "../../models")
@@ -44,7 +44,7 @@ class LLMService:
             logger.info(f"Fallback LLM Provider: {self.fallback_provider.upper()}")
 
         # Initialize provider-specific clients
-        self._init_clients()
+        self.init_clients()
 
         # Initialize ingestion-specific clients (may be separate provider/server)
         self._init_ingestion_clients()
@@ -85,7 +85,7 @@ class LLMService:
             max_retries=3,
         )
 
-    def _init_clients(self):  # pylint: disable=too-many-statements
+    def init_clients(self):  # pylint: disable=too-many-statements
         """Initialize clients for the configured provider."""
         if self.provider == "ollama":
             base_url = f"{settings.LLM_BASE_URL.rstrip('/')}/v1"
@@ -586,21 +586,19 @@ class LLMService:
                 try:
                     original_provider = self.provider
                     self.provider = self.fallback_provider
-                    self._init_clients()
+                    self.init_clients()
                     result = self.extract_structured(
                         prompt, response_model, temperature
                     )
                     # Restore original provider
                     self.provider = original_provider
-                    self._init_clients()
+                    self.init_clients()
                     return result
-                except (
-                    Exception
-                ) as fallback_error:  # pylint: disable=broad-exception-caught
+                except Exception as fallback_error:  # pylint: disable=broad-exception-caught
                     logger.error(f"Fallback extraction failed: {fallback_error}")
                     # Restore original provider
                     self.provider = original_provider
-                    self._init_clients()
+                    self.init_clients()
 
             # Final fallback: return empty model
             try:
@@ -714,7 +712,7 @@ class LLMService:
         """LM Studio/local extraction using prompt-guided JSON object mode."""
         import json
 
-        model = model or self._get_model_for_task("extraction")
+        model = model or self.get_chat_model()
         logger.info(f"[LM Studio] Extracting with {model} (JSON mode)")
 
         # Keep schema compact to reduce prompt-processing overhead.
@@ -961,20 +959,20 @@ class LLMService:
 
         if self.provider == "gemini":
             response = self.gemini_client.models.generate_content(
-                model=self._get_model_for_task("reasoning"),
+                model=self.get_chat_model(),
                 contents=prompt,
             )
             return response.text or "", None
 
         if self.provider == "anthropic":
             response = self.chat_client.messages.create(
-                model=self._get_model_for_task("reasoning"),
+                model=self.get_chat_model(),
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text or "", None
 
         # Local / LM Studio / OpenAI
-        _model = self._get_model_for_task("reasoning")
+        _model = self.get_chat_model()
         extra_body = self._with_keep_alive()
 
         response = self.chat_client.chat.completions.create(
@@ -1010,10 +1008,10 @@ class LLMService:
         Uses the Reasoning Model for complex logic/refinement.
         Returns raw text (Chain-of-Thought + Answer).
         """
-        # Select reasoning model based on provider
+        # Select model based on provider
         if self.provider == "gemini":
             response = self.gemini_client.models.generate_content(
-                model=model or self._get_model_for_task("reasoning"),
+                model=model or self.get_chat_model(),
                 config=types.GenerateContentConfig(
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
@@ -1022,12 +1020,12 @@ class LLMService:
             return response.text
         if self.provider == "anthropic":
             response = self.chat_client.messages.create(
-                model=model or self._get_model_for_task("reasoning"),
+                model=model or self.get_chat_model(),
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text
         # Ollama/LM Studio/OpenAI
-        _model = model or self._get_model_for_task("reasoning")
+        _model = model or self.get_chat_model()
         extra_body = self._with_keep_alive()
 
         response = self.chat_client.chat.completions.create(
@@ -1053,13 +1051,13 @@ class LLMService:
         # Select model based on provider
         if self.provider == "gemini":
             response = self.gemini_client.models.generate_content(
-                model=model or self._get_model_for_task("summarization"),
+                model=model or self.get_chat_model(),
                 contents=f"Generate a concise, descriptive title for this note. Do not use quotes.\n\nNote content:\n{text}\n\nTitle:",  # pylint: disable=line-too-long
             )
             return response.text.strip().replace('"', "")
         if self.provider == "anthropic":
             response = self.chat_client.messages.create(
-                model=model or self._get_model_for_task("summarization"),
+                model=model or self.get_chat_model(),
                 messages=[
                     {
                         "role": "user",
@@ -1069,7 +1067,7 @@ class LLMService:
             )
             return response.content[0].text.strip().replace('"', "")
         # Ollama/LM Studio/OpenAI
-        _model = model or self._get_model_for_task("summarization")
+        _model = model or self.get_chat_model()
         extra_body = self._with_keep_alive()
 
         response = self.chat_client.chat.completions.create(
@@ -1199,7 +1197,7 @@ class LLMService:
         """
         try:
             if self.provider == "gemini":
-                _gemini_model = model or self._get_model_for_task("brain")
+                _gemini_model = model or self.get_chat_model()
                 _gemini_cfg = types.GenerateContentConfig(
                     temperature=temperature,
                     thinking_config=types.ThinkingConfig(
@@ -1217,7 +1215,7 @@ class LLMService:
             if self.provider == "anthropic":
                 response = await asyncio.to_thread(
                     self.chat_client.messages.create,
-                    model=model or self._get_model_for_task("brain"),
+                    model=model or self.get_chat_model(),
                     max_tokens=max_tokens if max_tokens is not None else 8192,
                     temperature=temperature,
                     messages=[{"role": "user", "content": prompt}],
@@ -1225,7 +1223,7 @@ class LLMService:
                 return response.content[0].text.strip()
 
             # OpenAI-compatible local or cloud providers
-            model = model or self._get_model_for_task("brain")
+            model = model or self.get_chat_model()
             extra_body = self._with_keep_alive()
 
             _kwargs = {
@@ -1534,8 +1532,8 @@ class LLMService:
         - If you cannot answer yet → output NEXT_QUERY, not ANSWER
         """
 
-    def _get_model_for_task(self, task: str) -> str:
-        """Get the appropriate model name for a given task based on provider.
+    def get_chat_model(self) -> str:
+        """Return the model to use for chat and generation tasks.
 
         CHAT_MODEL always wins if set — provider-specific keys are fallbacks.
         """
@@ -1544,18 +1542,14 @@ class LLMService:
         if self.provider in ("ollama", "lm_studio", "local"):
             return settings.LLM_MODEL
         provider_model_map = {
-            "openai": (
-                settings.OPENAI_MODEL_REASONING
-                if task == "reasoning"
-                else settings.OPENAI_MODEL
-            ),
+            "openai": settings.OPENAI_MODEL,
             "gemini": settings.GEMINI_MODEL,
             "anthropic": settings.ANTHROPIC_MODEL,
             "huggingface": settings.HUGGINGFACE_MODEL,
         }
         return provider_model_map.get(self.provider, settings.LLM_MODEL)
 
-    def _get_ingestion_model(self) -> str | None:
+    def get_ingestion_model(self) -> str | None:
         """Return the configured ingestion model for the active ingestion provider.
 
         INGESTION_MODEL always wins if set — provider-specific keys are fallbacks.
@@ -1587,7 +1581,7 @@ class LLMService:
         Like ``generate()`` but always routes to the ingestion provider/server.
         Use this for all LLM calls inside the ingestion pipeline.
         """
-        model = self._get_ingestion_model()
+        model = self.get_ingestion_model()
         try:
             if self.ingestion_provider == "gemini":
                 _gemini_model = model or settings.GEMINI_MODEL
@@ -1648,7 +1642,7 @@ class LLMService:
         Like ``extract_structured()`` but always routes to the ingestion provider/server.
         Use this for all structured extraction inside the ingestion pipeline.
         """
-        model = self._get_ingestion_model()
+        model = self.get_ingestion_model()
         try:
             if self.ingestion_provider in ("local", "ollama", "lm_studio"):
                 return self._extract_lm_studio(
@@ -1686,4 +1680,28 @@ class LLMService:
                 return None
 
 
-llm_service = LLMService()
+class _LazyLLMService:
+    """Proxy that defers LLMService construction until first attribute access.
+
+    This keeps torch and all LLM provider clients out of the process until
+    something actually calls into the service, saving ~150-200 MB of idle RAM.
+    """
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_real", None)
+
+    def _get_real(self) -> "LLMService":
+        real = object.__getattribute__(self, "_real")
+        if real is None:
+            real = LLMService()
+            object.__setattr__(self, "_real", real)
+        return real
+
+    def __getattr__(self, name: str):
+        return getattr(self._get_real(), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        setattr(self._get_real(), name, value)
+
+
+llm_service = _LazyLLMService()

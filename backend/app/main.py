@@ -19,10 +19,7 @@ from app.core.database import get_db  # noqa: E402
 from app.models.note import Note  # noqa: E402
 from app.schemas.extraction import NoteInput  # noqa: E402
 from app.schemas.note import CreateNoteInput  # noqa: E402
-from app.services.graph import graph_service  # noqa: E402
 from app.services.kb_registry import KBContext, kb_registry  # noqa: E402
-from app.workflows.chat import chat_workflow  # noqa: E402
-from app.workflows.ingestion import ingestion_workflow  # noqa: E402
 from fastapi import (  # noqa: E402
     BackgroundTasks,
     Depends,
@@ -189,6 +186,7 @@ async def _transcode_to_m4a(content: bytes, src_ext: str) -> tuple[bytes, str]:
                 ],
                 capture_output=True,
                 timeout=60,
+                check=False,
             )
             if result.returncode == 0:
                 with open(tmp_out, "rb") as f:
@@ -205,7 +203,7 @@ async def _transcode_to_m4a(content: bytes, src_ext: str) -> tuple[bytes, str]:
             logger.warning(
                 "ffmpeg transcoding timed out — storing audio without transcoding"
             )
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, subprocess.SubprocessError) as exc:
             logger.warning("Audio transcoding error", extra={"error": str(exc)})
         finally:
             if tmp_in and os.path.exists(tmp_in):
@@ -303,14 +301,13 @@ class LLMSettings(BaseModel):
 @app.get("/api/v1/settings")
 async def get_runtime_settings():
     """Return the current effective chat and ingestion LLM settings."""
-    from app.core import runtime_config
     from app.core.config import settings
     from app.services.llm import llm_service
 
     return {
         "provider": settings.LLM_PROVIDER,
-        "model": llm_service._get_model_for_task("chat") or settings.LLM_MODEL,
-        "ingestion_model": llm_service._get_ingestion_model() or settings.LLM_MODEL,
+        "model": llm_service.get_chat_model() or settings.LLM_MODEL,
+        "ingestion_model": llm_service.get_ingestion_model() or settings.LLM_MODEL,
         "base_url": settings.LLM_BASE_URL,
     }
 
@@ -349,7 +346,7 @@ async def update_runtime_settings(body: LLMSettings):
 
     if provider_changed or base_url_changed:
         llm_service.provider = settings.LLM_PROVIDER.lower()
-        llm_service._init_clients()
+        llm_service.init_clients()
         logger.info(
             "LLM clients reinitialized",
             extra={"provider": llm_service.provider, "base_url": settings.LLM_BASE_URL},
@@ -805,7 +802,7 @@ async def rename_knowledge_base(kb_id: str, body: RenameKBInput):
     try:
         success = kb_registry.rename_kb(kb_id, name)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not success:
         raise HTTPException(
             status_code=404, detail=f"Knowledge base '{kb_id}' not found"

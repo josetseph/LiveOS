@@ -36,6 +36,7 @@ Cypher translation notes
 
 # pylint: disable=too-many-lines,import-outside-toplevel
 
+import math
 import re
 import threading
 from pathlib import Path
@@ -44,6 +45,12 @@ import kuzu
 from app.core.config import REPO_ROOT, settings
 from app.core.log import get_logger
 from app.services.qdrant_service import QdrantService, qdrant_service
+from app.utils.graph_layout import (
+    CLUSTER_RADIUS_BASE,
+    ORPHAN_RADIUS,
+    _deterministic_jitter,
+    _fibonacci_sphere,
+)
 
 logger = get_logger("GraphService")
 
@@ -1373,12 +1380,6 @@ class GraphService:
             self._qdrant.get_nodes_content_by_ids(orphan_ids) if orphan_ids else {}
         )
 
-        from app.utils.graph_layout import (
-            ORPHAN_RADIUS,
-            _deterministic_jitter,
-            _fibonacci_sphere,
-        )
-
         orphan_pts = _fibonacci_sphere(len(orphan_ids), ORPHAN_RADIUS)
         orphan_nodes = []
         for idx, row in enumerate(orphan_rows):
@@ -1430,9 +1431,7 @@ class GraphService:
             "orphan_edges": orphan_edges,
         }
 
-    def get_community_members(
-        self, community_id: str
-    ) -> dict:  # pylint: disable=too-many-locals
+    def get_community_members(self, community_id: str) -> dict:
         """Return nodes and edges belonging to a single community for focused 3-D display."""
         node_rows = self.execute_query(
             """
@@ -1458,44 +1457,11 @@ class GraphService:
             {"cid": community_id},
         )
 
-        import math as _math
-
-        from app.utils.graph_layout import (
-            CLUSTER_RADIUS_BASE,
-            _deterministic_jitter,
-            _fibonacci_sphere,
-        )
-
         node_ids = [row["node_id"] for row in node_rows if row.get("node_id")]
         content_map = (
             self._qdrant.get_nodes_content_by_ids(node_ids) if node_ids else {}
         )
-
-        cluster_radius = CLUSTER_RADIUS_BASE * _math.sqrt(max(len(node_ids), 1))
-        cluster_radius = min(cluster_radius, CLUSTER_RADIUS_BASE * 8)
-        pts = _fibonacci_sphere(len(node_ids), cluster_radius)
-
-        nodes = []
-        for idx, row in enumerate(node_rows):
-            nid = row.get("node_id")
-            if not nid:
-                continue
-            c = content_map.get(nid, {})
-            px, py, pz = pts[idx] if idx < len(pts) else (0.0, 0.0, 0.0)
-            jx, jy, jz = _deterministic_jitter(nid, 3.0)
-            nodes.append(
-                {
-                    "node_id": nid,
-                    "name": c.get("name") or "Unnamed",
-                    "node_type": c.get("type") or "unknown",
-                    "description": _strip_facts_prefix(c.get("description", "")),
-                    "facts": c.get("facts", []),
-                    "community_id": c.get("community_id"),
-                    "x": float(px + jx),
-                    "y": float(py + jy),
-                    "z": float(pz + jz),
-                }
-            )
+        nodes = self._build_positioned_nodes(node_rows, node_ids, content_map)
         edges = [
             {
                 "source": row["source"],
@@ -1507,6 +1473,37 @@ class GraphService:
             if row.get("source") and row.get("target")
         ]
         return {"nodes": nodes, "edges": edges}
+
+    @staticmethod
+    def _build_positioned_nodes(
+        node_rows: list, node_ids: list, content_map: dict
+    ) -> list:
+        """Compute fibonacci-sphere positions and jitter for a set of community nodes."""
+        cluster_radius = CLUSTER_RADIUS_BASE * math.sqrt(max(len(node_ids), 1))
+        cluster_radius = min(cluster_radius, CLUSTER_RADIUS_BASE * 8)
+        pts = _fibonacci_sphere(len(node_ids), cluster_radius)
+        nodes = []
+        for idx, row in enumerate(node_rows):
+            nid = row.get("node_id")
+            if not nid:
+                continue
+            c = content_map.get(nid, {})
+            pos = pts[idx] if idx < len(pts) else (0.0, 0.0, 0.0)
+            jitter = _deterministic_jitter(nid, 3.0)
+            nodes.append(
+                {
+                    "node_id": nid,
+                    "name": c.get("name") or "Unnamed",
+                    "node_type": c.get("type") or "unknown",
+                    "description": _strip_facts_prefix(c.get("description", "")),
+                    "facts": c.get("facts", []),
+                    "community_id": c.get("community_id"),
+                    "x": float(pos[0] + jitter[0]),
+                    "y": float(pos[1] + jitter[1]),
+                    "z": float(pos[2] + jitter[2]),
+                }
+            )
+        return nodes
 
     def get_node_detail(self, node_id: str) -> dict | None:
         """Return detailed content for a single node, including contexts, facts, and community membership."""

@@ -134,7 +134,6 @@ class Settings(BaseSettings):
     # OpenAI
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str | None = None  # e.g. "gpt-4o-2024-08-06"
-    OPENAI_MODEL_REASONING: str | None = None  # e.g. "o1-mini"
 
     # Google Gemini
     GEMINI_API_KEY: str | None = None
