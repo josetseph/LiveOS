@@ -256,7 +256,7 @@ class IngestionWorkflow:
         async with AsyncSessionLocal() as session:
             try:
                 await session.execute(
-                    update(Note).where(Note.id == note_id).values(processed=True)
+                    update(Note).where(Note.id == note_id).values(processed=True, failed=False)
                 )
                 await session.commit()
                 logger.info(f"[Ingestion] Marked Note {note_id} as Processed.")

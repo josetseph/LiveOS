@@ -35,7 +35,9 @@ class IngestionState(TypedDict):
     errors: List[str]
     status: str  # START, MULTIMEDIA_DONE, EXTRACTED, INDEXED
     logs: List[str]
-    workflow: Optional[Any]  # KB-specific IngestionWorkflow instance; None → use global default
+    workflow: Optional[
+        Any
+    ]  # KB-specific IngestionWorkflow instance; None → use global default
 
 
 # 2. Node Functions
@@ -182,9 +184,7 @@ async def multimodal_node(
             logger.info(
                 f"Syncing audio transcript to Postgres for Note {state['note_id']}..."
             )
-            await _wf._update_note_content_postgres(
-                state["note_id"], content
-            )
+            await _wf._update_note_content_postgres(state["note_id"], content)
 
     t_end = time.perf_counter()
     logger.info(f"Multimedia processing took: {t_end - t_start:.4f}s")
@@ -212,6 +212,13 @@ async def extraction_node(
     # text. Auto-generated titles are not included — they don't originate from
     # the note itself and would pollute the extraction.
     extraction_content = state["content"]
+    if state["input"].created_at:
+        try:
+            _dt = datetime.fromisoformat(state["input"].created_at)
+            _date_label = _dt.strftime("%B %-d, %Y")
+        except ValueError:
+            _date_label = state["input"].created_at
+        extraction_content = f"[Note date: {_date_label}]\n\n{extraction_content}"
     if state["input"].title:
         extraction_content = f"# {state['input'].title}\n\n{extraction_content}"
 
