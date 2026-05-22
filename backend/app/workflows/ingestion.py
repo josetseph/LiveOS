@@ -256,7 +256,9 @@ class IngestionWorkflow:
         async with AsyncSessionLocal() as session:
             try:
                 await session.execute(
-                    update(Note).where(Note.id == note_id).values(processed=True, failed=False)
+                    update(Note)
+                    .where(Note.id == note_id)
+                    .values(processed=True, failed=False)
                 )
                 await session.commit()
                 logger.info(f"[Ingestion] Marked Note {note_id} as Processed.")
@@ -1454,7 +1456,9 @@ class IngestionWorkflow:
                             name = rn
                         if rs:
                             summary = rs
-                    except Exception as _retry_err:  # pylint: disable=broad-exception-caught
+                    except (
+                        Exception
+                    ) as _retry_err:  # pylint: disable=broad-exception-caught
                         logger.warning(
                             f"[Community] {cluster_label}: name retry failed: {_retry_err}"
                         )

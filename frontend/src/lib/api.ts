@@ -210,6 +210,27 @@ export const api = {
     return http.get(`/graph/3d/node/${nodeId}${kbParam(kb)}`);
   },
 
+  // ── Entity mention autocomplete ───────────────────────────────────────────
+
+  async searchEntities(
+    q: string,
+    kb = "default",
+    limit = 5,
+  ): Promise<{ node_id: string; name: string; node_type: string }[]> {
+    const params: Record<string, unknown> = { q, limit };
+    if (kb && kb !== "default") params.kb = kb;
+    return http.get("/graph/entities/search", params);
+  },
+
+  async scanTextEntities(
+    text: string,
+    kb = "default",
+  ): Promise<{ node_id: string; name: string; node_type: string }[]> {
+    const params: Record<string, unknown> = {};
+    if (kb && kb !== "default") params.kb = kb;
+    return http.post(`/graph/entities/scan-text${kbParam(kb)}`, { text });
+  },
+
   // ── Knowledge-base management ─────────────────────────────────────────────
 
   async listKBs(): Promise<{ knowledge_bases: KnowledgeBase[] }> {

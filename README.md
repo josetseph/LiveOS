@@ -20,8 +20,8 @@ A knowledge graph and multi-hop question-answering system. Notes — including t
 12. [Docker Deployment](#docker-deployment)
 13. [Local Model Setup](#local-model-setup)
 14. [Environment Variables](#environment-variables)
-14. [Running the Stack](#running-the-stack)
-15. [Knowledge Bases](#knowledge-bases)
+15. [Running the Stack](#running-the-stack)
+16. [Knowledge Bases](#knowledge-bases)
 
 ---
 
@@ -35,7 +35,8 @@ LiveOS is an AI-powered knowledge base. You write notes — plain text, voice re
 4. **Detects communities** of related entities using the Leiden algorithm
 5. **Indexes** everything into a vector store (Qdrant), a full-text search engine (Typesense), and a graph database (Kuzu)
 6. **Answers questions** conversationally via an iterative retrieval loop that walks the graph, accumulates findings across hops, and synthesises a final answer
-7. **Isolates knowledge** into multiple named knowledge bases — each with its own graph, vector store, and full-text index
+7. **Highlights** entity mentions live in notes and chat — every entity name found in ingested content is automatically underlined; clicking any mention opens an inline detail panel without leaving the page
+8. **Isolates knowledge** into multiple named knowledge bases — each with its own graph, vector store, and full-text index
 
 The system is designed to run entirely locally. All LLM inference, embedding, and reranking can run on local hardware via Ollama or LM Studio. Cloud LLM providers (Gemini, OpenAI, Anthropic, HuggingFace) are also supported and switchable via environment variables.
 
@@ -266,6 +267,9 @@ Built with Next.js 16 (App Router) and Tailwind CSS.
 
 The notes editor supports:
 - Plain text with Markdown preview
+- **Entity mention highlighting** — after ingestion, known entity names are scanned in the note at load time and highlighted as clickable badges in both edit and preview modes; no special markup is stored in the note
+- **Entity autocomplete** — typing a capitalised word surfaces matching entities from the knowledge graph as inline suggestions
+- **Entity detail panel** — clicking any highlighted entity name slides in a panel showing the entity's type, description, relationships, and isolated contexts, with a link to its node in the 3D graph
 - File attachments (images, audio, PDF, Word, Excel)
 - In-browser voice recording — audio is transcoded to AAC/M4A server-side on upload, ensuring playback works across all browsers including Safari
 - Per-note ingestion status filter (all / ingested / ingesting / saved / failed)
@@ -274,8 +278,9 @@ The notes editor supports:
 
 The chat interface supports:
 - Multi-hop answers with inline source citations
+- **Entity highlighting in AI responses** — entity names mentioned in answers are scanned and rendered as clickable badges; the same entity detail panel slides in on click
 - Collapsible model thinking display (for models that expose reasoning tokens)
-- Note preview modal with segmented content display
+- Note preview modal with segmented content display and entity highlighting
 
 ---
 

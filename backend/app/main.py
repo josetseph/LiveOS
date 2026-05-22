@@ -298,6 +298,12 @@ class LLMSettings(BaseModel):
     base_url: str | None = None
 
 
+class ScanTextInput(BaseModel):
+    """Request body for scanning a text block for entity mentions."""
+
+    text: str
+
+
 @app.get("/api/v1/settings")
 async def get_runtime_settings():
     """Return the current effective chat and ingestion LLM settings."""
@@ -429,6 +435,90 @@ async def graph_3d_node_detail(node_id: str, kb: KBContext = Depends(get_kb)):
     if detail is None:
         raise HTTPException(status_code=404, detail="Node not found")
     return detail
+
+
+@app.get("/api/v1/graph/entities/search")
+async def search_entities_autocomplete(
+    q: str,
+    limit: int = 5,
+    kb: KBContext = Depends(get_kb),
+):
+    """
+    Search entity nodes by name for autocomplete suggestions in the notes editor.
+    Returns only indexable entities (excludes notes and community nodes).
+    """
+    import re as _re
+
+    if not q or len(q.strip()) < 2:
+        return []
+
+    hits = kb.typesense.search_nodes(q.strip(), limit * 2)
+    results: list[dict] = []
+    for hit in hits:
+        payload = hit.get("payload", {})
+        node_type = payload.get("type", "")
+        node_id = payload.get("node_id", "")
+        name = payload.get("name", "")
+        if not node_id or not name:
+            continue
+        if node_type in ("note", "community"):
+            continue
+        results.append({"node_id": node_id, "name": name, "node_type": node_type})
+        if len(results) >= limit:
+            break
+    return results
+
+
+@app.post("/api/v1/graph/entities/scan-text")
+async def scan_entities_in_text(
+    body: ScanTextInput,
+    kb: KBContext = Depends(get_kb),
+):
+    """
+    Scan a text block for entity mentions and return found entities.
+    Used to auto-highlight entity names in existing notes on load.
+    """
+    import re as _re
+
+    text = body.text
+    if not text or len(text.strip()) < 3:
+        return []
+
+    candidates: set[str] = set()
+
+    # Multi-word proper noun sequences: "Clara Sydney", "Project Horizon"
+    multi_cap = _re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", text)
+    candidates.update(multi_cap)
+
+    # Single capitalised words of 4+ chars (potential proper nouns)
+    single_cap = _re.findall(r"\b([A-Z][a-z]{3,})\b", text)
+    candidates.update(single_cap)
+
+    if not candidates:
+        return []
+
+    found: dict[str, dict] = {}
+    for candidate in list(candidates)[:40]:
+        hits = kb.typesense.search_nodes(candidate, 2)
+        for hit in hits:
+            payload = hit.get("payload", {})
+            name = payload.get("name", "")
+            node_type = payload.get("type", "")
+            node_id = payload.get("node_id", "")
+            if not node_id or node_type in ("note", "community"):
+                continue
+            # Only include if the entity name appears verbatim in the text
+            if (
+                _re.search(_re.escape(name), text, _re.IGNORECASE)
+                and node_id not in found
+            ):
+                found[node_id] = {
+                    "node_id": node_id,
+                    "name": name,
+                    "node_type": node_type,
+                }
+
+    return list(found.values())
 
 
 # --- Notes API ---

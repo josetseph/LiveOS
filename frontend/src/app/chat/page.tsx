@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
   Send,
   User,
@@ -29,18 +29,75 @@ import { useKB } from "@/lib/kb-context";
 import { useChat } from "@/lib/chat-context";
 import type { Message } from "@/lib/chat-context";
 import { SegmentedNoteContent } from "@/components/segmented-note-content";
+import { EntityDetailPanel } from "@/components/entity-detail-panel";
 import type { FilePreview, NotePreview } from "@/lib/types";
+
+type ScannedEntity = { node_id: string; name: string; node_type: string };
+
+/** Scans message text for entity mentions once on mount (result is stable). */
+function useScannedEntities(content: string, kb: string): ScannedEntity[] {
+  const [entities, setEntities] = useState<ScannedEntity[]>([]);
+  useEffect(() => {
+    if (!content.trim()) return;
+    let cancelled = false;
+    api.scanTextEntities(content, kb).then((e) => {
+      if (!cancelled) setEntities(e);
+    }).catch(() => { });
+    return () => { cancelled = true; };
+  }, [content, kb]);
+  return entities;
+}
+
+/** Allow entity:// pseudo-links through react-markdown's URL sanitizer. */
+function urlTransform(url: string): string {
+  if (url.startsWith("entity://")) return url;
+  return /^(https?|ircs?|mailto|xmpp):/i.test(url) || !url.includes(":") ? url : "";
+}
+
+/** Injects entity:// pseudo-links directly into plain text for ReactMarkdown.
+ * Uses a single-pass range-collection approach so no entity name is ever
+ * matched inside an already-injected link (avoids nested/broken markdown). */
+function injectEntityLinks(text: string, entities: ScannedEntity[]): string {
+  if (!entities.length) return text;
+  const sorted = [...entities].sort((a, b) => b.name.length - a.name.length);
+  // Collect non-overlapping ranges against the ORIGINAL text, longest-match wins
+  const ranges: { start: number; end: number; name: string; node_id: string }[] = [];
+  for (const { name, node_id } of sorted) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`\\b${escaped}\\b`, "gi");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (ranges.some((r) => start < r.end && end > r.start)) continue;
+      ranges.push({ start, end, name, node_id });
+    }
+  }
+  // Single left-to-right substitution pass
+  ranges.sort((a, b) => a.start - b.start);
+  let result = "";
+  let last = 0;
+  for (const { start, end, name, node_id } of ranges) {
+    result += text.slice(last, start);
+    result += `[${name}](entity://${node_id})`;
+    last = end;
+  }
+  return result + text.slice(last);
+}
 
 /** Prose classes shared by the two inline message renderers. */
 const PROSE_CLASSNAME =
   "prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:my-2 prose-p:leading-relaxed prose-p:text-white/90 prose-strong:text-white prose-em:text-white/90 prose-a:text-purple-400 prose-code:text-pink-400 prose-ul:text-white/90 prose-ol:text-white/90 prose-li:text-white/90";
 
 /**
- * Returns a react-markdown `components` map that turns file-attachment links
- * (prefixed with 📎 or 🎤) into buttons, and leaves all other anchors intact.
+ * Returns a react-markdown `components` map that handles:
+ * - entity:// links → clickable entity highlight button
+ * - 📎/🎤 links → file/audio attachment buttons
+ * - all other anchors → normal <a>
  */
 function makeLinkRenderer(
   handleFileClick: (url: string, filename: string) => void,
+  onEntityClick?: (nodeId: string, name: string) => void,
 ) {
   return {
     a: ({
@@ -50,6 +107,17 @@ function makeLinkRenderer(
       ...props
     }: React.ComponentPropsWithoutRef<"a"> & { node?: unknown }) => {
       const text = children?.toString() || "";
+      if (href?.startsWith("entity://") && onEntityClick) {
+        const nodeId = href.slice("entity://".length);
+        return (
+          <button
+            onClick={() => onEntityClick(nodeId, text)}
+            className="inline cursor-pointer rounded px-0.5 font-medium text-blue-400 underline decoration-dashed underline-offset-2 transition-colors hover:text-blue-300"
+          >
+            {text}
+          </button>
+        );
+      }
       if (href && (text.startsWith("📎") || text.startsWith("🎤"))) {
         const filename = text.replace(/^[📎🎤]\s*/, "");
         return (
@@ -70,6 +138,127 @@ function makeLinkRenderer(
   };
 }
 
+/** Renders a single assistant message with entity scanning + highlighting. */
+function AssistantMessageBody({
+  message,
+  kb,
+  onEntityClick,
+  onFileClick,
+  expandedThinking,
+  onToggleThinking,
+}: {
+  message: Message;
+  kb: string;
+  onEntityClick: (nodeId: string, name: string) => void;
+  onFileClick: (url: string, filename: string) => void;
+  expandedThinking: Set<string>;
+  onToggleThinking: (id: string) => void;
+}) {
+  const scannedEntities = useScannedEntities(message.content, kb);
+
+  const processContent = useCallback(
+    (text: string) => {
+      if (!scannedEntities.length) return text;
+      return injectEntityLinks(text, scannedEntities);
+    },
+    [scannedEntities],
+  );
+
+  const linkRenderer = useMemo(
+    () => makeLinkRenderer(onFileClick, onEntityClick),
+    [onFileClick, onEntityClick],
+  );
+
+  const refMatch = message.content.match(/###?\s*References[:\s]*\n([\s\S]+?)$/i);
+
+  return (
+    <>
+      {/* Thinking dropdown */}
+      {message.thinking && (
+        <div className="mb-3">
+          <button
+            onClick={() => onToggleThinking(message.id)}
+            className="flex items-center gap-1.5 text-xs text-purple-400/80 hover:text-purple-300 transition-colors"
+          >
+            {expandedThinking.has(message.id) ? (
+              <ChevronUp className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" />
+            )}
+            <span>Model thinking</span>
+          </button>
+          <AnimatePresence initial={false}>
+            {expandedThinking.has(message.id) && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="overflow-hidden"
+              >
+                <div className="mt-2 rounded-lg border border-purple-500/20 bg-purple-500/5 px-3 py-2">
+                  <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-purple-300/70">
+                    {message.thinking}
+                  </pre>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
+
+      {/* Message body */}
+      {refMatch ? (
+        <>
+          <div className={PROSE_CLASSNAME}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={linkRenderer} urlTransform={urlTransform}>
+              {processContent(message.content.substring(0, refMatch.index))}
+            </ReactMarkdown>
+          </div>
+          <div className="mt-4 pt-3 border-t border-white/10">
+            <p className="text-sm font-semibold text-white/60 mb-2">References:</p>
+            <div className="flex flex-wrap gap-2">
+              {refMatch[1]
+                .split("\n")
+                .map((t) => t.trim())
+                .filter((t) => t && !t.match(/^[\*\s]*$/))
+                .map((title, i) => {
+                  const linkMatch = title.match(/\[([^\]]+)\]\(\/notes\/([^)]+)\)/);
+                  if (!linkMatch) return null;
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        const noteId = linkMatch[2];
+                        api.getNote(noteId).then((n) =>
+                          (window as unknown as { __chatSetPreview?: (n: NotePreview) => void }).__chatSetPreview?.({
+                            id: n.id,
+                            title: n.title || "Untitled",
+                            content: n.content,
+                          })
+                        ).catch(console.error);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
+                    >
+                      <FileText className="h-3.5 w-3.5" />
+                      {linkMatch[1]}
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className={PROSE_CLASSNAME}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={linkRenderer} urlTransform={urlTransform}>
+            {processContent(message.content)}
+          </ReactMarkdown>
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function ChatPage() {
   const { currentKB, currentKBName } = useKB();
   const { messages, isLoading, sendMessage, clearMessages } = useChat();
@@ -77,7 +266,21 @@ export default function ChatPage() {
   const [previewNote, setPreviewNote] = useState<NotePreview | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
+  const [entityPanelNodeId, setEntityPanelNodeId] = useState<string | null>(null);
+  const [entityPanelName, setEntityPanelName] = useState<string | undefined>();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Expose setPreviewNote globally so AssistantMessageBody can trigger it without prop drilling
+  useEffect(() => {
+    (window as unknown as { __chatSetPreview?: unknown }).__chatSetPreview = (n: NotePreview) =>
+      setPreviewNote(n);
+    return () => { delete (window as unknown as { __chatSetPreview?: unknown }).__chatSetPreview; };
+  }, []);
+
+  const handleEntityClick = useCallback((nodeId: string, name: string) => {
+    setEntityPanelNodeId(nodeId);
+    setEntityPanelName(name);
+  }, []);
   const [greeting, setGreeting] = useState("Hello!");
   useEffect(() => {
     const hour = new Date().getHours();
@@ -261,123 +464,20 @@ export default function ChatPage() {
                       )}
                     >
                       {message.role === "assistant" ? (
-                        <>
-                          {/* Thinking dropdown (only when model returned thinking) */}
-                          {message.thinking && (
-                            <div className="mb-3">
-                              <button
-                                onClick={() => {
-                                  setExpandedThinking((prev) => {
-                                    const next = new Set(prev);
-                                    if (next.has(message.id)) {
-                                      next.delete(message.id);
-                                    } else {
-                                      next.add(message.id);
-                                    }
-                                    return next;
-                                  });
-                                }}
-                                className="flex items-center gap-1.5 text-xs text-purple-400/80 hover:text-purple-300 transition-colors"
-                              >
-                                {expandedThinking.has(message.id) ? (
-                                  <ChevronUp className="h-3.5 w-3.5" />
-                                ) : (
-                                  <ChevronDown className="h-3.5 w-3.5" />
-                                )}
-                                <span>Model thinking</span>
-                              </button>
-                              <AnimatePresence initial={false}>
-                                {expandedThinking.has(message.id) && (
-                                  <motion.div
-                                    initial={{ height: 0, opacity: 0 }}
-                                    animate={{ height: "auto", opacity: 1 }}
-                                    exit={{ height: 0, opacity: 0 }}
-                                    transition={{ duration: 0.2 }}
-                                    className="overflow-hidden"
-                                  >
-                                    <div className="mt-2 rounded-lg border border-purple-500/20 bg-purple-500/5 px-3 py-2">
-                                      <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-purple-300/70">
-                                        {message.thinking}
-                                      </pre>
-                                    </div>
-                                  </motion.div>
-                                )}
-                              </AnimatePresence>
-                            </div>
-                          )}
-                          {(() => {
-                            // Check if message contains References section (### References or References:)
-                            const refMatch = message.content.match(
-                              /###?\s*References[:\s]*\n([\s\S]+?)$/i,
-                            );
-                            if (refMatch) {
-                              const beforeRefs = message.content.substring(
-                                0,
-                                refMatch.index,
-                              );
-                              const refsList = refMatch[1];
-                              const titles = refsList
-                                .split("\n")
-                                .map((t) => t.trim())
-                                .filter((t) => t && !t.match(/^[\*\s]*$/));
-
-                              return (
-                                <>
-                                  <div className={PROSE_CLASSNAME}>
-                                    <ReactMarkdown
-                                      remarkPlugins={[remarkGfm]}
-                                      components={makeLinkRenderer(handleFileClick)}
-                                    >
-                                      {beforeRefs}
-                                    </ReactMarkdown>
-                                  </div>
-                                  <div className="mt-4 pt-3 border-t border-white/10">
-                                    <p className="text-sm font-semibold text-white/60 mb-2">
-                                      References:
-                                    </p>
-                                    <div className="flex flex-wrap gap-2">
-                                      {titles.map((title, i) => {
-                                        // Extract note ID from markdown link format: - [Title](/notes/id)
-                                        const linkMatch = title.match(
-                                          /\[([^\]]+)\]\(\/notes\/([^)]+)\)/,
-                                        );
-                                        if (!linkMatch) return null;
-
-                                        const noteTitle = linkMatch[1];
-                                        const noteId = linkMatch[2];
-
-                                        return (
-                                          <button
-                                            key={i}
-                                            onClick={() => {
-                                              handleNoteReference(noteId);
-                                            }}
-                                            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
-                                          >
-                                            <FileText className="h-3.5 w-3.5" />
-                                            {noteTitle}
-                                          </button>
-                                        );
-                                      })}
-                                    </div>
-                                  </div>
-                                </>
-                              );
-                            }
-
-                            // No references, just render markdown normally
-                            return (
-                              <div className={PROSE_CLASSNAME}>
-                                <ReactMarkdown
-                                  remarkPlugins={[remarkGfm]}
-                                  components={makeLinkRenderer(handleFileClick)}
-                                >
-                                  {message.content}
-                                </ReactMarkdown>
-                              </div>
-                            );
-                          })()}
-                        </>
+                        <AssistantMessageBody
+                          message={message}
+                          kb={currentKB}
+                          onEntityClick={handleEntityClick}
+                          onFileClick={handleFileClick}
+                          expandedThinking={expandedThinking}
+                          onToggleThinking={(id) =>
+                            setExpandedThinking((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(id)) next.delete(id); else next.add(id);
+                              return next;
+                            })
+                          }
+                        />
                       ) : (
                         <p className="whitespace-pre-wrap">{message.content}</p>
                       )}
@@ -487,6 +587,8 @@ export default function ChatPage() {
                 <SegmentedNoteContent
                   content={previewNote.content || "*Empty note*"}
                   onFileClick={handleFileClick}
+                  onEntityClick={handleEntityClick}
+                  kb={currentKB}
                   proseClassName="prose prose-invert max-w-none prose-headings:font-bold prose-headings:text-white prose-h1:text-4xl prose-h1:mt-6 prose-h1:mb-4 prose-h2:text-3xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-2xl prose-h3:mt-4 prose-h3:mb-3 prose-h4:text-xl prose-h4:mt-3 prose-h4:mb-2 prose-p:leading-relaxed prose-p:text-white/90 prose-p:my-3 prose-strong:text-white prose-strong:font-bold prose-em:text-white/90 prose-em:italic prose-a:text-purple-400 prose-a:underline hover:prose-a:text-purple-300 prose-code:text-pink-400 prose-code:bg-white/10 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:before:content-[''] prose-code:after:content-[''] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-l-4 prose-blockquote:border-purple-500/50 prose-blockquote:text-white/80 prose-blockquote:pl-4 prose-blockquote:italic prose-ul:text-white/90 prose-ul:my-3 prose-ol:text-white/90 prose-ol:my-3 prose-li:text-white/90 prose-li:my-1"
                 />
               </div>
@@ -494,6 +596,14 @@ export default function ChatPage() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Entity Detail Panel */}
+      <EntityDetailPanel
+        nodeId={entityPanelNodeId}
+        name={entityPanelName}
+        kb={currentKB}
+        onClose={() => setEntityPanelNodeId(null)}
+      />
 
       {/* File Preview Modal */}
       <AnimatePresence>

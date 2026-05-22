@@ -24,6 +24,10 @@ import { cn } from "@/lib/utils";
 import { ShaderBackground } from "@/components/shader-background";
 import { useKB } from "@/lib/kb-context";
 import { SegmentedNoteContent } from "@/components/segmented-note-content";
+import EntityMentionEditor, {
+  type EntityMentionEditorHandle,
+} from "@/components/entity-mention-editor";
+import { EntityDetailPanel } from "@/components/entity-detail-panel";
 import type { Note, FilePreview } from "@/lib/types";
 
 
@@ -49,10 +53,28 @@ export default function NotesPage() {
   const [pendingDateChange, setPendingDateChange] = useState<string | null>(
     null,
   );
+  const [entityPanelNodeId, setEntityPanelNodeId] = useState<string | null>(
+    null,
+  );
+  const [entityPanelName, setEntityPanelName] = useState<string | undefined>(
+    undefined,
+  );
+
+  const handleEntityClick = useCallback(
+    (nodeId: string, name: string) => {
+      setEntityPanelNodeId(nodeId);
+      setEntityPanelName(name);
+    },
+    [],
+  );
   const contentBeforeEditRef = useRef<string>("");
   const searchTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<EntityMentionEditorHandle>(null);
+  // Keep textareaRef as an alias so legacy code (file attach, recording) that
+  // directly reads selectionStart still compiles — the editor exposes the raw
+  // textarea element via editorRef.current.textarea.
+  const textareaRef = { get current() { return editorRef.current?.textarea ?? null; } };
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
@@ -322,22 +344,14 @@ export default function NotesPage() {
       setIsUploading(true);
       const response = await api.upload(file);
 
-      const textarea = textareaRef.current;
-      if (textarea) {
-        const cursorPos = textarea.selectionStart;
-        const textBefore = selectedNote.content.substring(0, cursorPos);
-        const textAfter = selectedNote.content.substring(cursorPos);
-        const markdownLink = `[📎 ${file.name}](${response.url})`;
-        const newContent = textBefore + markdownLink + textAfter;
-
-        const updatedNote = { ...selectedNote, content: newContent };
-        setSelectedNote(updatedNote);
-
-        setTimeout(() => {
-          textarea.focus();
-          const newCursorPos = cursorPos + markdownLink.length;
-          textarea.setSelectionRange(newCursorPos, newCursorPos);
-        }, 0);
+      const markdownLink = `[📎 ${file.name}](${response.url})`;
+      if (editorRef.current) {
+        editorRef.current.insertAtCursor(markdownLink);
+      } else {
+        // Fallback: append at end if editor not yet mounted
+        handleContentChange(
+          (selectedNote?.content ?? "") + markdownLink,
+        );
       }
     } catch (error) {
       console.error("Error uploading file:", error);
@@ -389,22 +403,11 @@ export default function NotesPage() {
           setIsUploading(true);
           const response = await api.upload(audioFile);
 
-          const textarea = textareaRef.current;
-          if (textarea && selectedNote) {
-            const cursorPos = textarea.selectionStart;
-            const textBefore = selectedNote.content.substring(0, cursorPos);
-            const textAfter = selectedNote.content.substring(cursorPos);
-            const markdownLink = `[🎤 Voice Recording](${response.url})`;
-            const newContent = textBefore + markdownLink + textAfter;
-
-            const updatedNote = { ...selectedNote, content: newContent };
-            setSelectedNote(updatedNote);
-
-            setTimeout(() => {
-              textarea.focus();
-              const newCursorPos = cursorPos + markdownLink.length;
-              textarea.setSelectionRange(newCursorPos, newCursorPos);
-            }, 0);
+          const markdownLink = `[🎤 Voice Recording](${response.url})`;
+          if (editorRef.current) {
+            editorRef.current.insertAtCursor(markdownLink);
+          } else if (selectedNote) {
+            handleContentChange(selectedNote.content + markdownLink);
           }
         } catch (error) {
           console.error("Error uploading recording:", error);
@@ -934,18 +937,30 @@ export default function NotesPage() {
                 <SegmentedNoteContent
                   content={selectedNote.content}
                   onFileClick={handleFileClick}
+                  onEntityClick={handleEntityClick}
+                  kb={currentKB}
                   proseClassName="prose prose-invert mx-auto max-w-3xl prose-headings:font-bold prose-headings:text-white prose-h1:text-4xl prose-h1:mt-6 prose-h1:mb-4 prose-h2:text-3xl prose-h2:mt-5 prose-h2:mb-3 prose-h3:text-2xl prose-h3:mt-4 prose-h3:mb-3 prose-h4:text-xl prose-h4:mt-3 prose-h4:mb-2 prose-p:leading-relaxed prose-p:text-white/90 prose-p:my-3 prose-strong:text-white prose-strong:font-bold prose-em:text-white/90 prose-em:italic prose-a:text-purple-400 prose-a:underline hover:prose-a:text-purple-300 prose-code:text-pink-400 prose-code:bg-white/10 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:before:content-[''] prose-code:after:content-[''] prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-blockquote:border-l-4 prose-blockquote:border-purple-500/50 prose-blockquote:text-white/80 prose-blockquote:pl-4 prose-blockquote:italic prose-ul:text-white/90 prose-ul:my-3 prose-ol:text-white/90 prose-ol:my-3 prose-li:text-white/90 prose-li:my-1"
                 />
               ) : (
-                <textarea
-                  ref={textareaRef}
+                <EntityMentionEditor
+                  ref={editorRef}
                   value={selectedNote.content}
-                  onChange={(e) => handleContentChange(e.target.value)}
+                  onChange={handleContentChange}
+                  onEntityClick={handleEntityClick}
+                  kb={currentKB}
                   placeholder="Start writing..."
-                  className="h-full w-full resize-none bg-transparent font-mono text-white placeholder-white/20 focus:outline-none"
+                  className="h-full w-full text-sm leading-relaxed"
                 />
               )}
             </div>
+
+            {/* Entity detail panel — overlays from the right within the note area */}
+            <EntityDetailPanel
+              nodeId={entityPanelNodeId}
+              name={entityPanelName}
+              kb={currentKB}
+              onClose={() => setEntityPanelNodeId(null)}
+            />
           </>
         ) : (
           <div className="flex h-full flex-col items-center justify-center text-center">
