@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Settings, Check, Loader2, AlertCircle, ChevronDown } from "lucide-react";
+import { Settings, Check, Loader2, AlertCircle, ChevronDown, RefreshCw, Calendar, Trash2, RotateCcw } from "lucide-react";
 import { motion } from "framer-motion";
 import { api } from "@/lib/api";
 import { ShaderBackground } from "@/components/shader-background";
@@ -33,6 +33,16 @@ export default function SettingsPage() {
     const [error, setError] = useState<string | null>(null);
     const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+    const [communityStatus, setCommunityStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+    const [digestStatus, setDigestStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+    const communityTriggeredRef = useRef(false);
+    const digestTriggeredRef = useRef(false);
+
+    const [resetStatus, setResetStatus] = useState<"idle" | "confirming" | "running" | "done" | "error">("idle");
+    const [reingestStatus, setReingestStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+    const [reingestCount, setReingestCount] = useState<number | null>(null);
+    const confirmResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
     useEffect(() => {
         api
             .getLLMSettings()
@@ -44,7 +54,107 @@ export default function SettingsPage() {
             .finally(() => setLoading(false));
     }, []);
 
+    useEffect(() => {
+        const poll = async () => {
+            try {
+                const status = await api.getMaintenanceStatus();
+                if (status.community_detection.running) {
+                    setCommunityStatus("running");
+                } else {
+                    setCommunityStatus((prev) => {
+                        if (prev === "running" && communityTriggeredRef.current) {
+                            communityTriggeredRef.current = false;
+                            setTimeout(() => setCommunityStatus("idle"), 3000);
+                            return "done";
+                        }
+                        if (prev === "done" || prev === "error") return prev;
+                        return "idle";
+                    });
+                }
+                if (status.temporal_digests.running) {
+                    setDigestStatus("running");
+                } else {
+                    setDigestStatus((prev) => {
+                        if (prev === "running" && digestTriggeredRef.current) {
+                            digestTriggeredRef.current = false;
+                            setTimeout(() => setDigestStatus("idle"), 3000);
+                            return "done";
+                        }
+                        if (prev === "done" || prev === "error") return prev;
+                        return "idle";
+                    });
+                }
+            } catch {
+                // Silently ignore poll failures.
+            }
+        };
+        poll();
+        const interval = setInterval(poll, 3000);
+        return () => clearInterval(interval);
+    }, []);
+
     const isLocal = LOCAL_PROVIDERS.has(form.provider);
+
+    async function handleRebuildCommunities() {
+        communityTriggeredRef.current = true;
+        setCommunityStatus("running");
+        try {
+            await api.rebuildCommunities();
+        } catch {
+            communityTriggeredRef.current = false;
+            setCommunityStatus("error");
+            setTimeout(() => setCommunityStatus("idle"), 4000);
+        }
+    }
+
+    async function handleBuildDigests() {
+        digestTriggeredRef.current = true;
+        setDigestStatus("running");
+        try {
+            await api.buildTemporalDigests();
+        } catch {
+            digestTriggeredRef.current = false;
+            setDigestStatus("error");
+            setTimeout(() => setDigestStatus("idle"), 4000);
+        }
+    }
+
+    async function handleResetIngestion() {
+        if (resetStatus === "idle") {
+            // First click — ask for confirmation.
+            setResetStatus("confirming");
+            if (confirmResetTimer.current) clearTimeout(confirmResetTimer.current);
+            confirmResetTimer.current = setTimeout(() => setResetStatus("idle"), 5000);
+            return;
+        }
+        if (resetStatus === "confirming") {
+            // Second click — execute.
+            if (confirmResetTimer.current) clearTimeout(confirmResetTimer.current);
+            setResetStatus("running");
+            try {
+                await api.resetIngestionData();
+                setResetStatus("done");
+                setTimeout(() => setResetStatus("idle"), 4000);
+            } catch {
+                setResetStatus("error");
+                setTimeout(() => setResetStatus("idle"), 4000);
+            }
+        }
+    }
+
+    async function handleReingestAll() {
+        setReingestStatus("running");
+        setReingestCount(null);
+        try {
+            const result = await api.reingestAll();
+            setReingestCount(result.notes_queued);
+            setReingestStatus("done");
+            setTimeout(() => setReingestStatus("idle"), 5000);
+        } catch {
+            setReingestStatus("error");
+            setTimeout(() => setReingestStatus("idle"), 4000);
+        }
+    }
 
     async function handleSave() {
         if (!settings) return;
@@ -178,6 +288,107 @@ export default function SettingsPage() {
                                 />
                                 <p className="text-xs text-white/30">Used during note ingestion (extraction, entity reasoning). Leave blank to use the chat model.</p>
                             </div>
+                        </div>
+
+                        {/* Maintenance */}
+                        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 space-y-4">
+                            <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wide">Maintenance</h2>
+                            <div className="flex flex-col gap-2">
+                                <button
+                                    onClick={handleRebuildCommunities}
+                                    disabled={communityStatus === "running"}
+                                    className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white/70 transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50"
+                                >
+                                    {communityStatus === "running" ? (
+                                        <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                                    ) : communityStatus === "done" ? (
+                                        <Check className="h-4 w-4 shrink-0 text-green-400" />
+                                    ) : communityStatus === "error" ? (
+                                        <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
+                                    ) : (
+                                        <RefreshCw className="h-4 w-4 shrink-0" />
+                                    )}
+                                    {communityStatus === "running"
+                                        ? "Running…"
+                                        : communityStatus === "done"
+                                            ? "Done!"
+                                            : communityStatus === "error"
+                                                ? "Failed — check logs"
+                                                : "Rebuild Communities"}
+                                </button>
+                                <button
+                                    onClick={handleBuildDigests}
+                                    disabled={digestStatus === "running"}
+                                    className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white/70 transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50"
+                                >
+                                    {digestStatus === "running" ? (
+                                        <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                                    ) : digestStatus === "done" ? (
+                                        <Check className="h-4 w-4 shrink-0 text-green-400" />
+                                    ) : digestStatus === "error" ? (
+                                        <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
+                                    ) : (
+                                        <Calendar className="h-4 w-4 shrink-0" />
+                                    )}
+                                    {digestStatus === "running"
+                                        ? "Running…"
+                                        : digestStatus === "done"
+                                            ? "Done!"
+                                            : digestStatus === "error"
+                                                ? "Failed — check logs"
+                                                : "Build Temporal Digests"}
+                                </button>
+                                <button
+                                    onClick={handleReingestAll}
+                                    disabled={reingestStatus === "running"}
+                                    className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white/70 transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50"
+                                >
+                                    {reingestStatus === "running" ? (
+                                        <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                                    ) : reingestStatus === "done" ? (
+                                        <Check className="h-4 w-4 shrink-0 text-green-400" />
+                                    ) : reingestStatus === "error" ? (
+                                        <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
+                                    ) : (
+                                        <RotateCcw className="h-4 w-4 shrink-0" />
+                                    )}
+                                    {reingestStatus === "running"
+                                        ? "Queueing notes…"
+                                        : reingestStatus === "done"
+                                            ? `Queued ${reingestCount ?? 0} notes`
+                                            : reingestStatus === "error"
+                                                ? "Failed — check logs"
+                                                : "Re-ingest All Notes"}
+                                </button>
+                                <button
+                                    onClick={handleResetIngestion}
+                                    disabled={resetStatus === "running"}
+                                    className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm transition disabled:opacity-50 ${resetStatus === "confirming"
+                                            ? "border-red-500/50 bg-red-500/10 text-red-300 hover:bg-red-500/20"
+                                            : "border-white/10 bg-white/5 text-white/70 hover:border-red-500/30 hover:bg-red-500/5 hover:text-red-300"
+                                        }`}
+                                >
+                                    {resetStatus === "running" ? (
+                                        <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                                    ) : resetStatus === "done" ? (
+                                        <Check className="h-4 w-4 shrink-0 text-green-400" />
+                                    ) : resetStatus === "error" ? (
+                                        <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
+                                    ) : (
+                                        <Trash2 className="h-4 w-4 shrink-0" />
+                                    )}
+                                    {resetStatus === "confirming"
+                                        ? "Confirm? Click again to wipe all data"
+                                        : resetStatus === "running"
+                                            ? "Resetting…"
+                                            : resetStatus === "done"
+                                                ? "Done!"
+                                                : resetStatus === "error"
+                                                    ? "Failed — check logs"
+                                                    : "Reset Ingestion Data"}
+                                </button>
+                            </div>
+                            <p className="text-xs text-white/30">Jobs run in the background — monitor progress via server logs.</p>
                         </div>
 
                         {/* Error */}

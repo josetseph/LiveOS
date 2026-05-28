@@ -23,6 +23,7 @@ class LLMService:
 
     def __init__(self):
         import torch
+
         self.device = "mps" if torch.backends.mps.is_available() else "cpu"
         self.models_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "../../models")
@@ -594,7 +595,9 @@ class LLMService:
                     self.provider = original_provider
                     self.init_clients()
                     return result
-                except Exception as fallback_error:  # pylint: disable=broad-exception-caught
+                except (
+                    Exception
+                ) as fallback_error:  # pylint: disable=broad-exception-caught
                     logger.error(f"Fallback extraction failed: {fallback_error}")
                     # Restore original provider
                     self.provider = original_provider
@@ -656,18 +659,8 @@ class LLMService:
                         if isinstance(n, dict)
                     )
             else:
-                node_count = len(
-                    parsed.get("nodes")
-                    or parsed.get("entities")
-                    or parsed.get("node_list")
-                    or []
-                )
-                rel_count = len(
-                    parsed.get("relationships")
-                    or parsed.get("edges")
-                    or parsed.get("links")
-                    or []
-                )
+                node_count = len(parsed.get("nodes") or [])
+                rel_count = len(parsed.get("relationships") or [])
             logger.info(
                 f"[Ollama] Raw extraction: {node_count} nodes, {rel_count} relationships"
             )
@@ -1083,6 +1076,44 @@ class LLMService:
         )
         return response.choices[0].message.content.strip().replace('"', "")
 
+    def generate_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str | None = None,
+    ) -> str:
+        """Synchronously generate a plain-text response from the LLM.
+
+        Used for tasks that need a free-form text response (e.g. temporal digests)
+        rather than the structured extraction used during ingestion.
+        """
+        if self.provider == "gemini":
+            response = self.gemini_client.models.generate_content(
+                model=model or self.get_chat_model(),
+                contents=f"{system_prompt}\n\n{user_prompt}",
+            )
+            return response.text.strip()
+        if self.provider == "anthropic":
+            response = self.chat_client.messages.create(
+                model=model or self.get_chat_model(),
+                max_tokens=1024,
+                messages=[
+                    {"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}
+                ],
+            )
+            return response.content[0].text.strip()
+        # OpenAI / local (LM Studio, Ollama, vLLM, etc.)
+        _model = model or self.get_chat_model()
+        response = self.chat_client.chat.completions.create(
+            model=_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            extra_body=self._with_keep_alive(),
+        )
+        return response.choices[0].message.content.strip()
+
     def analyze_query(self, query: str) -> dict:
         """
         Analyzes user query with structured outputs for better retrieval.
@@ -1118,10 +1149,23 @@ class LLMService:
                 default=None,
                 description="What attribute is being asked about: nationality, occupation, birth_date, location, director, capacity, etc.",  # pylint: disable=line-too-long
             )
+            date_filter: Optional[str] = Field(
+                default=None,
+                description="ISO date (YYYY-MM-DD) if the query asks about a specific calendar day, e.g. '2024-05-24'. Null if the query spans a whole month or is not temporal.",  # pylint: disable=line-too-long
+            )
+            period_filter: Optional[str] = Field(
+                default=None,
+                description="ISO year-month (YYYY-MM) if the query asks about a whole month or multi-day period, e.g. 'last month', 'in April'. Mutually exclusive with date_filter. Null if date_filter is set or query is not temporal.",  # pylint: disable=line-too-long
+            )
 
         # Use the same prompt style as ingestion - concrete JSON examples
+        from datetime import date as _date
+
+        _today = _date.today().isoformat()  # e.g. "2026-05-25"
         try:
             prompt = f"""Analyze the following search query and return a structured JSON object.
+
+            Today's date: {_today}
 
             QUERY: "{query}"
 
@@ -1140,19 +1184,35 @@ class LLMService:
 
             - "keywords": Important terms to use when searching, excluding named entities already captured above.
 
+            - "date_filter": If the query asks about a specific single calendar day (e.g. "yesterday", "May 24th", "last Tuesday"), return that resolved date as YYYY-MM-DD. Null otherwise.
+
+            - "period_filter": If the query asks about a full month or multi-day period (e.g. "last month", "in April", "this month"), return the resolved year-month as YYYY-MM. Mutually exclusive with date_filter — set at most one. Null otherwise.
+
             EXAMPLES:
 
             Query: "Were Albert Einstein and Marie Curie of the same nationality?"
-            {{"entities": ["Albert Einstein", "Marie Curie"], "expected_entity_types": ["Person"], "question_attribute": "nationality", "intent": "compare", "keywords": ["nationality"]}}
+            {{"entities": ["Albert Einstein", "Marie Curie"], "expected_entity_types": ["Person"], "question_attribute": "nationality", "intent": "compare", "keywords": ["nationality"], "date_filter": null, "period_filter": null}}
 
             Query: "What award did the author of 1984 win?"
-            {{"entities": ["1984"], "expected_entity_types": ["Book", "Person"], "question_attribute": "award", "intent": "search", "keywords": ["author", "award"]}}
+            {{"entities": ["1984"], "expected_entity_types": ["Book", "Person"], "question_attribute": "award", "intent": "search", "keywords": ["author", "award"], "date_filter": null, "period_filter": null}}
 
             Query: "How many seats does Madison Square Garden have?"
-            {{"entities": ["Madison Square Garden"], "expected_entity_types": ["Venue"], "question_attribute": "capacity", "intent": "search", "keywords": ["seats", "capacity"]}}
+            {{"entities": ["Madison Square Garden"], "expected_entity_types": ["Venue"], "question_attribute": "capacity", "intent": "search", "keywords": ["seats", "capacity"], "date_filter": null, "period_filter": null}}
 
             Query: "Who directed Inception?"
-            {{"entities": ["Inception"], "expected_entity_types": ["Film", "Person"], "question_attribute": "director", "intent": "search", "keywords": ["directed"]}}
+            {{"entities": ["Inception"], "expected_entity_types": ["Film", "Person"], "question_attribute": "director", "intent": "search", "keywords": ["directed"], "date_filter": null, "period_filter": null}}
+
+            Query: "What happened on the 24th of May 2024?"
+            {{"entities": [], "expected_entity_types": [], "question_attribute": null, "intent": "search", "keywords": ["happened", "events"], "date_filter": "2024-05-24", "period_filter": null}}
+
+            Query: "What did I write on March 3rd 2023?"
+            {{"entities": [], "expected_entity_types": [], "question_attribute": null, "intent": "search", "keywords": ["wrote", "notes"], "date_filter": "2023-03-03", "period_filter": null}}
+
+            Query: "What happened last month?"
+            {{"entities": [], "expected_entity_types": [], "question_attribute": null, "intent": "summarize", "keywords": ["happened", "events"], "date_filter": null, "period_filter": "2026-04"}}
+
+            Query: "What did I do in April?"
+            {{"entities": [], "expected_entity_types": [], "question_attribute": null, "intent": "summarize", "keywords": ["did", "activities"], "date_filter": null, "period_filter": "2026-04"}}
 
             Return only the JSON object, no preamble or explanation.
             """
@@ -1173,6 +1233,8 @@ class LLMService:
                 "keywords": query.split(),
                 "expected_entity_types": [],
                 "question_attribute": None,
+                "date_filter": None,
+                "period_filter": None,
             }
 
     async def generate(

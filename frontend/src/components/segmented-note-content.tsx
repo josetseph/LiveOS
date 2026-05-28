@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Image as ImageIcon, FileText, Mic } from "lucide-react";
 import { api } from "@/lib/api";
+import { resolveFileUrl, isImageUrl, isVideoUrl } from "@/lib/utils";
 
 /** Allow entity:// pseudo-links through react-markdown's URL sanitizer. */
 function urlTransform(url: string): string {
@@ -209,11 +210,42 @@ function makeLinkComponent(
                 </button>
             );
         }
+        // Inline image/video rendering for 📎 file attachments
+        if (href && text.startsWith("📎")) {
+            const filename = text.replace(/^📎\s*/, "");
+            const resolvedUrl = resolveFileUrl(href);
+            if (isImageUrl(href)) {
+                return (
+                    <span className="block my-4 not-prose">
+                        <img
+                            src={resolvedUrl}
+                            alt={filename}
+                            className="max-w-full rounded-xl border border-white/10 cursor-pointer"
+                            onClick={() => onFileClick(resolvedUrl, filename)}
+                        />
+                        <span className="block text-xs text-white/40 mt-1">{filename}</span>
+                    </span>
+                );
+            }
+            if (isVideoUrl(href)) {
+                return (
+                    <span className="block my-4 not-prose">
+                        <video
+                            src={resolvedUrl}
+                            controls
+                            className="max-w-full rounded-xl border border-white/10"
+                        />
+                        <span className="block text-xs text-white/40 mt-1">{filename}</span>
+                    </span>
+                );
+            }
+        }
         if (href && (text.startsWith("📎") || text.startsWith("🎤"))) {
             const filename = text.replace(/^[📎🎤]\s*/, "");
+            const resolvedUrl = resolveFileUrl(href);
             return (
                 <button
-                    onClick={() => onFileClick(href, filename)}
+                    onClick={() => onFileClick(resolvedUrl, filename)}
                     className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
                 >
                     {text}

@@ -20,7 +20,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, resolveFileUrl, isImageUrl, isVideoUrl } from "@/lib/utils";
 import { ShaderBackground } from "@/components/shader-background";
 import { useKB } from "@/lib/kb-context";
 import { SegmentedNoteContent } from "@/components/segmented-note-content";
@@ -435,7 +435,8 @@ export default function NotesPage() {
   };
 
   const handleFileClick = (url: string, filename: string) => {
-    const lowerUrl = url.toLowerCase();
+    const resolvedUrl = resolveFileUrl(url);
+    const lowerUrl = resolvedUrl.toLowerCase();
     let type: FilePreview["type"] = "other";
 
     if (lowerUrl.match(/\.(jpg|jpeg|png|webp|gif)$/)) {
@@ -446,7 +447,7 @@ export default function NotesPage() {
       type = "audio";
     }
 
-    setFilePreview({ url, filename, type });
+    setFilePreview({ url: resolvedUrl, filename, type });
   };
 
   const handleDateChange = async (dateString: string) => {
@@ -903,31 +904,37 @@ export default function NotesPage() {
                 return attachments.length > 0 ? (
                   <div className="flex flex-wrap items-center gap-2 border-t border-white/5 bg-white/[0.02] px-6 py-2">
                     <span className="text-xs text-white/30">Attachments:</span>
-                    {attachments.map((att) => (
-                      <span
-                        key={att.url}
-                        className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-white/60"
-                      >
-                        <button
-                          onClick={() =>
-                            handleFileClick(
-                              att.url,
-                              att.label.replace(/^[📎🎤]\s*/, ""),
-                            )
-                          }
-                          className="hover:text-white/90 transition-colors"
+                    {attachments
+                      .filter(
+                        (att) =>
+                          !isPreviewMode ||
+                          (!isImageUrl(att.url) && !isVideoUrl(att.url)),
+                      )
+                      .map((att) => (
+                        <span
+                          key={att.url}
+                          className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-white/60"
                         >
-                          {att.label}
-                        </button>
-                        <button
-                          onClick={() => handleDeleteFile(att.url, att.raw)}
-                          className="ml-1 rounded text-white/30 hover:text-red-400 transition-colors"
-                          title="Delete file"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </span>
-                    ))}
+                          <button
+                            onClick={() =>
+                              handleFileClick(
+                                att.url,
+                                att.label.replace(/^[📎🎤]\s*/, ""),
+                              )
+                            }
+                            className="hover:text-white/90 transition-colors"
+                          >
+                            {att.label}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteFile(att.url, att.raw)}
+                            className="ml-1 rounded text-white/30 hover:text-red-400 transition-colors"
+                            title="Delete file"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      ))}
                   </div>
                 ) : null;
               })()}

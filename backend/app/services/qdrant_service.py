@@ -97,8 +97,24 @@ class QdrantService:
         except Exception:  # pylint: disable=broad-exception-caught
             return False
 
+    def reset_all(self) -> None:
+        """Delete and recreate all Qdrant collections for this KB, wiping all vectors."""
+        if not self._enabled or not self.client:
+            return
+        for name in (self._col_cores, self._col_rels, self._col_contexts):
+            try:
+                self.client.delete_collection(name)
+                logger.info(f"[Qdrant] Deleted collection '{name}'")
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(f"[Qdrant] Could not delete collection '{name}': {exc}")
+        self._ensure_collections()
+        logger.info("[Qdrant] All collections reset.")
+
     def search_all_collections(
-        self, query_vector: list[float], limit: int, min_score: float
+        self,
+        query_vector: list[float],
+        limit: int,
+        min_score: float,
     ) -> list[dict[str, Any]]:
         """Search all Qdrant collections and merge the resulting scored hits."""
         if not self.is_available() or not self.client:
@@ -268,12 +284,13 @@ class QdrantService:
                 f"Qdrant upsert_node_items failed for {collection_name}/{node_id}: {exc}"
             )
 
-    def append_node_item(
+    def append_node_item(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         collection_name: str,
         node_id: str,
         content: str,
         vector: list[float],
+        note_created_at: str | None = None,
     ) -> None:
         """Append a single new item to a sub-item collection without touching existing points.
 
@@ -283,13 +300,16 @@ class QdrantService:
             return
         try:
             point_id = str(uuid.uuid4())
+            payload: dict[str, Any] = {"parent_node_id": node_id, "content": content}
+            if note_created_at:
+                payload["note_created_at"] = note_created_at
             self.client.upsert(
                 collection_name=collection_name,
                 points=[
                     PointStruct(
                         id=point_id,
                         vector=vector,
-                        payload={"parent_node_id": node_id, "content": content},
+                        payload=payload,
                     )
                 ],
             )
@@ -381,9 +401,11 @@ class QdrantService:
                         with_payload=True,
                     )
                     for point in results:
-                        content = (point.payload or {}).get("content")
+                        payload = point.payload or {}
+                        content = payload.get("content")
                         if content:
-                            items.append(content)
+                            date = payload.get("note_created_at")
+                            items.append(f"{content} - {date}" if date else content)
                     if next_offset is None:
                         break
                     offset = next_offset
@@ -468,7 +490,9 @@ class QdrantService:
                         nid = payload.get("parent_node_id")
                         content = payload.get("content")
                         if nid and content:
-                            result.setdefault(nid, []).append(content)
+                            date = payload.get("note_created_at")
+                            entry = f"{content} - {date}" if date else content
+                            result.setdefault(nid, []).append(entry)
                     if next_offset is None:
                         break
                     offset = next_offset
@@ -726,6 +750,37 @@ class QdrantService:
                 )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(f"Qdrant delete_node failed for {node_id}: {exc}")
+
+    def scroll_all_isolated_contexts_with_dates(self) -> list[dict]:
+        """Return payload dicts for every isolated_context point that has a note_created_at field.
+
+        Used by the temporal digest builder to group contexts by time period.
+        """
+        if not self.is_available() or not self.client:
+            return []
+        results: list[dict] = []
+        offset = None
+        try:
+            while True:
+                points, next_offset = self.client.scroll(
+                    collection_name=self._col_contexts,
+                    limit=500,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    payload = point.payload or {}
+                    if payload.get("note_created_at"):
+                        results.append(payload)
+                if not points or next_offset is None:
+                    break
+                offset = next_offset
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                f"[Qdrant] scroll_all_isolated_contexts_with_dates failed: {exc}"
+            )
+        return results
 
 
 qdrant_service = QdrantService()

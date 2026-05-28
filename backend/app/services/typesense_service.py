@@ -77,6 +77,20 @@ class TypesenseService:
         except Exception:  # pylint: disable=broad-exception-caught
             return False
 
+    def reset_all(self) -> None:
+        """Delete and recreate the Typesense collection for this KB, wiping all data."""
+        if not self._enabled or not self.client:
+            return
+        try:
+            self.client.collections[self.collection].delete()
+            logger.info(f"[Typesense] Deleted collection '{self.collection}'")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                f"[Typesense] Could not delete collection '{self.collection}': {exc}"
+            )
+        self._ensure_collection()
+        logger.info(f"[Typesense] Collection '{self.collection}' reset.")
+
     def search_nodes(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         """Run a BM25 keyword search across name, type, context, and relationship fields."""
         if not self.is_available():

@@ -1,6 +1,7 @@
 """Hybrid retrieval: vector search, graph traversal, keyword search, and cross-encoder reranking."""
 
 # pylint: disable=too-many-lines,import-outside-toplevel
+import calendar
 import logging
 import os
 import time
@@ -12,6 +13,7 @@ from app.core.log import get_logger
 from app.services.graph import GraphService, graph_service
 from app.services.qdrant_service import QdrantService, qdrant_service
 from app.services.typesense_service import TypesenseService, typesense_service
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 
 # Suppress noisy tokenizer warnings
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
@@ -108,7 +110,7 @@ class RetrievalService:
                 return []
 
             related_nodes = self._graph.get_related_nodes(
-                node_name=node_name, max_depth=1, min_confidence=0.5
+                node_name=node_name, max_depth=1
             )
             if not related_nodes:
                 return []
@@ -209,7 +211,6 @@ class RetrievalService:
                 related = self._graph.get_related_nodes(
                     node_name=node_name,
                     max_depth=1,
-                    min_confidence=0.5,
                 )
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug(
@@ -660,7 +661,10 @@ class RetrievalService:
         return node.get("summary") or node.get("description") or _isolated_joined
 
     async def _search_qdrant_multi_collection(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
-        self, query_vector: list[float]
+        self,
+        query_vector: list[float],
+        date_filter: str | None = None,
+        period_filter: str | None = None,
     ) -> list[dict]:
         """Search all Qdrant collections and normalize into node-like results.
 
@@ -682,10 +686,54 @@ class RetrievalService:
             if settings.RERANKER_ENABLED
             else settings.VECTOR_SIMILARITY_THRESHOLD
         )
+        _contexts_filter: Filter | None = None
+        _period_key_filter: str | None = None
+        _day_only: bool = False
+        if date_filter:
+            # Specific day — exact match on isolated_contexts; exclude month-level
+            # summaries (communities, temporal_digests) from node_cores.
+            _contexts_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="note_created_at", match=MatchValue(value=date_filter)
+                    )
+                ]
+            )
+            _day_only = True
+            logger.info(
+                f"  [Qdrant] Applying day filter: note_created_at={date_filter}"
+            )
+        elif period_filter:
+            # Month range — match all dates in the month; include communities and
+            # temporal_digests with the matching period_key.
+            try:
+                year, month_num = int(period_filter[:4]), int(period_filter[5:7])
+                _, last_day = calendar.monthrange(year, month_num)
+                month_dates = [
+                    f"{year}-{month_num:02d}-{d:02d}" for d in range(1, last_day + 1)
+                ]
+                _contexts_filter = Filter(
+                    must=[
+                        FieldCondition(
+                            key="note_created_at", match=MatchAny(any=month_dates)
+                        )
+                    ]
+                )
+                _period_key_filter = period_filter
+                logger.info(
+                    f"  [Qdrant] Applying month filter: period={period_filter} ({len(month_dates)} dates)"
+                )
+            except (ValueError, IndexError) as exc:
+                logger.warning(
+                    f"  [Qdrant] Invalid period_filter '{period_filter}': {exc}"
+                )
         hits = self._qdrant.search_all_collections(
             query_vector=query_vector,
             limit=500,  # large ceiling; score_threshold is the real filter
             min_score=_threshold,
+            contexts_filter=_contexts_filter,
+            period_key_filter=_period_key_filter,
+            day_only=_day_only,
         )
         if not hits:
             logger.info("  [Qdrant] No hits above similarity threshold.")
@@ -753,6 +801,9 @@ class RetrievalService:
                 # an empty description in node_cores would otherwise get an empty
                 # summary and be silently filtered out by _get_node_text.
                 ctx_text = (payload.get("content") or "").strip()
+                ctx_date = (payload.get("note_created_at") or "").strip()
+                if ctx_date:
+                    ctx_text = f"{ctx_text} - {ctx_date}"
                 if key in merged:
                     existing_summary = merged[key].get("summary") or ""
                     if ctx_text and ctx_text not in existing_summary:
@@ -876,9 +927,7 @@ class RetrievalService:
 
     async def hybrid_search(  # pylint: disable=too-many-nested-blocks,too-many-locals,too-many-branches,too-many-statements
         self, query: str, top_k: int = 50
-    ) -> List[
-        dict
-    ]:
+    ) -> List[dict]:
         """
         Entity-First Retrieval Pipeline:
 
@@ -958,6 +1007,14 @@ class RetrievalService:
             f"Expected Types: {expected_entity_types}, "
             f"Attribute: {question_attribute}"
         )
+        query_date_filter: str | None = query_analysis.get("date_filter") or None
+        query_period_filter: str | None = query_analysis.get("period_filter") or None
+        if query_date_filter:
+            logger.info(f"  [LLM Analysis] Day filter detected: {query_date_filter}")
+        if query_period_filter:
+            logger.info(
+                f"  [LLM Analysis] Month filter detected: {query_period_filter}"
+            )
 
         # Generate query embedding for vector search
         t_embedding_start = time.perf_counter()
@@ -1126,7 +1183,11 @@ class RetrievalService:
         logger.info("  [Vector] Running vector search")
         try:
             # Qdrant is the vector source of truth.
-            vector_results = await self._search_qdrant_multi_collection(full_vector)
+            vector_results = await self._search_qdrant_multi_collection(
+                full_vector,
+                date_filter=query_date_filter,
+                period_filter=query_period_filter,
+            )
             if vector_results:
                 logger.info(
                     f"  [Vector] Using Qdrant multi-collection search with {len(vector_results)} hits"

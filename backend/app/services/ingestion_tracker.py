@@ -10,7 +10,7 @@ from app.core.log import get_logger
 logger = get_logger("IngestionTracker")
 
 # Trigger Leiden recompute this many seconds after ALL ingestions have completed.
-COMMUNITY_IDLE_SECONDS = 120 # 2 minutes
+COMMUNITY_IDLE_SECONDS = 120  # 2 minutes
 
 
 class IngestionTrackerService:
@@ -34,6 +34,8 @@ class IngestionTrackerService:
         self._debounce_task: asyncio.Task | None = None
         # Threading event used to signal a running rebuild to stop between clusters.
         self.cancel_recompute: threading.Event = threading.Event()
+        # Threading event used to signal a running temporal digest build to stop.
+        self.cancel_temporal: threading.Event = threading.Event()
 
     def mark_ingestion_complete(self):
         """Record the completion time of the latest ingestion."""
@@ -62,6 +64,7 @@ class IngestionTrackerService:
             # Immediate preemption signal: request cancellation as soon as ingestion starts
             # so any in-flight recompute path can stop cooperatively.
             self.cancel_recompute.set()
+            self.cancel_temporal.set()
 
             # Keep a specific info log when tracker-known recompute is running.
             recompute_running = self._community_recompute_running

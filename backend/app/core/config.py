@@ -86,6 +86,15 @@ class Settings(BaseSettings):
     # node while keeping the candidate pool small enough for fast reranking.
     VECTOR_PRE_RERANK_THRESHOLD: float = 0.45
     COMMUNITY_RECOMPUTE_BATCH_SIZE: int = 100
+    # ── Feature switches ──────────────────────────────────────────────────────
+    # Set to False to disable the automatic post-ingestion trigger only.
+    # The manual endpoint (Rebuild Communities button) always remains available.
+    COMMUNITY_DETECTION_ENABLED: bool = False
+    # Set to False to disable the automatic post-ingestion trigger only.
+    # The manual endpoint (Build Temporal Digests button) always remains available.
+    TEMPORAL_DIGESTS_ENABLED: bool = False
+    # Default time granularity for temporal digests: "month" | "week" | "year"
+    TEMPORAL_DIGEST_PERIOD: str = "month"
     RERANKER_ENABLED: bool = True
     RERANKER_TOP_K: int = 10  # Candidates passed to LLM after reranking
     RERANKER_SCORE_THRESHOLD: float = (

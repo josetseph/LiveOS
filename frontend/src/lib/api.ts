@@ -263,4 +263,29 @@ export const api = {
   }): Promise<{ provider: string; model: string; ingestion_model: string; base_url: string }> {
     return http.patch("/settings", data);
   },
+
+  // ── Maintenance ───────────────────────────────────────────────────────────
+
+  async getMaintenanceStatus(): Promise<{
+    community_detection: { running: boolean };
+    temporal_digests: { running: boolean };
+  }> {
+    return http.get("/admin/maintenance-status");
+  },
+
+  async rebuildCommunities(): Promise<{ status: string; message: string }> {
+    return http.post("/admin/rebuild-communities", {});
+  },
+
+  async buildTemporalDigests(period?: string): Promise<{ status: string; message: string }> {
+    return http.post("/admin/build-temporal-digests", { period: period ?? null });
+  },
+
+  async resetIngestionData(): Promise<{ status: string; message: string }> {
+    return http.post("/admin/reset-ingestion-data", {});
+  },
+
+  async reingestAll(): Promise<{ status: string; notes_queued: number; message: string }> {
+    return http.post("/admin/reingest-all", {});
+  },
 };

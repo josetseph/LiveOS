@@ -197,14 +197,40 @@ Chat queries go through a multi-iteration research loop, not a single vector loo
 User query
     │
     ▼
-[1] ITERATIVE LOOP (up to 10 iterations, configurable)
+[1] LLM query analysis
+    ├── Intent classification
+    ├── Entity extraction (names explicitly mentioned)
+    ├── Keywords + concepts
+    ├── date_filter (YYYY-MM-DD) — set when query targets a specific day
+    └── period_filter (YYYY-MM) — set when query targets a whole month
     │
-    ├── Hybrid search
-    │   ├── Vector search (Qdrant — cosine similarity, threshold 0.45 pre-rerank)
-    │   ├── BM25 full-text search (Typesense — keyword + phrase match)
-    │   └── Entity name exact match
+    ▼
+[2] HYBRID RETRIEVAL (three independent result lists)
     │
-    ├── node_id deduplication (replaces prior name-based dedup)
+    ├── entity_nodes  — exact name match via graph lookup
+    │   └── Enriched from Qdrant; isolated_contexts filtered to date_filter / period_filter
+    │
+    ├── typesense_nodes  — BM25 keyword search (Typesense)
+    │   ├── Enriched from Qdrant (description + isolated_contexts)
+    │   ├── isolated_contexts filtered to matching date(s)
+    │   └── Temporal post-filter applied (see below)
+    │
+    └── vector_nodes  — semantic search (Qdrant cosine, threshold 0.45 pre-rerank)
+        ├── Date annotation appended to content: "Had coffee with John - 2026-05-10"
+        └── Temporal post-filter applied (see below)
+    │
+    ▼
+[3] TEMPORAL POST-FILTER (applied to typesense_nodes and vector_nodes)
+    │
+    ├── temporal_digest nodes — include only when period_filter matches period_key
+    ├── community nodes      — exclude entirely for any temporal query
+    └── all other nodes      — include only if isolated_contexts contain a matching
+                               date string after enrichment
+    │
+    ▼
+[4] ITERATIVE LOOP (up to 10 iterations, configurable)
+    │
+    ├── all_found_nodes = entity_nodes + typesense_nodes + vector_nodes
     │
     ├── Graph neighbour expansion
     │   ├── 1-hop Kuzu graph traversal from top candidates
@@ -217,13 +243,31 @@ User query
         └── Emit NEXT_QUERY for next iteration
     │
     ▼
-[2] Loop exits when can_answer = True or iteration limit reached
+[5] Loop exits when can_answer = True or iteration limit reached
     └── Returns best FINDING + top-6 scored context docs
     │
     ▼
-[3] Response with inline note citations
+[6] Response with inline note citations
     └── Model thinking exposed in collapsible dropdown (when available)
 ```
+
+### Candidate types
+
+| Type | Source | Description |
+|---|---|---|
+| `entity_match` | Entity name lookup | Nodes whose name was explicitly mentioned in the query |
+| `keyword_match` | Typesense BM25 | Nodes found by full-text keyword search |
+| `vector_match` | Qdrant vector search | Nodes found by semantic/cosine similarity |
+| `community_summary` | Qdrant vector search | Community rollup nodes (excluded for temporal queries) |
+
+### Temporal filtering
+
+When the LLM detects a date or month in the query it sets `date_filter` (YYYY-MM-DD) or `period_filter` (YYYY-MM). These are **never passed to Qdrant** — all searches run unrestricted and temporal filtering is applied as a post-filter on the accumulated results:
+
+- **`entity_nodes`**: always included; their `isolated_contexts` are filtered to the matching date so only relevant context is surfaced.
+- **`typesense_nodes` / `vector_nodes`**: filtered by the rules above. A node passes only if its enriched `isolated_contexts` contain at least one entry whose date suffix matches (`"content - YYYY-MM-DD"`).
+- **`temporal_digest` nodes**: kept only for month queries where the node's `period_key` equals `period_filter`.
+- **`community` nodes**: excluded for all temporal queries (they hold aggregate, undated summaries).
 
 The loop accumulates findings across iterations. On exhaustion (no `can_answer=True`), the last non-empty FINDING is returned without an additional synthesis call.
 
@@ -263,7 +307,7 @@ Built with Next.js 16 (App Router) and Tailwind CSS.
 | `/chat` | Conversational interface — markdown rendering, file previews, thumbs up/down feedback, source citations |
 | `/graph-3d` | 3D graph visualisation |
 | `/kb` | Knowledge base manager — create, rename, switch, and delete knowledge bases |
-| `/settings` | Runtime LLM settings — switch provider, chat model, ingestion model, and server URL without restarting |
+| `/settings` | Runtime LLM settings — switch provider, chat model, ingestion model, and server URL without restarting; also has maintenance controls to manually trigger community detection and temporal digest builds |
 
 The notes editor supports:
 - Plain text with Markdown preview
@@ -596,6 +640,8 @@ python scripts/reset_all.py
 ```
 
 Individual reset scripts exist for each store: `reset_vectors.py`, `reset_index.py`, `reset_graph.py`, `reset_database.py`, `reset_storage.py`, `reset_ingestion.py`.
+
+> **Note:** If the backend is running in Docker, restart it after `reset_ingestion.py` to release stale Kuzu file handles: `docker compose restart backend`.
 
 ### Benchmark evaluation
 

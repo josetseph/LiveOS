@@ -212,13 +212,6 @@ async def extraction_node(
     # text. Auto-generated titles are not included — they don't originate from
     # the note itself and would pollute the extraction.
     extraction_content = state["content"]
-    if state["input"].created_at:
-        try:
-            _dt = datetime.fromisoformat(state["input"].created_at)
-            _date_label = _dt.strftime("%B %-d, %Y")
-        except ValueError:
-            _date_label = state["input"].created_at
-        extraction_content = f"[Note date: {_date_label}]\n\n{extraction_content}"
     if state["input"].title:
         extraction_content = f"# {state['input'].title}\n\n{extraction_content}"
 
@@ -257,16 +250,15 @@ Identify every distinct entity in the note. For each, assign:
 
 ### STEP 2 — Relationship Extraction
 List every relationship between entities. For each:
-- Write a short, verb-driven statement: `[Entity A] -> [verb phrase] -> [Entity B]`
-- Indicate directionality: `->` (one directional) or `<->` (mutual)
-- Only include what the text explicitly states or directly implies
-- `reasoning`: One sentence citing the specific word, phrase, or sentence in the note that supports this relationship
+- `source_name`: The entity the relationship originates from.
+- `target_name`: The entity the relationship points to.
+- `relationship_type`: A concise snake_case verb phrase (e.g. `attends`, `lives_in`, `is_friends_with`).
+- `natural_language`: A short natural-language description of the relationship (e.g. "attends school").
+- `reasoning`: One sentence citing the specific word, phrase, or sentence in the note that supports this relationship.
+- Only include what the text explicitly states or directly implies.
 
-### STEP 3 — Relationship Graph
-Represent all relationships as a compact symbolic graph using `->`. Group related clusters together.
-
-### STEP 4 — Entity Context Generation
-For each entity, write a tightly focused contextual description using **only information from the note**.
+### STEP 3 — Node Context Generation
+For each node, write a tightly focused contextual description using **only information from the note**.
 Rules:
 - Write in complete sentences
 - Stay entity-centric: everything in the description should orbit *this specific entity*
@@ -283,28 +275,23 @@ Return a single JSON object structured exactly like this:
 
 {{
   "title": "string — descriptive title that captures the main subject of this note",
-  "entities": [
+  "nodes": [
     {{
       "name": "string — canonical entity name",
       "type": "string — the most fitting type for this entity",
       "type_reasoning": "string — explaining why you chose this type, citing the key clue from the note",
-      "context": "string — isolated, entity-centric contextual paragraph drawn entirely from the note",
-      "relationships": [
-        "string — e.g., 'Ama is friends with Kofi'",
-        "string — e.g., 'Ama attends Primary School'"
-      ]
+      "isolated_context": "string — isolated, entity-centric contextual paragraph drawn entirely from the note"
     }}
   ],
   "relationships": [
     {{
-      "entity1": "string",
-      "entity2": "string",
-      "direction": "-> or <->",
-      "description": "string — concise verb-phrase description of the relationship",
+      "source_name": "string — the entity the relationship originates from",
+      "target_name": "string — the entity the relationship points to",
+      "relationship_type": "string — concise snake_case verb phrase (e.g. attends, lives_in, is_friends_with)",
+      "natural_language": "string — short natural-language description of the relationship",
       "reasoning": "string — one sentence citing the specific text that supports this relationship"
     }}
-  ],
-  "graph": "string — compact symbolic representation of all relationships"
+  ]
 }}
 
 ---
@@ -317,83 +304,54 @@ Return a single JSON object structured exactly like this:
 **Output:**
 {{
   "title": "Ama and Kofi's Weekend Friendship",
-  "entities": [
+  "nodes": [
     {{
       "name": "Ama",
       "type": "Person",
       "type_reasoning": "Ama is explicitly described as a girl, making her a human individual.",
-      "context": "Ama is a girl and a student at Primary School. She is mutual friends with Kofi and shares a weekend play routine with him. She lives in the same neighborhood as Kofi. She consistently completes her homework before engaging in play.",
-      "relationships": [
-        "Ama is friends with Kofi",
-        "Ama attends Primary School",
-        "Ama lives in the Neighborhood",
-        "Ama plays with Kofi on the Weekend",
-        "Ama completes Homework before playing"
-      ]
+      "isolated_context": "Ama is a girl and a student at Primary School. She is mutual friends with Kofi and shares a weekend play routine with him. She lives in the same neighborhood as Kofi. She consistently completes her homework before engaging in play."
     }},
     {{
       "name": "Kofi",
       "type": "Person",
       "type_reasoning": "Kofi is explicitly described as a boy, making him a human individual.",
-      "context": "Kofi is a boy who lives in the Neighborhood. He is mutual friends with Ama and plays with her every weekend. His play is situated within the neighborhood.",
-      "relationships": [
-        "Kofi is friends with Ama",
-        "Kofi lives in the Neighborhood",
-        "Kofi plays with Ama on the Weekend"
-      ]
+      "isolated_context": "Kofi is a boy who lives in the Neighborhood. He is mutual friends with Ama and plays with her every weekend. His play is situated within the neighborhood."
     }},
     {{
       "name": "Primary School",
       "type": "Place",
       "type_reasoning": "Primary School is an educational institution — a physical location that Ama attends.",
-      "context": "Primary School is the educational institution that Ama attends. It is the only institution mentioned in the note and defines Ama's role as a student.",
-      "relationships": [
-        "Ama attends Primary School"
-      ]
+      "isolated_context": "Primary School is the educational institution that Ama attends. It is the only institution mentioned in the note and defines Ama's role as a student."
     }},
     {{
       "name": "Neighborhood",
       "type": "Place",
       "type_reasoning": "The Neighborhood is a physical geographic area where both Ama and Kofi live and play.",
-      "context": "The Neighborhood is a shared residential area where both Ama and Kofi live. It is also where Kofi plays.",
-      "relationships": [
-        "Ama lives in the Neighborhood",
-        "Kofi lives in the Neighborhood",
-        "Kofi plays in the Neighborhood"
-      ]
+      "isolated_context": "The Neighborhood is a shared residential area where both Ama and Kofi live. It is also where Kofi plays."
     }},
     {{
       "name": "Weekend",
       "type": "Time Period",
-      "context": "The Weekend is the recurring time period during which Ama and Kofi play together. It is contingent on Ama finishing her homework first.",
       "type_reasoning": "Weekend is a recurring temporal interval — a defined period of time during which events in the note occur.",
-      "relationships": [
-        "Ama plays with Kofi on the Weekend",
-        "Weekend follows Ama completing Homework"
-      ]
+      "isolated_context": "The Weekend is the recurring time period during which Ama and Kofi play together. It is contingent on Ama finishing her homework first."
     }},
     {{
       "name": "Homework",
       "type": "Thing",
       "type_reasoning": "Homework is a concrete recurring task/artifact that Ama must complete — a physical obligation rather than an abstract concept.",
-      "context": "Homework is a recurring obligation that Ama must complete before she is free to play with Kofi on the Weekend. It acts as a precondition to their shared leisure activity.",
-      "relationships": [
-        "Ama completes Homework before the Weekend",
-        "Homework precedes Ama playing with Kofi"
-      ]
+      "isolated_context": "Homework is a recurring obligation that Ama must complete before she is free to play with Kofi on the Weekend. It acts as a precondition to their shared leisure activity."
     }}
   ],
   "relationships": [
-    {{"entity1": "Ama", "entity2": "Kofi", "direction": "<->", "description": "are mutual friends", "reasoning": "The note states 'Ama and Kofi are friends'."}},
-    {{"entity1": "Ama", "entity2": "Primary School", "direction": "->", "description": "attends", "reasoning": "The note says 'Ama is a girl in primary school'."}},
-    {{"entity1": "Ama", "entity2": "Neighborhood", "direction": "->", "description": "lives in", "reasoning": "Implied by Kofi playing 'in the neighborhood' and both sharing the same area."}},
-    {{"entity1": "Kofi", "entity2": "Neighborhood", "direction": "->", "description": "lives and plays in", "reasoning": "The note says 'Kofi is a boy who plays in the neighborhood'."}},
-    {{"entity1": "Ama", "entity2": "Weekend", "direction": "->", "description": "plays with Kofi during", "reasoning": "The note says 'Ama likes to play with Kofi every weekend'."}},
-    {{"entity1": "Kofi", "entity2": "Weekend", "direction": "->", "description": "plays with Ama during", "reasoning": "The note says 'Ama likes to play with Kofi every weekend', making it mutual."}},
-    {{"entity1": "Ama", "entity2": "Homework", "direction": "->", "description": "completes before weekend play", "reasoning": "The note says 'after she is done with her homework'."}},
-    {{"entity1": "Homework", "entity2": "Weekend", "direction": "->", "description": "must be completed before", "reasoning": "The note says Ama plays 'after she is done with her homework', making homework a precondition to weekend play."}}
-  ],
-  "graph": "Ama <-> Kofi, Ama -> Primary School, Ama -> Neighborhood <- Kofi, Ama -> Weekend <- Kofi, Ama -> Homework -> Weekend"
+    {{"source_name": "Ama", "target_name": "Kofi", "relationship_type": "is_friends_with", "natural_language": "are mutual friends", "reasoning": "The note states 'Ama and Kofi are friends'."}},
+    {{"source_name": "Ama", "target_name": "Primary School", "relationship_type": "attends", "natural_language": "attends school", "reasoning": "The note says 'Ama is a girl in primary school'."}},
+    {{"source_name": "Ama", "target_name": "Neighborhood", "relationship_type": "lives_in", "natural_language": "lives in the neighborhood", "reasoning": "Implied by Kofi playing 'in the neighborhood' and both sharing the same area."}},
+    {{"source_name": "Kofi", "target_name": "Neighborhood", "relationship_type": "lives_and_plays_in", "natural_language": "lives and plays in the neighborhood", "reasoning": "The note says 'Kofi is a boy who plays in the neighborhood'."}},
+    {{"source_name": "Ama", "target_name": "Weekend", "relationship_type": "plays_during", "natural_language": "plays with Kofi during the weekend", "reasoning": "The note says 'Ama likes to play with Kofi every weekend'."}},
+    {{"source_name": "Kofi", "target_name": "Weekend", "relationship_type": "plays_during", "natural_language": "plays with Ama during the weekend", "reasoning": "The note says 'Ama likes to play with Kofi every weekend', making it mutual."}},
+    {{"source_name": "Ama", "target_name": "Homework", "relationship_type": "completes_before_play", "natural_language": "completes homework before weekend play", "reasoning": "The note says 'after she is done with her homework'."}},
+    {{"source_name": "Homework", "target_name": "Weekend", "relationship_type": "precondition_for", "natural_language": "must be completed before weekend play begins", "reasoning": "The note says Ama plays 'after she is done with her homework', making homework a precondition to weekend play."}}
+  ]
 }}
 
 ---
@@ -607,6 +565,7 @@ async def summarization_node(state: IngestionState):
     await _wf._update_neighborhoods(
         state["extraction"].nodes,
         state["content"],
+        note_created_at=state.get("created_at"),
     )
     t_end = time.perf_counter()
     logger.info(f"  [Perf] Context indexing took: {t_end - t_start:.4f}s")

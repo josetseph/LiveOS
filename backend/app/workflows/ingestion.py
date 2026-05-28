@@ -12,7 +12,10 @@ from app.core.log import get_logger
 from app.schemas.extraction import Extraction, NoteInput
 from app.services.graph import GraphService, graph_service
 from app.services.embedding import embedding_service
-from app.services.ingestion_tracker import ingestion_tracker as _tracker
+from app.services.ingestion_tracker import (
+    ingestion_tracker as _tracker,
+    COMMUNITY_IDLE_SECONDS,
+)
 from app.services.llm import llm_service
 from app.services.qdrant_service import QdrantService, qdrant_service
 from app.services.typesense_service import TypesenseService, typesense_service
@@ -33,6 +36,12 @@ _community_run_state_lock = threading.Lock()
 _community_run_seq = 0  # pylint: disable=invalid-name
 _community_run_active_seq = 0  # pylint: disable=invalid-name
 _community_run_running = False  # pylint: disable=invalid-name
+
+# Debounce timer for post-ingestion temporal digest rebuild.
+# Uses the same idle window as community detection (COMMUNITY_IDLE_SECONDS).
+_temporal_digest_timer: threading.Timer | None = None  # pylint: disable=invalid-name
+_temporal_digest_timer_lock = threading.Lock()  # pylint: disable=invalid-name
+_temporal_digest_running: bool = False  # pylint: disable=invalid-name
 # pylint: disable=invalid-name
 
 
@@ -346,16 +355,12 @@ class IngestionWorkflow:
                     f"{norm_name} ({n.type}): {(n.isolated_context or '')}"
                 )
 
-            # For Qwen3 models embed_query prepends an instruction prefix;
-            # replicate that here so we can use the batched embed_documents path.
-            if embedding_service.is_qwen3 and _embed_texts:
-                _prefixed = [
-                    embedding_service.query_instruction + t for t in _embed_texts
-                ]
-            else:
-                _prefixed = _embed_texts
-
-            _vectors = embedding_service.embed_documents(_prefixed) if _prefixed else []
+            # Documents are embedded without any instruction prefix — the query↔document
+            # asymmetry (query gets "Instruct: …\nQuery: " prefix, documents do not)
+            # is what makes Qwen3-Embedding retrieval work correctly.
+            _vectors = (
+                embedding_service.embed_documents(_embed_texts) if _embed_texts else []
+            )
             node_embeddings: dict[str, list[float]] = dict(zip(_embed_keys, _vectors))
 
             # Resolve or assign stable IDs: batch-look up Qdrant for ALL unique names
@@ -584,7 +589,7 @@ class IngestionWorkflow:
                         f"NL: '{(rel.natural_language or '')}'"
                     )
 
-                    # Create or update relationship with bi-temporal support
+                    # Create or update relationship
                     result = self._graph.create_or_update_relationship(
                         source_name=source_name_normalized,
                         source_label=source_label,
@@ -663,25 +668,57 @@ class IngestionWorkflow:
         return title
 
     async def _queue_leiden_recompute_if_due(self, note_id: str) -> None:
-        rows = self._graph.execute_query(
-            """
-            MATCH (:Node {id: $note_id})-[*1]-(n:Node)
-            WHERE n.kind = 'indexable' AND n.id IS NOT NULL
-            RETURN DISTINCT n.id AS node_id
-            """,
-            {"note_id": note_id},
-        )
-        node_ids = [row["node_id"] for row in rows if row.get("node_id")]
-        if not node_ids:
-            return
+        """Queue community detection and/or schedule a temporal digest rebuild after ingestion.
 
-        _, queue_size = await _tracker.queue_nodes_for_community_recompute(node_ids)
-        logger.info(
-            f"[Community] Queued {len(node_ids)} node IDs for Leiden recompute "
-            f"(queue size: {queue_size}) — IDs: {node_ids}{'...' if len(node_ids) > 10 else ''}"
-        )
+        Both features gate on their respective config switches independently so that
+        disabling one does not suppress the other.
+        """
+        from app.core.config import settings as _settings
 
-    async def _update_neighborhoods(self, nodes, new_content: str):
+        # ── Community detection ───────────────────────────────────────────────
+        if _settings.COMMUNITY_DETECTION_ENABLED:
+            rows = self._graph.execute_query(
+                """
+                MATCH (:Node {id: $note_id})-[*1]-(n:Node)
+                WHERE n.kind = 'indexable' AND n.id IS NOT NULL
+                RETURN DISTINCT n.id AS node_id
+                """,
+                {"note_id": note_id},
+            )
+            node_ids = [row["node_id"] for row in rows if row.get("node_id")]
+            if node_ids:
+                _, queue_size = await _tracker.queue_nodes_for_community_recompute(
+                    node_ids
+                )
+                logger.info(
+                    f"[Community] Queued {len(node_ids)} node IDs for Leiden recompute "
+                    f"(queue size: {queue_size}) — IDs: {node_ids}{'...' if len(node_ids) > 10 else ''}"
+                )
+
+        # ── Temporal digests (debounced) ──────────────────────────────────────
+        # Restart a module-level timer on every ingestion.  The rebuild only
+        # fires after _TEMPORAL_DIGEST_IDLE_SECONDS of inactivity, so a burst
+        # of notes produces exactly one rebuild once the system goes quiet.
+        if _settings.TEMPORAL_DIGESTS_ENABLED:
+            global _temporal_digest_timer  # pylint: disable=global-statement
+            _wf = self
+            with _temporal_digest_timer_lock:
+                if _temporal_digest_timer is not None:
+                    _temporal_digest_timer.cancel()
+                _temporal_digest_timer = threading.Timer(
+                    COMMUNITY_IDLE_SECONDS,
+                    _wf.build_temporal_digests,
+                )
+                _temporal_digest_timer.daemon = True
+                _temporal_digest_timer.start()
+            logger.info(
+                f"[TemporalDigest] Digest rebuild scheduled "
+                f"({COMMUNITY_IDLE_SECONDS} s idle window)."
+            )
+
+    async def _update_neighborhoods(
+        self, nodes, new_content: str, note_created_at: str | None = None
+    ):
         """
         Refreshes isolated contexts for all nodes affected by this note.
         Runs with concurrency=4 and uses entity-level locks to prevent races
@@ -721,7 +758,11 @@ class IngestionWorkflow:
             async def _run_summary(name, new_contexts, ntype):
                 async with _sem:
                     await self._update_node_summary(
-                        "Indexable", name, new_contexts, node_type=ntype
+                        "Indexable",
+                        name,
+                        new_contexts,
+                        node_type=ntype,
+                        note_created_at=note_created_at,
                     )
 
             logger.info(
@@ -735,12 +776,13 @@ class IngestionWorkflow:
                 f"[Neighborhood] {len(nodes_to_update)} node context updates complete."
             )
 
-    async def _update_node_summary(  # pylint: disable=too-many-locals,too-many-statements
+    async def _update_node_summary(  # pylint: disable=too-many-locals,too-many-statements,too-many-arguments,too-many-positional-arguments
         self,
         label: str,
         name: str,
         new_contexts: list[str],
         node_type: str = "",
+        note_created_at: str | None = None,
     ):
         """
         Updates a node by accumulating isolated contexts only.
@@ -916,6 +958,7 @@ class IngestionWorkflow:
                         node_id=node_id,
                         content=_ctx_text,
                         vector=_ctx_vector,
+                        note_created_at=note_created_at,
                     )
 
             await loop.run_in_executor(None, _write_qdrant)
@@ -1781,6 +1824,202 @@ class IngestionWorkflow:
                 if _community_run_active_seq == requested_seq:
                     _community_run_running = False
                     _community_run_active_seq = 0
+
+    def build_temporal_digests(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+        self, period: str | None = None
+    ) -> int:
+        """Build temporal digest nodes that summarise all notes grouped by time period.
+
+        Scrolls every ``isolated_context`` Qdrant point that carries a
+        ``note_created_at`` payload field, buckets the contexts by the requested
+        *period* granularity ("month" | "week" | "year"), generates an LLM summary
+        for each non-empty bucket, then stores the result as a ``kind='temporal_digest'``
+        node in Kuzu, Qdrant (node_cores), and Typesense.
+
+        Existing digest nodes are cleared before each run so the set stays current.
+        Returns the number of digest nodes created.
+        """
+        from datetime import datetime
+
+        from app.core.config import settings as _settings
+
+        if not _settings.TEMPORAL_DIGESTS_ENABLED:
+            logger.info(
+                "[TemporalDigest] Feature disabled via TEMPORAL_DIGESTS_ENABLED — skipping."
+            )
+            return 0
+
+        # Guard: refuse to start while ingestion is active.
+        if _tracker.has_active_ingestions():
+            logger.info(
+                "[TemporalDigest] Skipping — ingestion is active; "
+                "timer will restart when ingestion completes."
+            )
+            return 0
+
+        global _temporal_digest_running, _temporal_digest_timer  # pylint: disable=global-statement
+        _tracker.cancel_temporal.clear()
+        _temporal_digest_running = True
+
+        _period = period or _settings.TEMPORAL_DIGEST_PERIOD
+        logger.info(
+            f"\n{'='*70}\n"
+            f"[TemporalDigest] Starting build  period={_period}\n"
+            f"{'='*70}"
+        )
+
+        # ── 1. Fetch all isolated_context points that carry a date ────────────
+        all_points = self._qdrant.scroll_all_isolated_contexts_with_dates()
+        if not all_points:
+            logger.warning(
+                "[TemporalDigest] No dated contexts found — ingest some notes first."
+            )
+            _temporal_digest_running = False
+            return 0
+        logger.info(f"[TemporalDigest] Found {len(all_points)} dated context chunk(s).")
+
+        # ── 2. Bucket by time period ──────────────────────────────────────────
+        def _bucket(date_str: str) -> str | None:
+            try:
+                dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                if _period == "year":
+                    return dt.strftime("%Y")
+                if _period == "week":
+                    return dt.strftime("%G-W%V")  # ISO week (e.g. "2024-W21")
+                return dt.strftime("%Y-%m")  # month (default)
+            except (ValueError, TypeError, AttributeError):
+                return None
+
+        buckets: dict[str, list[str]] = defaultdict(list)
+        for payload in all_points:
+            key = _bucket(payload.get("note_created_at", ""))
+            if key:
+                content = (payload.get("content") or "").strip()
+                if content:
+                    buckets[key].append(content)
+
+        if not buckets:
+            logger.warning(
+                "[TemporalDigest] No valid period buckets — nothing to build."
+            )
+            _temporal_digest_running = False
+            return 0
+
+        logger.info(
+            f"[TemporalDigest] {len(buckets)} period bucket(s): {sorted(buckets.keys())}"
+        )
+
+        # ── 3. Clear existing temporal digest nodes ───────────────────────────
+        old_ids = self._graph.clear_all_temporal_digests()
+        logger.info(f"[TemporalDigest] Cleared {len(old_ids)} old digest node(s).")
+        for old_id in old_ids:
+            self._qdrant.delete_node(old_id)
+            self._typesense.delete_node(old_id)
+
+        # ── 4. Build one digest node per bucket ───────────────────────────────
+        built = 0
+        for period_key in sorted(buckets.keys()):
+            # Cooperative cancellation: stop between buckets if ingestion arrived.
+            if _tracker.cancel_temporal.is_set():
+                logger.info(
+                    f"[TemporalDigest] Cancelled by ingestion after {built} bucket(s) — "
+                    "rescheduling."
+                )
+                _temporal_digest_running = False
+                if not _tracker.has_active_ingestions():
+                    with _temporal_digest_timer_lock:
+                        if _temporal_digest_timer is not None:
+                            _temporal_digest_timer.cancel()
+                        _temporal_digest_timer = threading.Timer(
+                            COMMUNITY_IDLE_SECONDS,
+                            self.build_temporal_digests,
+                        )
+                        _temporal_digest_timer.daemon = True
+                        _temporal_digest_timer.start()
+                    logger.info(
+                        f"[TemporalDigest] Rescheduled in {COMMUNITY_IDLE_SECONDS}s."
+                    )
+                else:
+                    logger.info(
+                        "[TemporalDigest] Ingestion still active — "
+                        "timer will restart when last ingestion ends."
+                    )
+                return built
+
+            contexts = buckets[period_key]
+
+            # Human-readable label
+            try:
+                if _period == "year":
+                    label = period_key  # "2024"
+                elif _period == "week":
+                    year_str, week_str = period_key.split("-W")
+                    label = f"Week {week_str}, {year_str}"
+                else:
+                    dt = datetime.strptime(period_key, "%Y-%m")
+                    label = dt.strftime("%B %Y")  # "May 2024"
+            except (ValueError, AttributeError):
+                label = period_key
+
+            # Truncate combined contexts to avoid LLM context overflow
+            combined = "\n---\n".join(contexts)
+            if len(combined) > 12_000:
+                combined = combined[:12_000] + "\n...[truncated]"
+
+            logger.info(
+                f"[TemporalDigest] Summarising {len(contexts)} chunk(s) for {period_key}…"
+            )
+            try:
+                summary = llm_service.generate_text(
+                    system_prompt=(
+                        "You are a knowledge synthesis assistant. "
+                        "Summarize the main topics, events, and themes from the provided "
+                        "notes into a concise paragraph. "
+                        "Return only the summary paragraph — no headers, no bullet points."
+                    ),
+                    user_prompt=(
+                        f"The following contexts are from notes created during {label}:\n\n"
+                        f"{combined}"
+                    ),
+                )
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    f"[TemporalDigest] LLM summary failed for {period_key}: {exc}"
+                )
+                summary = f"Notes from {label}."
+
+            node_id = f"digest_{_period}_" + period_key.replace("-", "_").replace(
+                "W", "w"
+            )
+            node_name = f"{label} — {_period.capitalize()} Digest"
+
+            # Store in graph + Qdrant
+            self._graph.create_temporal_digest_node(
+                node_id=node_id,
+                name=node_name,
+                summary=summary,
+                period_key=period_key,
+            )
+            # Index in Typesense for full-text search
+            self._typesense.index_node(
+                node_id=node_id,
+                name=node_name,
+                node_type="temporal_digest",
+                isolated_contexts_text=summary,
+            )
+            logger.info(f"[TemporalDigest] Built '{node_name}'")
+            built += 1
+
+        logger.info(f"[TemporalDigest] Done — {built} digest node(s) created.")
+        _temporal_digest_running = False
+        return built
+
+    def get_maintenance_status(self) -> dict:
+        """Return the running state of background maintenance jobs."""
+        return {
+            "community_detection": {"running": _community_run_running},
+            "temporal_digests": {"running": _temporal_digest_running},
+        }
 
 
 ingestion_workflow = IngestionWorkflow()

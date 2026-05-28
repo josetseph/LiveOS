@@ -16,9 +16,7 @@ Relationship tables:
         rel_type STRING, confidence DOUBLE, strength DOUBLE,
         relevance DOUBLE, edge_weight DOUBLE, relationship_id STRING,
         ingested_at STRING, last_updated STRING, mention_count INT64,
-        note_id STRING, valid_from STRING, valid_to STRING,
-        evolved_from STRING, evolved_to STRING, invalidated_by STRING,
-        invalidation_note_id STRING, evolution_note_id STRING,
+        note_id STRING,
         is_similarity BOOLEAN, created_at STRING)
 
 Cypher translation notes
@@ -101,13 +99,6 @@ _SCHEMA_STMTS = [
         last_updated STRING,
         mention_count INT64,
         note_id STRING,
-        valid_from STRING,
-        valid_to STRING,
-        evolved_from STRING,
-        evolved_to STRING,
-        invalidated_by STRING,
-        invalidation_note_id STRING,
-        evolution_note_id STRING,
         is_similarity BOOLEAN,
         created_at STRING
     )""",
@@ -354,6 +345,17 @@ class GraphService:
         """
         return self.execute_query(query, {})
 
+    def wipe_all_nodes(self) -> int:
+        """Delete every node (and all their relationships) from the Kuzu graph.
+
+        Returns the number of nodes that were removed.
+        """
+        rows = self.execute_query("MATCH (n:Node) RETURN count(n) AS cnt", {})
+        count = rows[0]["cnt"] if rows else 0
+        self.execute_query("MATCH (n:Node) DETACH DELETE n", {})
+        logger.info(f"[Graph] Wiped {count} nodes from the graph.")
+        return count
+
     def clear_all_communities(self) -> list[str]:
         """Delete all community nodes and their MEMBER_OF / CONTAINS relationships."""
         existing = self.execute_query(
@@ -369,6 +371,51 @@ class GraphService:
         )
         self._qdrant.delete_community_relationships()
         return community_ids
+
+    def clear_all_temporal_digests(self) -> list[str]:
+        """Delete all temporal_digest nodes from the graph."""
+        existing = self.execute_query(
+            "MATCH (d:Node) WHERE d.kind = 'temporal_digest' RETURN d.id AS digest_id",
+            {},
+        )
+        digest_ids = [row["digest_id"] for row in existing if row.get("digest_id")]
+        self.execute_query(
+            "MATCH (d:Node) WHERE d.kind = 'temporal_digest' DETACH DELETE d", {}
+        )
+        return digest_ids
+
+    def create_temporal_digest_node(
+        self,
+        node_id: str,
+        name: str,
+        summary: str,
+        period_key: str,
+    ) -> None:
+        """Create or update a temporal digest node and store its embedding in Qdrant."""
+        from app.services.embedding import embedding_service as _emb
+
+        self.execute_query(
+            """
+            MERGE (d:Node {id: $node_id})
+            ON CREATE SET d.kind = 'temporal_digest', d.type = 'temporal_digest', d.name = $name
+            ON MATCH SET d.name = $name
+            """,
+            {"node_id": node_id, "name": name},
+        )
+        try:
+            vector = _emb.embed_documents([summary])[0]
+            self._qdrant.upsert_node_core(
+                node_id=node_id,
+                name=name,
+                node_type="temporal_digest",
+                description=summary,
+                description_vector=vector,
+                extra_payload={"period_key": period_key},
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                f"[Graph] create_temporal_digest_node Qdrant write failed for {node_id}: {exc}"
+            )
 
     def set_node_community_membership(
         self, node_ids: list[str], community_id: str, community_level: int
@@ -614,12 +661,6 @@ class GraphService:
         import uuid as _uuid
         from datetime import datetime
 
-        from app.schemas.relationships import (
-            can_evolve,
-            get_contradicting_types,
-            is_bidirectional,
-        )
-
         if not relationship_type or not relationship_type.strip():
             raise ValueError(
                 f"relationship_type cannot be empty for {source_name} -> {target_name}"
@@ -661,33 +702,6 @@ class GraphService:
 
         ingestion_time = datetime.utcnow().isoformat()
 
-        contradicting_types = get_contradicting_types(relationship_type)
-        for contra_type in contradicting_types:
-            result = self.execute_query(
-                """
-                MATCH (source:Node {id: $source_id})-[r:SEMANTIC_REL]->(target:Node {id: $target_id})
-                WHERE r.rel_type = $contra_type
-                SET r.valid_to = $ingestion_time,
-                    r.invalidated_by = $relationship_type,
-                    r.invalidation_note_id = $note_id
-                RETURN r.rel_type AS invalidated_type
-                """,
-                {
-                    "source_id": source_id,
-                    "target_id": target_id,
-                    "contra_type": contra_type,
-                    "ingestion_time": ingestion_time,
-                    "relationship_type": relationship_type,
-                    "note_id": note_id,
-                },
-            )
-            for r in result or []:
-                if r.get("invalidated_type"):
-                    logger.info(
-                        f"[Bi-Temporal] Invalidated: ({source_name})"
-                        f"-[{r['invalidated_type']}]->({target_name})"
-                    )
-
         existing = self.execute_query(
             """
             MATCH (source:Node {id: $source_id})-[r:SEMANTIC_REL]->(target:Node {id: $target_id})
@@ -702,22 +716,7 @@ class GraphService:
             },
         )
 
-        existing_other = self.execute_query(
-            """
-            MATCH (source:Node {id: $source_id})-[r:SEMANTIC_REL]->(target:Node {id: $target_id})
-            WHERE r.rel_type <> $rel_type
-            RETURN r.rel_type AS current_type
-            LIMIT 1
-            """,
-            {
-                "source_id": source_id,
-                "target_id": target_id,
-                "rel_type": relationship_type,
-            },
-        )
-
         action = "created"
-        previous_type = None
 
         if existing:
             action = "reinforced"
@@ -751,126 +750,6 @@ class GraphService:
                     "edge_weight": edge_weight,
                 },
             )
-        elif existing_other:
-            current_type = existing_other[0]["current_type"]
-            if can_evolve(current_type, relationship_type):
-                action = "evolved"
-                previous_type = current_type
-                self.execute_query(
-                    """
-                    MATCH (source:Node {id: $source_id})-[r:SEMANTIC_REL]->(target:Node {id: $target_id})
-                    WHERE r.rel_type = $current_type
-                    SET r.valid_to = $ingestion_time,
-                        r.evolved_to = $new_type,
-                        r.evolution_note_id = $note_id
-                    """,
-                    {
-                        "source_id": source_id,
-                        "target_id": target_id,
-                        "current_type": current_type,
-                        "ingestion_time": ingestion_time,
-                        "new_type": relationship_type,
-                        "note_id": note_id,
-                    },
-                )
-                self.execute_query(
-                    """
-                    MATCH (source:Node {id: $source_id})
-                    MATCH (target:Node {id: $target_id})
-                    CREATE (source)-[r:SEMANTIC_REL]->(target)
-                    SET r.rel_type = $rel_type,
-                        r.confidence = $confidence,
-                        r.strength = $strength,
-                        r.relevance = $relevance,
-                        r.edge_weight = $edge_weight,
-                        r.relationship_id = $relationship_id,
-                        r.ingested_at = $ingestion_time,
-                        r.last_updated = $ingestion_time,
-                        r.evolved_from = $previous_type,
-                        r.mention_count = 1,
-                        r.note_id = $note_id
-                    """,
-                    {
-                        "source_id": source_id,
-                        "target_id": target_id,
-                        "rel_type": relationship_type,
-                        "confidence": confidence,
-                        "strength": strength,
-                        "relevance": relevance,
-                        "edge_weight": edge_weight,
-                        "relationship_id": relationship_id,
-                        "ingestion_time": ingestion_time,
-                        "previous_type": previous_type,
-                        "note_id": note_id,
-                    },
-                )
-                logger.info(
-                    f"[Bi-Temporal] Evolved: ({source_name})"
-                    f"-[{previous_type}\u2192{relationship_type}]->({target_name})"
-                )
-            else:
-                # current_type cannot evolve to relationship_type.
-                # If current_type has no evolution rules defined at all, the two
-                # relationships are semantically independent (e.g. IS_MARRIED_SPOUSE
-                # and IS_PERSONA) — create the new one as a parallel edge instead
-                # of rejecting.  Only reject when evolution was explicitly defined
-                # but this specific target type is excluded.
-                from app.schemas.relationships import EVOLUTION_RULES as _EVO_RULES
-
-                if current_type not in _EVO_RULES:
-                    logger.debug(
-                        f"[Bi-Temporal] '{current_type}' has no evolution rules — "
-                        f"creating '{relationship_type}' as parallel edge "
-                        f"({source_name} → {target_name})"
-                    )
-                    action = "created_parallel"
-                    self.execute_query(
-                        """
-                        MATCH (source:Node {id: $source_id})
-                        MATCH (target:Node {id: $target_id})
-                        CREATE (source)-[r:SEMANTIC_REL]->(target)
-                        SET r.rel_type = $rel_type,
-                            r.confidence = $confidence,
-                            r.strength = $strength,
-                            r.relevance = $relevance,
-                            r.edge_weight = $edge_weight,
-                            r.relationship_id = $relationship_id,
-                            r.ingested_at = $ingestion_time,
-                            r.last_updated = $ingestion_time,
-                            r.mention_count = 1,
-                                r.note_id = $note_id
-                        """,
-                        {
-                            "source_id": source_id,
-                            "target_id": target_id,
-                            "rel_type": relationship_type,
-                            "confidence": confidence,
-                            "strength": strength,
-                            "relevance": relevance,
-                            "edge_weight": edge_weight,
-                            "relationship_id": relationship_id,
-                            "ingestion_time": ingestion_time,
-                            "note_id": note_id,
-                        },
-                    )
-                else:
-                    logger.warning(
-                        f"Cannot evolve relationship {current_type} to {relationship_type}"
-                    )
-                    return {
-                        "action": "rejected",
-                        "reason": f"Cannot evolve {current_type} to {relationship_type}",
-                        "source": source_name,
-                        "target": target_name,
-                        "relationship_type": relationship_type,
-                        "confidence": confidence,
-                        "strength": strength,
-                        "relevance": relevance,
-                        "edge_weight": edge_weight,
-                        "natural_language": natural_language,
-                        "relationship_id": relationship_id,
-                        "previous_type": None,
-                    }
         else:
             self.execute_query(
                 "MERGE (n:Node {id: $id}) ON CREATE SET n.kind = 'indexable'",
@@ -910,16 +789,6 @@ class GraphService:
                 },
             )
 
-        if is_bidirectional(relationship_type):
-            self._create_inverse_relationship(
-                source_id=target_id,
-                target_id=source_id,
-                relationship_type=relationship_type,
-                confidence=confidence,
-                note_id=note_id,
-                ingestion_time=ingestion_time,
-            )
-
         logger.info(
             f"[Graph] Relationship {action}: "
             f"({source_name})-[{relationship_type}]->({target_name})"
@@ -936,77 +805,7 @@ class GraphService:
             "edge_weight": edge_weight,
             "natural_language": natural_language,
             "relationship_id": relationship_id,
-            "previous_type": previous_type,
         }
-
-    def _create_inverse_relationship(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-        self,
-        source_id: str,
-        target_id: str,
-        relationship_type: str,
-        confidence: float,
-        note_id: str,
-        ingestion_time: str,
-    ) -> None:  # pylint: disable=too-many-arguments,too-many-positional-arguments
-        self.execute_query(
-            "MERGE (n:Node {id: $id}) ON CREATE SET n.kind = 'indexable'",
-            {"id": source_id},
-        )
-        self.execute_query(
-            "MERGE (n:Node {id: $id}) ON CREATE SET n.kind = 'indexable'",
-            {"id": target_id},
-        )
-        existing = self.execute_query(
-            """
-            MATCH (s:Node {id: $source_id})-[r:SEMANTIC_REL]->(t:Node {id: $target_id})
-            WHERE r.rel_type = $rel_type
-            RETURN r.mention_count AS mc LIMIT 1
-            """,
-            {
-                "source_id": source_id,
-                "target_id": target_id,
-                "rel_type": relationship_type,
-            },
-        )
-        if existing:
-            self.execute_query(
-                """
-                MATCH (s:Node {id: $source_id})-[r:SEMANTIC_REL]->(t:Node {id: $target_id})
-                WHERE r.rel_type = $rel_type
-                SET r.last_updated = $ingestion_time,
-                    r.mention_count = coalesce(r.mention_count, 0) + 1,
-                    r.note_id = $note_id
-                """,
-                {
-                    "source_id": source_id,
-                    "target_id": target_id,
-                    "rel_type": relationship_type,
-                    "ingestion_time": ingestion_time,
-                    "note_id": note_id,
-                },
-            )
-        else:
-            self.execute_query(
-                """
-                MATCH (source:Node {id: $source_id})
-                MATCH (target:Node {id: $target_id})
-                CREATE (source)-[r:SEMANTIC_REL]->(target)
-                SET r.rel_type = $rel_type,
-                    r.confidence = $confidence,
-                    r.ingested_at = $ingestion_time,
-                    r.last_updated = $ingestion_time,
-                    r.mention_count = 1,
-                    r.note_id = $note_id
-                """,
-                {
-                    "source_id": source_id,
-                    "target_id": target_id,
-                    "rel_type": relationship_type,
-                    "confidence": confidence,
-                    "ingestion_time": ingestion_time,
-                    "note_id": note_id,
-                },
-            )
 
     def _hop_query(self, direction: str) -> str:
         """Return a Cypher query template for a 1-hop neighbour expansion.
@@ -1021,7 +820,6 @@ class GraphService:
             pattern = "(start:Node {id: $node_id})<-[r:SEMANTIC_REL|REFERENCES]-(related:Node)"
         return f"""
             MATCH {pattern}
-            WHERE coalesce(r.confidence, 1.0) >= $min_confidence
             RETURN DISTINCT
                 related.id AS node_id,
                 related.name AS name,
@@ -1038,7 +836,6 @@ class GraphService:
         self,
         node_name: str,
         max_depth: int = 2,
-        min_confidence: float = 0.5,
     ) -> list[dict]:
         """Return neighbouring nodes reachable within max_depth hops of the given node."""
         node_id = self.resolve_node_id(node_name.lower().strip())
@@ -1055,7 +852,7 @@ class GraphService:
             # temple" instead of "shirley temple plays corliss archer").
             outgoing_query = self._hop_query("->")
             incoming_query = self._hop_query("<-")
-            params = {"node_id": node_id, "min_confidence": min_confidence}
+            params = {"node_id": node_id}
             outgoing = self.execute_query(outgoing_query, params)
             for row in outgoing:
                 row["edge_direction"] = "outgoing"
@@ -1091,13 +888,7 @@ class GraphService:
         ORDER BY depth
         LIMIT 200
         """
-        rows = self.execute_query(query, {"node_id": node_id})
-        # Post-filter: keep only paths where every hop meets the confidence threshold.
-        return [
-            r
-            for r in rows
-            if all(c >= min_confidence for c in (r.get("confidence_path") or []))
-        ]
+        return self.execute_query(query, {"node_id": node_id})
 
     # ---- 3D spatial layout --------------------------------------------------
 

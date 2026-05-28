@@ -82,6 +82,15 @@ services:
     container_name: liveos-backend
     restart: unless-stopped
     env_file: ./backend/.env
+    environment:
+      # Override .env's localhost values with Docker service names inside the network
+      QDRANT_HOST: qdrant
+      TYPESENSE_HOST: typesense
+      R2_ENDPOINT_URL: http://rustfs:9000
+      FILES_URL: http://localhost:9000/liveos-assets
+      DATABASE_TRANSACTION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
+      DATABASE_SESSION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
+      DATABASE_DIRECT_CONNECTION_URL: postgresql://user:password@postgres:5432/liveos
     ports:
       - "8700:8000"
     depends_on:
@@ -108,7 +117,15 @@ services:
       dockerfile: Dockerfile
     container_name: liveos-init
     env_file: ./backend/.env
-
+    environment:
+      # Override .env's localhost values with Docker service names inside the network
+      QDRANT_HOST: qdrant
+      TYPESENSE_HOST: typesense
+      R2_ENDPOINT_URL: http://rustfs:9000
+      FILES_URL: http://localhost:9000/liveos-assets
+      DATABASE_TRANSACTION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
+      DATABASE_SESSION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
+      DATABASE_DIRECT_CONNECTION_URL: postgresql://user:password@postgres:5432/liveos
     depends_on:
       postgres:
         condition: service_healthy
@@ -133,6 +150,7 @@ services:
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: "http://localhost:8700"
+      NEXT_PUBLIC_FILES_URL: "http://localhost:9000/liveos-assets"
     ports:
       - "3700:3000"
     depends_on:

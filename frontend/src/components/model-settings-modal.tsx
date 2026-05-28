@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { X, Settings, Check, Loader2, AlertCircle } from "lucide-react";
+import { useEffect, useState, useRef } from "react";
+import { X, Settings, Check, Loader2, AlertCircle, RefreshCw, Calendar } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { api } from "@/lib/api";
 
@@ -36,6 +36,13 @@ export function ModelSettingsModal({ open, onClose }: Props) {
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
+    // Maintenance action state
+    const [communityStatus, setCommunityStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+    const [digestStatus, setDigestStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+    // Track whether *we* triggered each job so we can show "done" when it finishes.
+    const communityTriggeredRef = useRef(false);
+    const digestTriggeredRef = useRef(false);
+
     // Fetch current settings when modal opens
     useEffect(() => {
         if (!open) return;
@@ -50,6 +57,53 @@ export function ModelSettingsModal({ open, onClose }: Props) {
             })
             .catch(() => setError("Could not load current settings."))
             .finally(() => setLoading(false));
+    }, [open]);
+
+    // Poll maintenance job status every 3 s while the modal is open.
+    // This ensures the running state survives a page refresh.
+    useEffect(() => {
+        if (!open) return;
+
+        const poll = async () => {
+            try {
+                const status = await api.getMaintenanceStatus();
+
+                if (status.community_detection.running) {
+                    setCommunityStatus("running");
+                } else {
+                    setCommunityStatus((prev) => {
+                        if (prev === "running" && communityTriggeredRef.current) {
+                            communityTriggeredRef.current = false;
+                            setTimeout(() => setCommunityStatus("idle"), 3000);
+                            return "done";
+                        }
+                        // Preserve error/done that arrived this session; otherwise idle.
+                        if (prev === "done" || prev === "error") return prev;
+                        return "idle";
+                    });
+                }
+
+                if (status.temporal_digests.running) {
+                    setDigestStatus("running");
+                } else {
+                    setDigestStatus((prev) => {
+                        if (prev === "running" && digestTriggeredRef.current) {
+                            digestTriggeredRef.current = false;
+                            setTimeout(() => setDigestStatus("idle"), 3000);
+                            return "done";
+                        }
+                        if (prev === "done" || prev === "error") return prev;
+                        return "idle";
+                    });
+                }
+            } catch {
+                // Silently ignore poll failures — don't disturb the UI.
+            }
+        };
+
+        poll(); // immediate check on open
+        const interval = setInterval(poll, 3000);
+        return () => clearInterval(interval);
     }, [open]);
 
     const isLocal = LOCAL_PROVIDERS.has(form.provider);
@@ -87,6 +141,32 @@ export function ModelSettingsModal({ open, onClose }: Props) {
             setError("Failed to save settings. Check the server logs.");
         } finally {
             setSaving(false);
+        }
+    };
+
+    const handleRebuildCommunities = async () => {
+        communityTriggeredRef.current = true;
+        setCommunityStatus("running");
+        try {
+            await api.rebuildCommunities();
+            // "done" is set by the poll when the server flag transitions to false.
+        } catch {
+            communityTriggeredRef.current = false;
+            setCommunityStatus("error");
+            setTimeout(() => setCommunityStatus("idle"), 4000);
+        }
+    };
+
+    const handleBuildDigests = async () => {
+        digestTriggeredRef.current = true;
+        setDigestStatus("running");
+        try {
+            await api.buildTemporalDigests();
+            // "done" is set by the poll when the server flag transitions to false.
+        } catch {
+            digestTriggeredRef.current = false;
+            setDigestStatus("error");
+            setTimeout(() => setDigestStatus("idle"), 4000);
         }
     };
 
@@ -235,6 +315,62 @@ export function ModelSettingsModal({ open, onClose }: Props) {
                                                 <code className="font-mono">backend/.env</code> and cannot be changed here.
                                             </p>
                                         )}
+
+                                        {/* Admin Actions */}
+                                        <div className="space-y-2 rounded-lg border border-white/5 bg-white/[0.02] p-4">
+                                            <p className="text-xs font-medium uppercase tracking-wide text-white/40">
+                                                Maintenance
+                                            </p>
+                                            <div className="flex flex-col gap-2">
+                                                <button
+                                                    onClick={handleRebuildCommunities}
+                                                    disabled={communityStatus === "running"}
+                                                    className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70 transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50"
+                                                >
+                                                    {communityStatus === "running" ? (
+                                                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                                                    ) : communityStatus === "done" ? (
+                                                        <Check className="h-3.5 w-3.5 shrink-0 text-green-400" />
+                                                    ) : communityStatus === "error" ? (
+                                                        <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-400" />
+                                                    ) : (
+                                                        <RefreshCw className="h-3.5 w-3.5 shrink-0" />
+                                                    )}
+                                                    {communityStatus === "running"
+                                                        ? "Starting…"
+                                                        : communityStatus === "done"
+                                                            ? "Triggered!"
+                                                            : communityStatus === "error"
+                                                                ? "Failed — check logs"
+                                                                : "Rebuild Communities"}
+                                                </button>
+                                                <button
+                                                    onClick={handleBuildDigests}
+                                                    disabled={digestStatus === "running"}
+                                                    className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70 transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50"
+                                                >
+                                                    {digestStatus === "running" ? (
+                                                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                                                    ) : digestStatus === "done" ? (
+                                                        <Check className="h-3.5 w-3.5 shrink-0 text-green-400" />
+                                                    ) : digestStatus === "error" ? (
+                                                        <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-400" />
+                                                    ) : (
+                                                        <Calendar className="h-3.5 w-3.5 shrink-0" />
+                                                    )}
+                                                    {digestStatus === "running"
+                                                        ? "Starting…"
+                                                        : digestStatus === "done"
+                                                            ? "Triggered!"
+                                                            : digestStatus === "error"
+                                                                ? "Failed — check logs"
+                                                                : "Build Temporal Digests"}
+                                                </button>
+                                            </div>
+                                            <p className="text-xs text-white/25">
+                                                Jobs run in the background — monitor progress via server logs.
+                                            </p>
+                                        </div>
 
                                         {/* Error */}
                                         {error && (
