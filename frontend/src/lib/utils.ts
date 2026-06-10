@@ -7,12 +7,12 @@ export function cn(...inputs: ClassValue[]) {
 
 /**
  * Rewrite a RustFS internal URL (http://rustfs:9000/...) to a browser-accessible URL.
- * Falls back to NEXT_PUBLIC_FILES_URL env or localhost:9000.
+ * Falls back to the same-origin Next.js file proxy.
  */
 export function resolveFileUrl(url: string): string {
   if (!url) return url;
   const publicBase =
-    process.env.NEXT_PUBLIC_FILES_URL ?? "http://localhost:9000/liveos-assets";
+    process.env.NEXT_PUBLIC_FILES_URL ?? "/files/liveos-assets";
   // Replace the internal Docker hostname+port+bucket prefix with the public base
   return url.replace(/https?:\/\/rustfs:\d+\/[^/]+/, publicBase);
 }

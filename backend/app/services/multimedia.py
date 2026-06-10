@@ -10,6 +10,14 @@ from app.core.log import get_logger
 logger = get_logger("MultimediaService")
 
 
+def _format_timestamp(seconds: float) -> str:
+    """Convert seconds to M:SS or H:MM:SS string."""
+    s = int(seconds)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 class MultimediaService:
     """Extract text from images (Florence-2), audio (Whisper), and PDFs; falls back gracefully if models are absent."""
 
@@ -25,6 +33,7 @@ class MultimediaService:
         self.florence_processor = None
         self.whisper_model = None
         self.whisper_processor = None
+        self.marlin_model = None
 
     def _load_whisper(self):
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
@@ -81,6 +90,24 @@ class MultimediaService:
             )
             self.florence_processor = AutoProcessor.from_pretrained(
                 model_path, trust_remote_code=True
+            )
+
+    def _load_marlin(self):
+        import torch
+        from transformers import AutoModelForCausalLM
+        if not self.marlin_model:
+            model_path = os.path.join(self.models_path, settings.MODEL_MARLIN_LOCAL)
+            logger.info(
+                f"Loading Marlin ({settings.MODEL_MARLIN_HF}) from {model_path}..."
+            )
+            self.marlin_model = (
+                AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32,
+                )
+                .to(self.device)
+                .eval()
             )
 
     def describe_image(self, image_path: str) -> str:  # pylint: disable=too-many-locals
@@ -191,6 +218,67 @@ class MultimediaService:
             return transcription
         finally:
             if local_path != audio_path and os.path.exists(local_path):
+                os.remove(local_path)
+
+    def process_video(self, video_path: str) -> str:
+        """
+        Process a video: probe for a video stream, then run Whisper (audio) and
+        Marlin (visual) in parallel streams. Falls back to audio-only transcription
+        if no video stream is detected (e.g. an audio-only .webm upload).
+        """
+        import av
+
+        local_path = self._download_temp_file(video_path)
+
+        try:
+            # Probe for a video stream before loading Marlin
+            with av.open(local_path) as container:
+                has_video = len(container.streams.video) > 0
+
+            if not has_video:
+                logger.info("No video stream detected — treating as audio-only.")
+                return self.transcribe_audio(local_path)
+
+            self._load_marlin()
+
+            # --- Stream 1: Audio → Whisper ---
+            transcript = ""
+            try:
+                logger.info("Transcribing video audio track...")
+                transcript = self.transcribe_audio(local_path)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.warning(f"Audio transcription skipped (no audio track or failed): {e}")
+
+            # --- Stream 2: Visual → Marlin ---
+            scene = ""
+            events_text = ""
+            try:
+                logger.info("Running Marlin video captioning...")
+                result = self.marlin_model.caption(local_path)
+                scene = result.get("scene", "")
+                events = result.get("events", [])
+                lines = [
+                    f"- {_format_timestamp(ev.get('start', 0))}\u2013{_format_timestamp(ev.get('end', 0))} \u2014 {ev.get('description', '')}"
+                    for ev in events
+                ]
+                events_text = "\n".join(lines)
+                logger.info(f"Marlin: {len(events)} events extracted.")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error(f"Marlin captioning failed: {e}")
+
+            # --- Combine results ---
+            parts = []
+            if transcript:
+                parts.append(f"### Spoken Content\n{transcript}")
+            if scene:
+                visual = f"### Visual Analysis\n**Scene:** {scene}"
+                if events_text:
+                    visual += f"\n\n**Events:**\n{events_text}"
+                parts.append(visual)
+            return "\n\n".join(parts) if parts else "(Video processing produced no output)"
+
+        finally:
+            if local_path != video_path and os.path.exists(local_path):
                 os.remove(local_path)
 
     def extract_text_from_pdf(self, pdf_path: str) -> str:

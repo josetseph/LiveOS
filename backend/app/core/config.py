@@ -18,6 +18,10 @@ class Settings(BaseSettings):
 
     PROJECT_NAME: str = "LiveOS"
     API_V1_STR: str = "/api/v1"
+    # Comma-separated browser origins allowed to call the API directly.
+    # Same-origin frontend proxying avoids CORS for normal Docker deployments.
+    CORS_ORIGINS: str = "http://localhost:3700,http://localhost:3701"
+    CORS_ALLOW_ORIGIN_REGEX: str | None = None
 
     # ── Kuzu (embedded graph database) ──────────────────────────────────────
     KUZU_DB_PATH: str = DEFAULT_KUZU_DB_PATH
@@ -137,6 +141,8 @@ class Settings(BaseSettings):
     MODEL_FLORENCE_LOCAL: str = "florence-2-large"
     MODEL_WHISPER_HF: str = "openai/whisper-large-v3-turbo"
     MODEL_WHISPER_LOCAL: str = "whisper-large-v3-turbo"
+    MODEL_MARLIN_HF: str = "NemoStation/Marlin-2B"
+    MODEL_MARLIN_LOCAL: str = "marlin-2b"
     # MODEL_RERANKER_LOCAL: str = "jina-reranker-v2-base-multilingual"
     MODEL_RERANKER_LOCAL: str = "qwen3-reranker-0.6b"
 

@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Image as ImageIcon, FileText, Mic } from "lucide-react";
+import { Image as ImageIcon, FileText, Mic, Film } from "lucide-react";
 import { api } from "@/lib/api";
 import { resolveFileUrl, isImageUrl, isVideoUrl } from "@/lib/utils";
 
@@ -16,7 +16,7 @@ function urlTransform(url: string): string {
 
 // ── Segment types ────────────────────────────────────────────────────────────
 
-type SegmentType = "text" | "image" | "pdf" | "audio";
+type SegmentType = "text" | "image" | "pdf" | "audio" | "video";
 
 interface Segment {
     type: SegmentType;
@@ -86,7 +86,7 @@ function injectEntityLinks(text: string, entities: ScannedEntity[]): string {
 //   [Audio Transcript (<title>)]:
 
 const MARKER_RE =
-    /(\[Image:[^\]]+\]|\[PDF Extraction[^\]]*\]:|\[Audio Transcript[^\]]*\]:)/;
+    /(\[Image:[^\]]+\]|\[PDF Extraction[^\]]*\]:|\[Audio Transcript[^\]]*\]:|\[Video Transcript[^\]]*\]:)/;
 
 function parseSegments(content: string): Segment[] {
     const parts = content.split(MARKER_RE);
@@ -126,6 +126,13 @@ function parseSegments(content: string): Segment[] {
                     label: m?.[1]?.trim() || "Audio",
                     content: body.trim(),
                 });
+            } else if (part.includes("Video Transcript")) {
+                const m = part.match(/\[Video Transcript\s*\(([^)]+)\)\]/);
+                segments.push({
+                    type: "video",
+                    label: m?.[1]?.trim() || "Video",
+                    content: body.trim(),
+                });
             }
         }
     }
@@ -154,12 +161,18 @@ const SEGMENT_STYLES: Record<
         text: "text-emerald-300",
         bg: "bg-emerald-500/10",
     },
+    video: {
+        border: "border-purple-500/30",
+        text: "text-purple-300",
+        bg: "bg-purple-500/10",
+    },
 };
 
 const SEGMENT_ICONS: Record<Exclude<SegmentType, "text">, React.ReactNode> = {
     image: <ImageIcon className="h-3.5 w-3.5" />,
     pdf: <FileText className="h-3.5 w-3.5" />,
     audio: <Mic className="h-3.5 w-3.5" />,
+    video: <Film className="h-3.5 w-3.5" />,
 };
 
 function SegmentDivider({

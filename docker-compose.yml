@@ -87,7 +87,7 @@ services:
       QDRANT_HOST: qdrant
       TYPESENSE_HOST: typesense
       R2_ENDPOINT_URL: http://rustfs:9000
-      FILES_URL: http://localhost:9000/liveos-assets
+      FILES_URL: /files/liveos-assets
       DATABASE_TRANSACTION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
       DATABASE_SESSION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
       DATABASE_DIRECT_CONNECTION_URL: postgresql://user:password@postgres:5432/liveos
@@ -122,7 +122,7 @@ services:
       QDRANT_HOST: qdrant
       TYPESENSE_HOST: typesense
       R2_ENDPOINT_URL: http://rustfs:9000
-      FILES_URL: http://localhost:9000/liveos-assets
+      FILES_URL: /files/liveos-assets
       DATABASE_TRANSACTION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
       DATABASE_SESSION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
       DATABASE_DIRECT_CONNECTION_URL: postgresql://user:password@postgres:5432/liveos
@@ -149,8 +149,8 @@ services:
     container_name: liveos-frontend
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_URL: "http://localhost:8700"
-      NEXT_PUBLIC_FILES_URL: "http://localhost:9000/liveos-assets"
+      NEXT_PUBLIC_API_URL: "/api/v1"
+      NEXT_PUBLIC_FILES_URL: "/files/liveos-assets"
     ports:
       - "3700:3000"
     depends_on:

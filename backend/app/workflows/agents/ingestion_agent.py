@@ -66,17 +66,28 @@ async def multimodal_node(
         import re
 
         file_matches = re.findall(
-            r"\[(?:📎|🎤) (.*?)\]\((http.*?|/uploads/.*?)\)", content
+            r"\[(📎|🎤) (.*?)\]\((http.*?|/uploads/.*?)\)", content
         )
-        for filename, url in file_matches:
+        for emoji, filename, url in file_matches:
             logger.info(f"Processing File: {filename} ({url})")
             try:
                 lower_url = url.lower()
 
-                # --- AUDIO ---
-                if lower_url.endswith(
-                    (".webm", ".m4a", ".mp3", ".wav", ".ogg", ".mp4")
+                # --- VIDEO (📎 uploads with a video container) ---
+                if emoji == "📎" and lower_url.endswith(
+                    (".mp4", ".mov", ".webm", ".mkv", ".avi")
                 ):
+                    logger.info("Detected Video. Running Marlin (visual) + Whisper (audio)...")
+                    video_text = await asyncio.to_thread(
+                        multimedia_service.process_video, url
+                    )
+                    snippet = (video_text.replace("\n", " ") + "...")[:100]
+                    logger.info(f'Video Result: "{snippet}"')
+                    content += f"\n\n[Video Transcript ({filename})]:\n\n{video_text}"
+                    audio_changed = True
+
+                # --- AUDIO (voice recordings or pure audio uploads) ---
+                elif lower_url.endswith((".m4a", ".mp3", ".wav", ".ogg")) or emoji == "🎤":
                     logger.info("Detected Audio. Transcribing...")
                     transcription = await asyncio.to_thread(
                         multimedia_service.transcribe_audio, url

@@ -1,7 +1,8 @@
 import axios from "axios";
 import type { KnowledgeBase, NoteStatus } from "@/lib/types";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8700/api/v1";
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "/api/v1").replace(/\/$/, "");
+const API_ORIGIN = API_BASE_URL.replace(/\/api\/v1$/, "");
 
 /** Append ?kb=<name> when targeting a non-default knowledge base. */
 function kbParam(kb: string): string {
@@ -114,7 +115,7 @@ export const api = {
   // ── Health ───────────────────────────────────────────────────────────────
 
   async getHealth() {
-    const response = await axios.get(`${API_BASE_URL.replace("/api/v1", "")}/health`);
+    const response = await axios.get(`${API_ORIGIN}/health`);
     return response.data;
   },
 

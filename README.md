@@ -16,8 +16,8 @@ A knowledge graph and multi-hop question-answering system. Notes — including t
 8. [LLM & Model Support](#llm--model-support)
 9. [Runtime Model Switching](#runtime-model-switching)
 10. [Benchmark Results](#benchmark-results)
-11. [Local Setup](#local-setup)
-12. [Docker Deployment](#docker-deployment)
+11. [Docker Deployment](#docker-deployment)
+12. [Local Setup](#local-setup)
 13. [Local Model Setup](#local-model-setup)
 14. [Environment Variables](#environment-variables)
 15. [Running the Stack](#running-the-stack)
@@ -440,30 +440,86 @@ The move from Neo4j + Elasticsearch to Kuzu + Typesense cut response time from ~
 
 ---
 
-## Local Setup
+## Docker Deployment
+
+This is the simplest way to run LiveOS. It starts the backend, frontend, Postgres, RustFS, Qdrant, Typesense, and the one-shot init container that runs migrations and prepares the local services.
 
 ### Prerequisites
 
-- Docker Desktop (for Qdrant, Typesense, PostgreSQL, RustFS)
-- Python 3.11+
-- Node.js 20+
-- ffmpeg (for server-side audio transcoding — `brew install ffmpeg` on macOS)
-- Ollama (for local LLM/embedding inference)
+- Docker Desktop
+- A configured LLM provider: local Ollama/LM Studio, or a cloud provider such as Gemini, OpenAI, or Anthropic
 
-### 1. Clone and install
+### 1. Clone the repo
 
 ```sh
 git clone https://github.com/josetseph/LiveOS.git
 cd LiveOS
 ```
 
-### 2. Start infrastructure services
+### 2. Create your environment file
 
-For local development (running the backend and frontend on your machine):
+```sh
+cp backend/.env.example backend/.env
+```
+
+Edit `backend/.env` and set your LLM provider and API keys. For Docker, leave the database, Qdrant, Typesense, and RustFS hostnames as their defaults; Docker Compose overrides them to service names that resolve inside the container network.
+
+The frontend calls the API and file storage through same-origin routes (`/api/v1`, `/health`, and `/files/...`). Next.js proxies those routes to the backend and RustFS containers, so remote HTTPS deployments do not need to expose backend port `8700` or RustFS port `9000` to browsers.
+
+If you are using a local model server on your machine, containers cannot reach it at `127.0.0.1`. Use `host.docker.internal` instead:
+
+| Variable | Local machine value | Docker value |
+|---|---|---|
+| `LLM_BASE_URL` | `http://127.0.0.1:1234` | `http://host.docker.internal:1234` |
+| `EMBEDDING_BASE_URL` | `http://127.0.0.1:11434` | `http://host.docker.internal:11434` |
+
+### 3. Start everything
+
+```sh
+docker compose up -d
+```
+
+Open [http://localhost:3700](http://localhost:3700).
+
+The `init` container runs automatically before the backend starts. It runs migrations and initializes the storage bucket, Qdrant collections, Typesense schema, and Kuzu graph. If startup fails, check it first:
+
+```sh
+docker compose logs init
+```
+
+If you choose to expose the backend on a separate public origin instead of using the same-origin proxy, set `CORS_ORIGINS` in `backend/.env` to include every frontend origin, for example:
+
+```env
+CORS_ORIGINS=http://localhost:3700,https://your-domain.com
+```
+
+---
+
+## Local Setup
+
+Use this path only if you want to run the backend and frontend directly on your machine while keeping Postgres, RustFS, Qdrant, and Typesense in Docker.
+
+### Prerequisites
+
+- Docker Desktop
+- Python 3.11+
+- Node.js 20+
+- ffmpeg (for server-side audio transcoding — `brew install ffmpeg` on macOS)
+- Ollama or LM Studio if you are using local models
+
+### 1. Start infrastructure services
 
 ```sh
 docker compose up -d postgres qdrant typesense rustfs
 ```
+
+### 2. Configure backend environment
+
+```sh
+cp backend/.env.example backend/.env
+```
+
+Because this setup runs Python from your host machine, uncomment the localhost overrides in `backend/.env` for Postgres, Qdrant, Typesense, and RustFS before running initialization.
 
 ### 3. Backend
 
@@ -472,23 +528,7 @@ cd backend
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-```
-
-Copy the example env and fill in your values:
-
-```sh
-cp .env.example .env
-```
-
-Run all first-time initialisation in one step (migrations, storage bucket, Qdrant collections, Typesense schema, Kuzu graph):
-
-```sh
 python scripts/init_local.py
-```
-
-Start the API server:
-
-```sh
 uvicorn app.main:app --reload --port 8700
 ```
 
@@ -501,30 +541,6 @@ npm run dev
 ```
 
 Open [http://localhost:3700](http://localhost:3700).
-
----
-
-## Docker Deployment
-
-To run the full stack in Docker (backend + frontend + all services):
-
-```sh
-cp backend/.env.example backend/.env
-# edit backend/.env — set your LLM provider and API keys
-
-docker compose up -d
-```
-
-The production compose file mounts `backend/.env` directly and **automatically overrides the service hostnames** — database, Qdrant, Typesense, and RustFS all resolve correctly inside Docker without touching your `.env`.
-
-The only values you may need to update in `.env` before a Docker deployment are the LLM/embedding URLs, if you're pointing at a local model server. Inside a container, `127.0.0.1` refers to the container itself — use `host.docker.internal` to reach your machine:
-
-| Variable | Dev `.env` value | Docker prod value |
-|---|---|---|
-| `LLM_BASE_URL` | `http://127.0.0.1:1234` | `http://host.docker.internal:1234` |
-| `EMBEDDING_BASE_URL` | `http://127.0.0.1:11434` | `http://host.docker.internal:11434` |
-
-If you use a cloud provider (Gemini, OpenAI, Anthropic) these don't apply — no `.env` changes are needed at all.
 
 ---
 

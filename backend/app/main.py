@@ -15,6 +15,7 @@ from app.core.log import get_logger, setup_logging
 
 setup_logging()
 
+from app.core.config import settings  # noqa: E402
 from app.core.database import get_db  # noqa: E402
 from app.models.note import Note  # noqa: E402
 from app.schemas.extraction import NoteInput  # noqa: E402
@@ -105,10 +106,15 @@ request_trace_id: ContextVar[str] = ContextVar("request_trace_id", default="")
 
 app = FastAPI(title="LiveOS API", version="0.1.0")
 
+cors_origins = [
+    origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()
+]
+
 # CORS setup used to allow connections from Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3700", "http://localhost:3701"],
+    allow_origins=cors_origins,
+    allow_origin_regex=settings.CORS_ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
