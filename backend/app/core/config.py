@@ -148,6 +148,11 @@ class Settings(BaseSettings):
 
     # Model storage path (relative to backend root)
     MODELS_PATH: str = "models"
+    PDF_VISUAL_EXTRACTION_ENABLED: bool = True
+    # 0 means no cap; render every PDF page that needs visual extraction.
+    PDF_VISUAL_EXTRACTION_MAX_PAGES: int = 0
+    PDF_VISUAL_RENDER_DPI: int = 144
+    PDF_VISUAL_TEXT_THRESHOLD: int = 80
 
     # ── Cloud LLM Providers ───────────────────────────────────────────────────
     # OpenAI

@@ -552,7 +552,7 @@ Three models must be downloaded manually and placed in `backend/models/` before 
 
 | Directory | Hugging Face source | Purpose |
 |---|---|---|
-| `backend/models/florence-2-large/` | [`microsoft/Florence-2-large`](https://huggingface.co/microsoft/Florence-2-large) | Vision — image captioning and OCR |
+| `backend/models/florence-2-large/` | [`microsoft/Florence-2-large`](https://huggingface.co/microsoft/Florence-2-large) | Vision — image captioning, OCR-like descriptions, and visual PDF pages |
 | `backend/models/whisper-large-v3-turbo/` | [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo) | Audio — speech-to-text transcription |
 | `backend/models/qwen3-reranker-0.6b/` | [`Qwen/Qwen3-Reranker-0.6B`](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B) | Retrieval — reranking search results |
 
@@ -621,6 +621,10 @@ INGESTION_LLM_MODEL=gemma3:4b
 # Embedding — "ollama" | "lm_studio" | "auto"
 EMBEDDING_PROVIDER=ollama
 EMBEDDING_MODEL=qwen3-embedding:0.6b
+
+# PDF visual extraction — renders scanned/image-heavy pages for Florence
+PDF_VISUAL_EXTRACTION_ENABLED=true
+PDF_VISUAL_EXTRACTION_MAX_PAGES=0  # 0 = all visually relevant pages
 
 # Cloud providers (only needed if using cloud LLMs)
 GEMINI_API_KEY=
