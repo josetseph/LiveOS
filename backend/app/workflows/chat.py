@@ -157,8 +157,8 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
     async def _extract_references(self, docs: list) -> list:
         """
         Extract unique note references from retrieved documents.
-        Looks up real titles from Postgres for any linked note that lacks a title
-        in the graph (note nodes in Neo4j don't store the title property).
+        Always prefers Postgres titles because graph note titles can be stale
+        or placeholder values from earlier ingestion passes.
         """
         # Deduplicate references by Note ID from graph-node linked_notes.
         seen_refs: set[str] = set()
@@ -171,13 +171,12 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
                 if lnid:
                     id_to_title.setdefault(lnid, linked_note.get("title"))
 
-        # Batch-fetch titles from Postgres for any note with a missing title
-        missing_ids = [nid for nid, t in id_to_title.items() if not t]
-        if missing_ids:
+        # Batch-fetch titles from Postgres and let them override graph evidence.
+        if id_to_title:
             try:
                 async with AsyncSessionLocal() as session:
                     rows = await session.execute(
-                        select(Note.id, Note.title).where(Note.id.in_(missing_ids))
+                        select(Note.id, Note.title).where(Note.id.in_(id_to_title))
                     )
                     for row_id, row_title in rows:
                         if row_title:
