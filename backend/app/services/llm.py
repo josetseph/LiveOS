@@ -1469,6 +1469,13 @@ class LLMService:
             if key not in sections:  # first occurrence wins
                 sections[key] = val
 
+        def _clean_next_query(value: str) -> str:
+            """Keep only the actual search phrase from a NEXT_QUERY section."""
+            first_line = next((line.strip() for line in value.splitlines() if line.strip()), "")
+            first_line = re.sub(r"^\s*(?:[-*]\s*)+", "", first_line)
+            first_line = re.sub(r"^\*{1,3}|\*{1,3}$", "", first_line).strip()
+            return first_line.strip().strip('"').strip("'").strip()
+
         reasoning = sections.get("REASONING", "")
         full_answer = sections.get("FINDING", "") or sections.get("FULL_ANSWER", "")
         answer_val = sections.get("ANSWER", "")
@@ -1478,7 +1485,28 @@ class LLMService:
             can_answer = True
             final_answer = answer_val
         elif next_query_val:
-            next_query = next_query_val
+            next_query = _clean_next_query(next_query_val)
+
+        # Some local models occasionally ignore the literal NEXT_QUERY label on
+        # the first planning turn and return only a quoted search phrase, e.g.
+        # `Reply: "Fido meaning and history"`. Treat that as the next query
+        # only before any docs have been retrieved; later turns must use the
+        # explicit ANSWER/NEXT_QUERY protocol.
+        if not can_answer and not next_query and not docs:
+            candidate = raw.strip()
+            candidate = re.sub(r"^\s*(?:reply|query)\s*:\s*", "", candidate, flags=re.I)
+            candidate = candidate.strip().strip('"').strip("'").strip()
+            if (
+                candidate
+                and "\n" not in candidate
+                and len(candidate) <= 200
+                and candidate.upper() not in _non_answers
+            ):
+                logger.info(
+                    "[LLM] iterative_step unlabeled NEXT_QUERY fallback: "
+                    f"'{candidate}'"
+                )
+                next_query = candidate
 
         # ── Post-process ANSWER ───────────────────────────────────────────────
         # Fallback: if the LLM committed FULL_ANSWER but gave neither ANSWER nor

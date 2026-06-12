@@ -47,4 +47,3 @@ __pycache__/
 /.github/hooks
 /.github/prompts
 .github/copilot-instructions.md
-**/.DS_Store

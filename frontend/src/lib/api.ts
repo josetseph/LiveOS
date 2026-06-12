@@ -30,6 +30,10 @@ export const api = {
     return http.post(`/chat${kbParam(kb)}`, { query, request_id: requestId });
   },
 
+  async startChat(query: string, kb = "default", requestId?: string) {
+    return http.post(`/chat/async${kbParam(kb)}`, { query, request_id: requestId });
+  },
+
   async getChatStatus(requestId: string): Promise<ChatStatus> {
     return http.get(`/chat/status/${requestId}`);
   },

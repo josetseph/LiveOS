@@ -115,6 +115,9 @@ class QdrantService:
         query_vector: list[float],
         limit: int,
         min_score: float,
+        contexts_filter: Filter | None = None,
+        period_key_filter: str | None = None,
+        day_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Search all Qdrant collections and merge the resulting scored hits."""
         if not self.is_available() or not self.client:
@@ -122,12 +125,29 @@ class QdrantService:
 
         hits: list[dict[str, Any]] = []
         for collection in self.collections:
+            if day_only and collection != self._col_contexts:
+                continue
+
+            query_filter = None
+            if collection == self._col_contexts and contexts_filter is not None:
+                query_filter = contexts_filter
+            elif collection == self._col_cores and period_key_filter:
+                query_filter = Filter(
+                    must=[
+                        FieldCondition(
+                            key="period_key",
+                            match=MatchValue(value=period_key_filter),
+                        )
+                    ]
+                )
+
             try:
                 result = self.client.query_points(
                     collection_name=collection,
                     query=query_vector,
                     limit=limit,
                     score_threshold=min_score,
+                    query_filter=query_filter,
                     with_payload=True,
                 )
                 for point in result.points:

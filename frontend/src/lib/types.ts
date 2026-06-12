@@ -37,6 +37,12 @@ export type ChatStatus = {
     request_id: string;
     stage: string;
     model?: string | null;
+    done?: boolean;
+    result?: {
+        answer?: string;
+        thinking?: string | null;
+    };
+    error?: string;
 };
 
 /** Knowledge base metadata returned by GET /api/v1/kb */

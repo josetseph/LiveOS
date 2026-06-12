@@ -5,6 +5,7 @@ import asyncio
 import os
 import subprocess
 import tempfile
+import threading
 import uuid
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -296,7 +297,8 @@ class ChatInput(BaseModel):
     request_id: str | None = None
 
 
-_chat_status: dict[str, dict[str, str | None]] = {}
+_chat_status: dict[str, dict] = {}
+_chat_job_lock = threading.Lock()
 
 
 class LLMSettings(BaseModel):
@@ -397,12 +399,80 @@ async def chat(body: ChatInput, kb: KBContext = Depends(get_kb)):
         raise
 
 
+async def _run_chat_job(request_id: str, query: str, kb: KBContext) -> None:
+    """Run a long chat request after the browser has received a request id."""
+
+    def _progress(stage: str, model: str | None = None) -> None:
+        current = _chat_status.get(request_id, {})
+        _chat_status[request_id] = {
+            **current,
+            "stage": stage,
+            "model": model,
+            "done": False,
+        }
+
+    _progress("Starting chat request")
+    try:
+        result = await kb.get_chat_workflow().chat(query, progress_callback=_progress)
+        result["request_id"] = request_id
+        _chat_status[request_id] = {
+            "stage": "Complete",
+            "model": None,
+            "done": True,
+            "result": result,
+        }
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.exception("[Chat] Async chat job failed")
+        _chat_status[request_id] = {
+            "stage": "Failed",
+            "model": None,
+            "done": True,
+            "error": str(exc) or exc.__class__.__name__,
+        }
+
+
+def _run_chat_job_sync(request_id: str, query: str, kb: KBContext) -> None:
+    """Threadpool entry point for long chat jobs."""
+    if not _chat_job_lock.acquire(blocking=False):
+        current = _chat_status.get(request_id, {})
+        _chat_status[request_id] = {
+            **current,
+            "stage": "Waiting for current chat to finish",
+            "model": None,
+            "done": False,
+        }
+        _chat_job_lock.acquire()
+    try:
+        asyncio.run(_run_chat_job(request_id, query, kb))
+    finally:
+        _chat_job_lock.release()
+
+
+@app.post("/api/v1/chat/async")
+async def start_chat(
+    body: ChatInput,
+    background_tasks: BackgroundTasks,
+    kb: KBContext = Depends(get_kb),
+):
+    """Start a chat request and return immediately for polling clients."""
+    request_id = body.request_id or str(uuid.uuid4())
+    _chat_status[request_id] = {
+        "stage": "Queued",
+        "model": None,
+        "done": False,
+    }
+    background_tasks.add_task(_run_chat_job_sync, request_id, body.query, kb)
+    return {"request_id": request_id, "stage": "Queued", "model": None, "done": False}
+
+
 @app.get("/api/v1/chat/status/{request_id}")
 async def get_chat_status(request_id: str):
     """Return current progress for a non-streaming chat request."""
     return {
         "request_id": request_id,
-        **_chat_status.get(request_id, {"stage": "Waiting", "model": None}),
+        **_chat_status.get(
+            request_id, {"stage": "Waiting", "model": None, "done": False}
+        ),
     }
 
 

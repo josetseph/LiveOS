@@ -60,27 +60,57 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             typeof crypto !== "undefined" && "randomUUID" in crypto
                 ? crypto.randomUUID()
                 : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const interval = window.setInterval(() => {
+        let interval: number | null = null;
+
+        const fail = () => {
+            if (interval !== null) window.clearInterval(interval);
+            const errorMessage: Message = {
+                id: (Date.now() + 1).toString(),
+                role: "assistant",
+                content: "Sorry, I encountered an error. Please try again.",
+                timestamp: new Date(),
+            };
+            setMessages((prev) => [...prev, errorMessage]);
+            setIsLoading(false);
+            setLoadingStage(null);
+            setLoadingModel(null);
+        };
+
+        const complete = (answer?: string, thinking?: string | null) => {
+            if (interval !== null) window.clearInterval(interval);
+            const assistantMessage: Message = {
+                id: (Date.now() + 1).toString(),
+                role: "assistant",
+                content: answer || "I couldn't generate a response.",
+                timestamp: new Date(),
+                thinking: thinking || undefined,
+            };
+            setMessages((prev) => [...prev, assistantMessage]);
+            setIsLoading(false);
+            setLoadingStage(null);
+            setLoadingModel(null);
+        };
+
+        const poll = () => {
             api.getChatStatus(requestId)
                 .then((status) => {
                     setLoadingStage(status.stage);
                     setLoadingModel(status.model ?? null);
+                    if (!status.done) return;
+                    if (status.error) {
+                        fail();
+                        return;
+                    }
+                    complete(status.result?.answer, status.result?.thinking);
                 })
                 .catch(() => { });
-        }, 1000);
+        };
 
-        // Fire-and-forget — runs even if the chat page is not mounted.
         api
-            .chat(text, kb, requestId)
-            .then((response) => {
-                const assistantMessage: Message = {
-                    id: (Date.now() + 1).toString(),
-                    role: "assistant",
-                    content: response.answer || "I couldn't generate a response.",
-                    timestamp: new Date(),
-                    thinking: response.thinking || undefined,
-                };
-                setMessages((prev) => [...prev, assistantMessage]);
+            .startChat(text, kb, requestId)
+            .then(() => {
+                interval = window.setInterval(poll, 1000);
+                poll();
             })
             .catch(() => {
                 const errorMessage: Message = {
@@ -90,9 +120,6 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                     timestamp: new Date(),
                 };
                 setMessages((prev) => [...prev, errorMessage]);
-            })
-            .finally(() => {
-                window.clearInterval(interval);
                 setIsLoading(false);
                 setLoadingStage(null);
                 setLoadingModel(null);
