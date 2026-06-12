@@ -1,8 +1,9 @@
-"""Multimedia processing: image captioning, audio transcription, and PDF text extraction."""
+"""Multimedia processing via local model services and lightweight document parsers."""
 
 # pylint: disable=wrong-import-order,import-outside-toplevel
 import os
 import csv
+from collections.abc import Callable
 
 from app.core.config import settings
 from app.core.log import get_logger
@@ -19,226 +20,245 @@ def _format_timestamp(seconds: float) -> str:
 
 
 class MultimediaService:
-    """Extract text from images (Florence-2), audio (Whisper), and PDFs; falls back gracefully if models are absent."""
+    """Extract text from attachments using local model services."""
 
-    def __init__(self):
-        self.models_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), f"../../{settings.MODELS_PATH}")
+    def _parse_storage_ref(self, path_or_url: str) -> tuple[str, str] | None:
+        """Return (bucket, key) when the path points at RustFS / proxy storage."""
+        from urllib.parse import urlparse
+
+        if path_or_url.startswith("http"):
+            parsed = urlparse(path_or_url)
+            parts = parsed.path.strip("/").split("/", 1)
+            if len(parts) == 2 and parts[1]:
+                return parts[0], parts[1]
+            return None
+
+        if path_or_url.startswith("/files/"):
+            remainder = path_or_url[len("/files/") :].lstrip("/")
+            parts = remainder.split("/", 1)
+            if len(parts) == 2 and parts[1]:
+                return parts[0], parts[1]
+            return None
+
+        if path_or_url.startswith("/uploads/"):
+            key = path_or_url[len("/uploads/") :].lstrip("/")
+            if key:
+                return settings.BUCKET_NAME, key
+
+        files_url = settings.FILES_URL.rstrip("/")
+        if files_url.startswith("/") and path_or_url.startswith(files_url + "/"):
+            key = path_or_url[len(files_url) + 1 :]
+            if key:
+                return settings.BUCKET_NAME, key
+
+        return None
+
+    def _download_from_storage(self, bucket: str, key: str) -> str:
+        """Download an object from RustFS/S3 to a temporary local file."""
+        import tempfile
+
+        import boto3
+        from botocore.client import Config
+
+        suffix = "." + key.rsplit(".", 1)[-1] if "." in key else ".tmp"
+        client = boto3.client(
+            "s3",
+            aws_access_key_id=settings.BUCKET_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.BUCKET_SECRET_ACCESS_KEY,
+            endpoint_url=settings.R2_ENDPOINT_URL,
+            config=Config(s3={"addressing_style": "path"}),
         )
-        # Florence-2-Large often has issues on MPS, defaulting to CPU for stability if needed.
-        # self.device = "mps" if torch.backends.mps.is_available() else "cpu"
-        self.device = "cpu"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            client.download_fileobj(bucket, key, tmp)
+            return tmp.name
 
-        self.florence_model = None
-        self.florence_processor = None
-        self.whisper_model = None
-        self.whisper_processor = None
-        self.marlin_model = None
+    def _resolve_storage_url(self, path_or_url: str) -> str:
+        """Normalize attachment URLs/paths to something the backend can fetch."""
+        if not path_or_url:
+            return path_or_url
 
-    def _load_whisper(self):
-        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
-        if not self.whisper_model:
-            model_path = os.path.join(self.models_path, settings.MODEL_WHISPER_LOCAL)
-            logger.info(
-                f"Loading Whisper ({settings.MODEL_WHISPER_HF}) from {model_path}..."
-            )
-            self.whisper_model = (
-                AutoModelForSpeechSeq2Seq.from_pretrained(model_path)
-                .to(self.device)
-                .eval()
-            )
-            self.whisper_processor = AutoProcessor.from_pretrained(model_path)
+        if path_or_url.startswith("http"):
+            return path_or_url
+
+        if os.path.isfile(path_or_url):
+            return path_or_url
+
+        if path_or_url.startswith("/files/"):
+            remainder = path_or_url[len("/files/") :].lstrip("/")
+            if remainder:
+                return f"{settings.R2_ENDPOINT_URL.rstrip('/')}/{remainder}"
+
+        if path_or_url.startswith("/uploads/"):
+            key = path_or_url[len("/uploads/") :].lstrip("/")
+            if key:
+                return (
+                    f"{settings.R2_ENDPOINT_URL.rstrip('/')}/"
+                    f"{settings.BUCKET_NAME}/{key}"
+                )
+
+        files_url = settings.FILES_URL.rstrip("/")
+        if files_url.startswith("/") and path_or_url.startswith(files_url + "/"):
+            key = path_or_url[len(files_url) + 1 :]
+            if key:
+                return (
+                    f"{settings.R2_ENDPOINT_URL.rstrip('/')}/"
+                    f"{settings.BUCKET_NAME}/{key}"
+                )
+
+        return path_or_url
 
     def _download_temp_file(self, path_or_url: str) -> str:
-        """
-        Helper: If path is a URL, download it to a temporary file.
-        Returns the local filepath.
-        """
+        """Download remote/storage attachments to a temporary local file."""
         import tempfile
 
         import requests
 
-        if not path_or_url.startswith("http"):
+        if os.path.isfile(path_or_url):
             return path_or_url
 
-        logger.info(f"Downloading remote file: {path_or_url}...")
-        try:
-            response = requests.get(path_or_url, timeout=300)
+        storage_ref = self._parse_storage_ref(path_or_url)
+        if storage_ref:
+            bucket, key = storage_ref
+            logger.info(f"Downloading storage object: {bucket}/{key}")
+            return self._download_from_storage(bucket, key)
+
+        resolved = self._resolve_storage_url(path_or_url)
+        if resolved != path_or_url:
+            storage_ref = self._parse_storage_ref(resolved)
+            if storage_ref:
+                bucket, key = storage_ref
+                logger.info(f"Downloading storage object: {bucket}/{key}")
+                return self._download_from_storage(bucket, key)
+
+        if not resolved.startswith("http"):
+            return resolved
+
+        logger.info(f"Downloading remote file: {resolved}...")
+        response = requests.get(resolved, timeout=300)
+        response.raise_for_status()
+        suffix = "." + resolved.split(".")[-1] if "." in resolved else ".tmp"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(response.content)
+            return tmp.name
+
+    def _post_file_to_local_models(self, local_path: str, endpoint: str) -> dict:
+        """Upload a local file to the local-models service."""
+        import httpx
+
+        if not settings.LOCAL_MODELS_SERVICE_URL:
+            raise RuntimeError("Local models service is disabled")
+
+        url = f"{settings.LOCAL_MODELS_SERVICE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
+        timeout = httpx.Timeout(settings.LOCAL_MODELS_SERVICE_TIMEOUT_SECONDS)
+        with open(local_path, "rb") as file_obj:
+            files = {
+                "file": (
+                    os.path.basename(local_path),
+                    file_obj,
+                    "application/octet-stream",
+                )
+            }
+            response = httpx.post(url, files=files, timeout=timeout)
             response.raise_for_status()
+            return response.json()
 
-            # Create temp file
-            suffix = "." + path_or_url.split(".")[-1] if "." in path_or_url else ".tmp"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(response.content)
-                return tmp.name
-        except Exception as e:
-            logger.error(f"Failed to download file: {e}")
-            raise e
+    def _caption_video_with_marlin(self, local_path: str) -> dict:
+        """Send a local video file to the dedicated Marlin service."""
+        import httpx
 
-    def _load_florence(self):
-        from transformers import AutoModelForCausalLM, AutoProcessor
-        if not self.florence_model:
-            model_path = os.path.join(self.models_path, settings.MODEL_FLORENCE_LOCAL)
-            logger.info(
-                f"Loading Florence ({settings.MODEL_FLORENCE_HF}) from {model_path}..."
-            )
-            # Florence-2-Large requires trust_remote_code=True
-            self.florence_model = (
-                AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
-                .to(self.device)
-                .eval()
-            )
-            self.florence_processor = AutoProcessor.from_pretrained(
-                model_path, trust_remote_code=True
-            )
+        if not settings.MARLIN_SERVICE_URL:
+            logger.info("Marlin service is disabled; skipping visual video analysis.")
+            return {}
 
-    def _load_marlin(self):
-        import torch
-        from transformers import AutoModelForCausalLM
-        if not self.marlin_model:
-            model_path = os.path.join(self.models_path, settings.MODEL_MARLIN_LOCAL)
-            logger.info(
-                f"Loading Marlin ({settings.MODEL_MARLIN_HF}) from {model_path}..."
-            )
-            self.marlin_model = (
-                AutoModelForCausalLM.from_pretrained(
-                    model_path,
-                    trust_remote_code=True,
-                    torch_dtype=torch.float32,
+        url = f"{settings.MARLIN_SERVICE_URL.rstrip('/')}/caption"
+        timeout = httpx.Timeout(settings.MARLIN_SERVICE_TIMEOUT_SECONDS)
+        with open(local_path, "rb") as video_file:
+            files = {
+                "file": (
+                    os.path.basename(local_path),
+                    video_file,
+                    "application/octet-stream",
                 )
-                .to(self.device)
-                .eval()
-            )
+            }
+            response = httpx.post(url, files=files, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
 
-    def _describe_pil_image(self, image) -> str:
-        """Generate a detailed Florence description for an already-loaded PIL image."""
-        import torch
+    def unload_local_models(self, family: str | None = None) -> None:
+        """Ask local-models to release a loaded model family."""
+        import httpx
 
-        self._load_florence()
+        if not settings.LOCAL_MODELS_SERVICE_URL:
+            return
 
+        url = f"{settings.LOCAL_MODELS_SERVICE_URL.rstrip('/')}/unload"
         try:
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-
-            # Task: Detailed Caption
-            prompt = "<MORE_DETAILED_CAPTION>"
-
-            # Wraps inputs in lists to ensure correct processing
-            raw = self.florence_processor(
-                text=[prompt], images=[image], return_tensors="pt"
+            response = httpx.post(
+                url,
+                json={"family": family},
+                timeout=httpx.Timeout(30.0),
             )
-            model_dtype = next(self.florence_model.parameters()).dtype
-            inputs = {}
-            for k, v in raw.items():
-                if v is None:
-                    continue
-                if torch.is_floating_point(v):
-                    inputs[k] = v.to(device=self.device, dtype=model_dtype)
-                else:
-                    inputs[k] = v.to(self.device)
+            response.raise_for_status()
+            logger.info(f"Unloaded local model family: {family or 'all'}")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(f"Local model unload skipped/failed: {exc}")
 
-            with torch.no_grad():
-                generated_ids = self.florence_model.generate(
-                    **inputs, max_new_tokens=1024, num_beams=3, use_cache=False
-                )
+    def unload_marlin(self) -> None:
+        """Ask the Marlin service to release the loaded video model."""
+        import httpx
 
-            generated_text = self.florence_processor.batch_decode(
-                generated_ids, skip_special_tokens=False
-            )[0]
+        if not settings.MARLIN_SERVICE_URL:
+            return
 
-            # Post-process to get pure text
-            parsed_answer = self.florence_processor.post_process_generation(
-                generated_text, task=prompt, image_size=(image.width, image.height)
-            )
-
-            description = parsed_answer.get(prompt, "")
-            logger.info(f"Florence Description: {description}")
-            return description
-
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error(f"Florence Failed: {e}")
-            return f"Image Description Failed: {e}"
+        url = f"{settings.MARLIN_SERVICE_URL.rstrip('/')}/unload"
+        try:
+            response = httpx.post(url, timeout=httpx.Timeout(30.0))
+            response.raise_for_status()
+            logger.info("Unloaded Marlin model")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(f"Marlin unload skipped/failed: {exc}")
 
     def describe_image(self, image_path: str) -> str:
-        """
-        Generates a detailed description using Florence vision model.
-        Handles local paths and R2 URLs.
-        """
-        from PIL import Image
-
+        """Generate a detailed image description via the local-models service."""
         local_path = self._download_temp_file(image_path)
-
         try:
-            image = Image.open(local_path)
-            return self._describe_pil_image(image)
+            result = self._post_file_to_local_models(local_path, "/image/describe")
+            return result.get("text", "")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error(f"Image description failed: {exc}")
+            raise RuntimeError(f"Image description failed: {exc}") from exc
         finally:
             if local_path != image_path and os.path.exists(local_path):
                 os.remove(local_path)
 
     def transcribe_audio(self, audio_path: str) -> str:
-        """
-        Transcribes audio using Whisper.
-        Handles local paths and R2 URLs.
-        """
-        self._load_whisper()
-        import librosa
-
+        """Transcribe audio via the local-models service."""
         local_path = self._download_temp_file(audio_path)
-
         try:
             logger.info(f"Transcribing audio: {local_path}")
-
-            # Convert to WAV using pydub to ensure compatibility with librosa/soundfile
-            # This fixes "PySoundFile failed" and "Processing Multimedia Sources" warnings
-            from pydub import AudioSegment
-
-            # Determine format or let pydub auto-detect
-            # We convert to a new temp WAV file
-            wav_path = local_path + ".converted.wav"
-            logger.info(f"Converting to WAV: {wav_path}")
-
-            audio_segment = AudioSegment.from_file(local_path)
-            audio_segment = audio_segment.set_frame_rate(16000).set_channels(
-                1
-            )  # Normalize to 16kHz Mono
-            audio_segment.export(wav_path, format="wav")
-
-            # Load the CLEAN WAV file
-            audio, _ = librosa.load(wav_path, sr=16000)
-
-            input_features = self.whisper_processor(
-                audio, sampling_rate=16000, return_tensors="pt"
-            ).input_features.to(self.device)
-
-            # Explicitly pass generation_config to suppress "defaults modified" warning
-            generated_ids = self.whisper_model.generate(
-                input_features, generation_config=self.whisper_model.generation_config
-            )
-            transcription = self.whisper_processor.batch_decode(
-                generated_ids, skip_special_tokens=True
-            )[0]
-
-            # Cleanup the converted wav
-            if os.path.exists(wav_path):
-                os.remove(wav_path)
-
-            return transcription
+            result = self._post_file_to_local_models(local_path, "/audio/transcribe")
+            return result.get("text", "")
         finally:
             if local_path != audio_path and os.path.exists(local_path):
                 os.remove(local_path)
 
     def process_video(self, video_path: str) -> str:
-        """
-        Process a video: probe for a video stream, then run Whisper (audio) and
-        Marlin (visual) in parallel streams. Falls back to audio-only transcription
-        if no video stream is detected (e.g. an audio-only .webm upload).
-        """
+        """Process a video with Whisper audio transcription and Marlin visual analysis."""
+        transcript = self.transcribe_video_audio(video_path)
+        visual = self.describe_video_visual(video_path)
+        parts = []
+        if transcript:
+            parts.append(f"### Spoken Content\n{transcript}")
+        if visual:
+            parts.append(visual)
+        return "\n\n".join(parts) if parts else "(Video processing produced no output)"
+
+    def transcribe_video_audio(self, video_path: str) -> str:
+        """Transcribe a video's audio track without running visual analysis."""
         import av
 
         local_path = self._download_temp_file(video_path)
-
         try:
-            # Probe for a video stream before loading Marlin
             with av.open(local_path) as container:
                 has_video = len(container.streams.video) > 0
 
@@ -246,22 +266,33 @@ class MultimediaService:
                 logger.info("No video stream detected — treating as audio-only.")
                 return self.transcribe_audio(local_path)
 
-            self._load_marlin()
-
-            # --- Stream 1: Audio → Whisper ---
-            transcript = ""
             try:
                 logger.info("Transcribing video audio track...")
-                transcript = self.transcribe_audio(local_path)
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.warning(f"Audio transcription skipped (no audio track or failed): {e}")
+                return self.transcribe_audio(local_path)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    f"Audio transcription skipped (no audio track or failed): {exc}"
+                )
+                return ""
+        finally:
+            if local_path != video_path and os.path.exists(local_path):
+                os.remove(local_path)
 
-            # --- Stream 2: Visual → Marlin ---
-            scene = ""
-            events_text = ""
+    def describe_video_visual(self, video_path: str) -> str:
+        """Run Marlin visual analysis without transcribing audio."""
+        import av
+
+        local_path = self._download_temp_file(video_path)
+        try:
+            with av.open(local_path) as container:
+                has_video = len(container.streams.video) > 0
+
+            if not has_video:
+                return ""
+
             try:
-                logger.info("Running Marlin video captioning...")
-                result = self.marlin_model.caption(local_path)
+                logger.info("Running Marlin video captioning via service...")
+                result = self._caption_video_with_marlin(local_path)
                 scene = result.get("scene", "")
                 events = result.get("events", [])
                 lines = [
@@ -270,162 +301,118 @@ class MultimediaService:
                 ]
                 events_text = "\n".join(lines)
                 logger.info(f"Marlin: {len(events)} events extracted.")
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error(f"Marlin captioning failed: {e}")
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.error(f"Marlin captioning failed: {exc}")
+                return ""
 
-            # --- Combine results ---
-            parts = []
-            if transcript:
-                parts.append(f"### Spoken Content\n{transcript}")
             if scene:
                 visual = f"### Visual Analysis\n**Scene:** {scene}"
                 if events_text:
                     visual += f"\n\n**Events:**\n{events_text}"
-                parts.append(visual)
-            return "\n\n".join(parts) if parts else "(Video processing produced no output)"
-
+                return visual
+            return ""
         finally:
             if local_path != video_path and os.path.exists(local_path):
                 os.remove(local_path)
 
-    def _pdf_page_needs_visual_description(self, page, native_text: str) -> bool:
-        """
-        Decide whether a rendered PDF page should go through Florence.
+    def extract_text_from_pdf(
+        self,
+        pdf_path: str,
+        progress_callback: Callable[[str, str | None], None] | None = None,
+    ) -> str:
+        """Extract PDF page text and describe embedded images with Florence."""
+        import tempfile
 
-        Rendering every page can be slow, so we target pages that are likely to
-        contain non-text information: scans, embedded images, charts, or vector
-        drawings.
-        """
-        if not settings.PDF_VISUAL_EXTRACTION_ENABLED:
-            return False
+        import fitz
 
-        if len(native_text.strip()) < settings.PDF_VISUAL_TEXT_THRESHOLD:
-            return True
+        def _progress(stage: str, model: str | None = None) -> None:
+            if progress_callback:
+                progress_callback(stage, model)
 
-        try:
-            if page.get_images(full=True):
-                return True
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.debug(f"Could not inspect PDF page images: {e}")
-
-        try:
-            if page.get_drawings():
-                return True
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.debug(f"Could not inspect PDF page drawings: {e}")
-
-        return False
-
-    def _describe_pdf_page_render(self, page) -> str:
-        """Render a PDF page to an image and describe it with Florence."""
-        import fitz  # PyMuPDF
-        from PIL import Image
-
-        dpi = max(settings.PDF_VISUAL_RENDER_DPI, 72)
-        zoom = dpi / 72
-        pixmap = page.get_pixmap(
-            matrix=fitz.Matrix(zoom, zoom),
-            alpha=False,
-            annots=True,
-        )
-        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
-        return self._describe_pil_image(image)
-
-    def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """
-        Extract native text from a PDF and enrich image-heavy/scanned pages with
-        Florence visual descriptions from rendered page images.
-        """
         local_path = self._download_temp_file(pdf_path)
-        extracted_pages = []
-
         try:
+            extracted_pages: list[str] = []
+            doc = fitz.open(local_path)
+            total_pages = len(doc)
             try:
-                import fitz  # PyMuPDF
-
-                doc = fitz.open(local_path)
-                try:
-                    visual_pages_processed = 0
-                    visual_pages_skipped = 0
-                    max_visual_pages = max(settings.PDF_VISUAL_EXTRACTION_MAX_PAGES, 0)
-                    has_visual_page_cap = max_visual_pages > 0
-
-                    for i, page in enumerate(doc, start=1):
-                        native_text = page.get_text().strip()
-                        page_parts = [f"--- Page {i} ---"]
-                        visual_description = ""
-
-                        if native_text:
-                            page_parts.append(f"Native text:\n{native_text}")
-
-                        if self._pdf_page_needs_visual_description(page, native_text):
-                            if (
-                                not has_visual_page_cap
-                                or visual_pages_processed < max_visual_pages
-                            ):
-                                visual_pages_processed += 1
-                                logger.info(
-                                    f"Rendering PDF page {i} for visual extraction..."
-                                )
-                                visual_description = self._describe_pdf_page_render(
-                                    page
-                                )
-                                if visual_description:
-                                    if not native_text:
-                                        page_parts.append("Native text: (none found)")
-                                    page_parts.append(
-                                        f"Visual content:\n{visual_description}"
-                                    )
-                            else:
-                                visual_pages_skipped += 1
-
-                        if native_text or visual_description:
-                            extracted_pages.append("\n\n".join(page_parts))
-                finally:
-                    doc.close()
-
-                full_text = "\n\n".join(extracted_pages).strip()
-                if visual_pages_skipped:
-                    full_text += (
-                        "\n\n[PDF visual extraction skipped "
-                        f"{visual_pages_skipped} page(s) after reaching "
-                        f"PDF_VISUAL_EXTRACTION_MAX_PAGES={max_visual_pages}. "
-                        "Set it to 0 to process all visually relevant pages.]"
+                for page_index, page in enumerate(doc, start=1):
+                    _progress(
+                        f"PDF: page {page_index}/{total_pages}, extracting text",
+                        None,
                     )
+                    native_text = page.get_text().strip()
+                    page_parts = [f"--- Page {page_index} ---"]
+                    image_descriptions: list[str] = []
 
-                if not full_text:
-                    logger.info(
-                        "PDF Extraction: No native or visual content extracted."
-                    )
-                    return "PDF contains no extractable native or visual content."
+                    if native_text:
+                        page_parts.append(f"Native text:\n{native_text}")
 
-                logger.info(
-                    "PDF Extraction: Used native text layer"
-                    f" and {visual_pages_processed} visual page render(s)."
-                )
-                return full_text
+                    images = page.get_images(full=True)
+                    for image_index, image_info in enumerate(images, start=1):
+                        _progress(
+                            (
+                                f"PDF: page {page_index}/{total_pages}, "
+                                f"describing image {image_index}/{len(images)}"
+                            ),
+                            "Florence-2",
+                        )
+                        xref = image_info[0]
+                        image_path = ""
+                        try:
+                            extracted = doc.extract_image(xref)
+                            image_bytes = extracted.get("image")
+                            if not image_bytes:
+                                continue
+                            image_ext = extracted.get("ext") or "png"
+                            with tempfile.NamedTemporaryFile(
+                                delete=False, suffix=f".{image_ext}"
+                            ) as tmp:
+                                image_path = tmp.name
+                                tmp.write(image_bytes)
+                            result = self._post_file_to_local_models(
+                                image_path, "/image/describe"
+                            )
+                            description = result.get("text", "")
+                        except Exception as exc:  # pylint: disable=broad-exception-caught
+                            logger.warning(
+                                "PDF image description skipped "
+                                f"(page={page_index}, image={image_index}): {exc}"
+                            )
+                            continue
+                        finally:
+                            if image_path and os.path.exists(image_path):
+                                os.remove(image_path)
 
-            except ImportError:
-                logger.error("PyMuPDF (fitz) not installed.")
-                return "PDF extraction unavailable: PyMuPDF (fitz) is not installed."
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error(f"PyMuPDF failed: {e}")
-                return f"PDF extraction failed: {e}"
+                        if description:
+                            image_descriptions.append(
+                                f"Image {image_index}: {description}"
+                            )
 
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            return f"PDF Extraction Failed: {e}"
+                    if image_descriptions:
+                        page_parts.append(
+                            "Image descriptions:\n" + "\n".join(image_descriptions)
+                        )
+
+                    if native_text or image_descriptions:
+                        extracted_pages.append("\n\n".join(page_parts))
+
+                    _progress(f"PDF: page {page_index}/{total_pages} complete", None)
+            finally:
+                doc.close()
+
+            full_text = "\n\n".join(extracted_pages).strip()
+            if not full_text:
+                return "PDF contains no extractable native or visual content."
+            return full_text
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error(f"PDF extraction failed: {exc}")
+            raise RuntimeError(f"PDF extraction failed: {exc}") from exc
         finally:
-            if (
-                "local_path" in locals()
-                and local_path != pdf_path
-                and os.path.exists(local_path)
-            ):
+            if local_path != pdf_path and os.path.exists(local_path):
                 os.remove(local_path)
 
     def extract_text_from_docx(self, docx_path: str) -> str:
-        """
-        Extract text from a Word document (.docx) using native parsing only.
-        """
+        """Extract text from a Word document (.docx) using native parsing only."""
         local_path = self._download_temp_file(docx_path)
         parts = []
 
@@ -434,14 +421,11 @@ class MultimediaService:
                 import docx
 
                 document = docx.Document(local_path)
-
-                # Paragraph content
                 for paragraph in document.paragraphs:
                     text = paragraph.text.strip()
                     if text:
                         parts.append(text)
 
-                # Table content
                 for idx, table in enumerate(document.tables, start=1):
                     rows = []
                     for row in table.rows:
@@ -458,29 +442,18 @@ class MultimediaService:
 
             except ImportError:
                 return "Word extraction unavailable: python-docx is not installed."
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error(f"DOCX extraction failed: {e}")
-                return f"Word extraction failed: {e}"
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.error(f"DOCX extraction failed: {exc}")
+                return f"Word extraction failed: {exc}"
 
         finally:
-            if (
-                "local_path" in locals()
-                and local_path != docx_path
-                and os.path.exists(local_path)
-            ):
+            if local_path != docx_path and os.path.exists(local_path):
                 os.remove(local_path)
 
     def extract_text_from_spreadsheet(
         self, sheet_path: str
-    ) -> (
-        str
-    ):  # pylint: disable=too-many-return-statements,too-many-nested-blocks,too-many-locals,too-many-branches
-        """
-        Extract text from spreadsheet-like files using native parsing:
-        - .xlsx via openpyxl
-        - .csv/.tsv via stdlib csv
-        """
-
+    ) -> str:  # pylint: disable=too-many-return-statements,too-many-nested-blocks,too-many-locals,too-many-branches
+        """Extract text from spreadsheet-like files using native parsing."""
         local_path = self._download_temp_file(sheet_path)
         lower_path = local_path.lower()
 
@@ -519,9 +492,9 @@ class MultimediaService:
                     return (
                         "Spreadsheet extraction unavailable: openpyxl is not installed."
                     )
-                except Exception as e:  # pylint: disable=broad-exception-caught
-                    logger.error(f"XLSX extraction failed: {e}")
-                    return f"Spreadsheet extraction failed: {e}"
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    logger.error(f"XLSX extraction failed: {exc}")
+                    return f"Spreadsheet extraction failed: {exc}"
 
             if lower_path.endswith((".csv", ".tsv")):
                 delimiter = "\t" if lower_path.endswith(".tsv") else ","
@@ -542,11 +515,7 @@ class MultimediaService:
 
             return "Unsupported spreadsheet format."
         finally:
-            if (
-                "local_path" in locals()
-                and local_path != sheet_path
-                and os.path.exists(local_path)
-            ):
+            if local_path != sheet_path and os.path.exists(local_path):
                 os.remove(local_path)
 
 

@@ -16,11 +16,9 @@ from app.services.multimedia import multimedia_service
 
 logger = get_logger("IngestionPipeline")
 
-# Concurrent LLM call limit for the ingestion agent.
-# Default is 1 (sequential) to match the original Gemini rate-limit guard.
-# For local providers (Ollama / LM Studio) set INGESTION_AGENT_CONCURRENCY > 1
-# in .env to enable real parallelism — measure throughput before and after.
-concurrency_limit = asyncio.Semaphore(settings.INGESTION_AGENT_CONCURRENCY)
+# Heavy local model multimedia extraction is serialized by default so Florence,
+# Whisper, and Marlin do not compete for the same CPU/RAM budget.
+multimedia_concurrency_limit = asyncio.Semaphore(settings.MULTIMEDIA_CONCURRENCY)
 
 
 # 1. Define Agent State
@@ -45,6 +43,14 @@ async def multimodal_node(
     state: IngestionState,
 ):  # pylint: disable=too-many-locals,too-many-statements
     """LangGraph node: extract text from any multimedia attachments in the note."""
+    from app.workflows.ingestion import ingestion_workflow as _default_wf
+
+    _wf = state.get("workflow") or _default_wf
+
+    async def _set_status(stage: str, model: str | None = None) -> None:
+        if state.get("note_id"):
+            await _wf._update_note_processing_status(state["note_id"], stage, model)
+
     logs = state.get("logs", [])
     logs.append(
         f"[{datetime.now().strftime('%H:%M:%S')}] START: Processing Multimedia..."
@@ -53,149 +59,231 @@ async def multimodal_node(
 
     t_start = time.perf_counter()
     logger.info("Processing Multimedia Sources...")
+    await _set_status("Preparing multimedia attachments")
 
     # This gate limits concurrent multimedia processing calls.
-    async with concurrency_limit:
+    async with multimedia_concurrency_limit:
         logger.info(
-            f"Sempahore Acquired. (Active: {1 - concurrency_limit._value + 1 if hasattr(concurrency_limit, '_value') else '?'})"  # pylint: disable=line-too-long
+            f"Multimedia semaphore acquired. (Active: {settings.MULTIMEDIA_CONCURRENCY - multimedia_concurrency_limit._value if hasattr(multimedia_concurrency_limit, '_value') else '?'})"  # pylint: disable=line-too-long
         )
-        content = state["input"].content or ""
-        audio_changed = False  # Audio transcripts must be persisted as text
+        original_content = state["input"].content or ""
+        content = original_content
+        content_changed = False  # Persist enriched text (transcripts, PDF, etc.)
+        media_errors: list[str] = []
 
         # Unified file link parsing: [📎 Filename](URL) or [🎤 Voice Recording](URL)
         import re
 
-        file_matches = re.findall(
-            r"\[(📎|🎤) (.*?)\]\((http.*?|/uploads/.*?)\)", content
-        )
-        for emoji, filename, url in file_matches:
-            logger.info(f"Processing File: {filename} ({url})")
-            try:
-                lower_url = url.lower()
-
-                # --- VIDEO (📎 uploads with a video container) ---
-                if emoji == "📎" and lower_url.endswith(
-                    (".mp4", ".mov", ".webm", ".mkv", ".avi")
-                ):
-                    logger.info("Detected Video. Running Marlin (visual) + Whisper (audio)...")
-                    video_text = await asyncio.to_thread(
-                        multimedia_service.process_video, url
-                    )
-                    snippet = (video_text.replace("\n", " ") + "...")[:100]
-                    logger.info(f'Video Result: "{snippet}"')
-                    content += f"\n\n[Video Transcript ({filename})]:\n\n{video_text}"
-                    audio_changed = True
-
-                # --- AUDIO (voice recordings or pure audio uploads) ---
-                elif lower_url.endswith((".m4a", ".mp3", ".wav", ".ogg")) or emoji == "🎤":
-                    logger.info("Detected Audio. Transcribing...")
-                    transcription = await asyncio.to_thread(
-                        multimedia_service.transcribe_audio, url
-                    )
-                    snippet = (
-                        transcription.replace("\n", " ") + "..."
-                        if len(transcription) > 100
-                        else transcription
-                    )
-                    logger.info(
-                        f'Audio Result ({len(transcription)} chars): "{snippet}"'
-                    )
-                    content += f"\n\n[Audio Transcript ({filename})]: {transcription}"
-                    audio_changed = True
-
-                # --- PDF ---
-                elif lower_url.endswith(".pdf"):
-                    logger.info("Detected PDF. Extracting text...")
-                    pdf_text = await asyncio.to_thread(
-                        multimedia_service.extract_text_from_pdf, url
-                    )
-                    snippet = (
-                        pdf_text.replace("\n", " ") + "..."
-                        if len(pdf_text) > 100
-                        else pdf_text
-                    )
-                    logger.info(f'PDF Result ({len(pdf_text)} chars): "{snippet}"')
-                    content += f"\n\n[PDF Extraction ({filename})]: {pdf_text}"
-
-                # --- WORD DOCUMENT ---
-                elif lower_url.endswith(".docx"):
-                    logger.info("Detected Word document. Extracting text...")
-                    doc_text = await asyncio.to_thread(
-                        multimedia_service.extract_text_from_docx, url
-                    )
-                    snippet = (
-                        doc_text.replace("\n", " ") + "..."
-                        if len(doc_text) > 100
-                        else doc_text
-                    )
-                    logger.info(f'Word Result ({len(doc_text)} chars): "{snippet}"')
-                    content += f"\n\n[Word Extraction ({filename})]: {doc_text}"
-
-                # --- SPREADSHEETS ---
-                elif lower_url.endswith((".xlsx", ".xls", ".csv", ".tsv")):
-                    logger.info("Detected spreadsheet. Extracting text...")
-                    sheet_text = await asyncio.to_thread(
-                        multimedia_service.extract_text_from_spreadsheet, url
-                    )
-                    snippet = (
-                        sheet_text.replace("\n", " ") + "..."
-                        if len(sheet_text) > 100
-                        else sheet_text
-                    )
-                    logger.info(
-                        f'Spreadsheet Result ({len(sheet_text)} chars): "{snippet}"'
-                    )
-                    content += (
-                        f"\n\n[Spreadsheet Extraction ({filename})]: {sheet_text}"
-                    )
-
-                # --- IMAGE ---
-                elif lower_url.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                    logger.info("Detected Image. Describing...")
-                    img_desc = await asyncio.to_thread(
-                        multimedia_service.describe_image, url
-                    )
-                    logger.info(f'Image Description: "{img_desc}"')
-
-                    # Generate a short title so the image becomes a named entity.
-                    img_title_prompt = (
-                        "Given this image description, provide a concise, specific title "
-                        "that would serve as a unique entity name.\n\n"
-                        f"Description: {img_desc}\n\n"
-                        "Return ONLY the title text, nothing else."
-                    )
-                    try:
-                        img_title = await llm_service.ingestion_generate(
-                            img_title_prompt,
-                            temperature=0.0,
-                        )
-                        img_title = (img_title or "").strip().strip('"').strip(
-                            "'"
-                        ) or filename
-                    except Exception:  # pylint: disable=broad-exception-caught
-                        img_title = filename
-
-                    content += (
-                        f"\n\n[Image: {img_title}]\n"
-                        f'The image titled "{img_title}" shows the following: {img_desc}'
-                    )
-
-                else:
-                    logger.info(f"Skipped (Unsupported Type): {url}")
-
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error(f"File Processing Failed: {e}")
-
-        # Audio transcripts are synced back to Postgres because audio files are
-        # not directly re-readable as text. Other file types can be re-extracted.
-        if audio_changed and state.get("note_id"):
-            from app.workflows.ingestion import ingestion_workflow as _default_wf
-
-            _wf = state.get("workflow") or _default_wf
-            logger.info(
-                f"Syncing audio transcript to Postgres for Note {state['note_id']}..."
+        attachments = [
+            {"emoji": emoji, "filename": filename, "url": url, "lower_url": url.lower()}
+            for emoji, filename, url in re.findall(
+                r"\[(📎|🎤)\s*(.*?)\]\((https?://[^)]+|/(?:files|uploads)/[^)]+)\)",
+                content,
             )
-            await _wf._update_note_content_postgres(state["note_id"], content)
+        ]
+
+        video_exts = (".mp4", ".mov", ".webm", ".mkv", ".avi")
+        audio_exts = (".m4a", ".mp3", ".wav", ".ogg")
+        image_exts = (".jpg", ".jpeg", ".png", ".webp")
+        spreadsheet_exts = (".xlsx", ".xls", ".csv", ".tsv")
+
+        def _append(section: str) -> None:
+            nonlocal content, content_changed
+            content += section
+            content_changed = True
+
+        async def _run_phase(
+            phase_name: str,
+            model_name: str | None,
+            phase_attachments: list[dict[str, str]],
+            handler,
+        ) -> None:
+            if not phase_attachments:
+                return
+            await _set_status(phase_name, model_name)
+            for item in phase_attachments:
+                filename = item["filename"]
+                url = item["url"]
+                logger.info(f"[{phase_name}] Processing File: {filename} ({url})")
+                try:
+                    section = await handler(item)
+                    if section:
+                        _append(section)
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    logger.error(f"[{phase_name}] File Processing Failed: {e}")
+                    media_errors.append(f"{filename}: {e}")
+
+        async def _handle_pdf(item: dict[str, str]) -> str:
+            filename = item["filename"]
+            logger.info("Detected PDF. Extracting text with Florence visual pass...")
+            loop = asyncio.get_running_loop()
+
+            def _progress(stage: str, model: str | None = None) -> None:
+                future = asyncio.run_coroutine_threadsafe(
+                    _set_status(stage, model), loop
+                )
+                future.result(timeout=30)
+
+            pdf_text = await asyncio.to_thread(
+                multimedia_service.extract_text_from_pdf, item["url"], _progress
+            )
+            snippet = pdf_text.replace("\n", " ")
+            logger.info(f'PDF Result ({len(pdf_text)} chars): "{snippet[:100]}"')
+            return f"\n\n[PDF Extraction ({filename})]: {pdf_text}"
+
+        async def _handle_image(item: dict[str, str]) -> str:
+            filename = item["filename"]
+            logger.info("Detected Image. Describing with Florence...")
+            img_desc = await asyncio.to_thread(
+                multimedia_service.describe_image, item["url"]
+            )
+            logger.info(f'Image Description: "{img_desc}"')
+
+            # Generate a short title so the image becomes a named entity.
+            img_title_prompt = (
+                "Given this image description, provide a concise, specific title "
+                "that would serve as a unique entity name.\n\n"
+                f"Description: {img_desc}\n\n"
+                "Return ONLY the title text, nothing else."
+            )
+            try:
+                img_title = await llm_service.ingestion_generate(
+                    img_title_prompt,
+                    temperature=0.0,
+                )
+                img_title = (img_title or "").strip().strip('"').strip("'") or filename
+            except Exception:  # pylint: disable=broad-exception-caught
+                img_title = filename
+
+            return (
+                f"\n\n[Image: {img_title}]\n"
+                f'The image titled "{img_title}" shows the following: {img_desc}'
+            )
+
+        async def _handle_docx(item: dict[str, str]) -> str:
+            filename = item["filename"]
+            logger.info("Detected Word document. Extracting text...")
+            doc_text = await asyncio.to_thread(
+                multimedia_service.extract_text_from_docx, item["url"]
+            )
+            snippet = doc_text.replace("\n", " ")
+            logger.info(f'Word Result ({len(doc_text)} chars): "{snippet[:100]}"')
+            return f"\n\n[Word Extraction ({filename})]: {doc_text}"
+
+        async def _handle_spreadsheet(item: dict[str, str]) -> str:
+            filename = item["filename"]
+            logger.info("Detected spreadsheet. Extracting text...")
+            sheet_text = await asyncio.to_thread(
+                multimedia_service.extract_text_from_spreadsheet, item["url"]
+            )
+            snippet = sheet_text.replace("\n", " ")
+            logger.info(
+                f'Spreadsheet Result ({len(sheet_text)} chars): "{snippet[:100]}"'
+            )
+            return f"\n\n[Spreadsheet Extraction ({filename})]: {sheet_text}"
+
+        async def _handle_audio(item: dict[str, str]) -> str:
+            filename = item["filename"]
+            logger.info("Detected Audio. Transcribing with Whisper...")
+            transcription = await asyncio.to_thread(
+                multimedia_service.transcribe_audio, item["url"]
+            )
+            snippet = transcription.replace("\n", " ")
+            logger.info(f'Audio Result ({len(transcription)} chars): "{snippet[:100]}"')
+            return f"\n\n[Audio Transcript ({filename})]: {transcription}"
+
+        async def _handle_video_audio(item: dict[str, str]) -> str:
+            filename = item["filename"]
+            logger.info("Detected Video. Transcribing audio with Whisper...")
+            transcription = await asyncio.to_thread(
+                multimedia_service.transcribe_video_audio, item["url"]
+            )
+            if not transcription:
+                return ""
+            snippet = transcription.replace("\n", " ")
+            logger.info(
+                f'Video Audio Result ({len(transcription)} chars): "{snippet[:100]}"'
+            )
+            return f"\n\n[Video Audio Transcript ({filename})]:\n\n{transcription}"
+
+        async def _handle_video_visual(item: dict[str, str]) -> str:
+            filename = item["filename"]
+            logger.info("Detected Video. Running Marlin visual analysis...")
+            visual_text = await asyncio.to_thread(
+                multimedia_service.describe_video_visual, item["url"]
+            )
+            if not visual_text:
+                return ""
+            snippet = visual_text.replace("\n", " ")
+            logger.info(f'Video Visual Result: "{snippet[:100]}"')
+            return f"\n\n[Video Visual Analysis ({filename})]:\n\n{visual_text}"
+
+        pdfs = [item for item in attachments if item["lower_url"].endswith(".pdf")]
+        images = [
+            item for item in attachments if item["lower_url"].endswith(image_exts)
+        ]
+        docx_files = [
+            item for item in attachments if item["lower_url"].endswith(".docx")
+        ]
+        spreadsheets = [
+            item for item in attachments if item["lower_url"].endswith(spreadsheet_exts)
+        ]
+        audio_files = [
+            item
+            for item in attachments
+            if item["lower_url"].endswith(audio_exts) or item["emoji"] == "🎤"
+        ]
+        videos = [
+            item
+            for item in attachments
+            if item["emoji"] == "📎" and item["lower_url"].endswith(video_exts)
+        ]
+
+        # Phase 1: finish all Florence-backed work, then release Florence.
+        await _run_phase("Reading PDF pages and images", "Florence-2", pdfs, _handle_pdf)
+        await _run_phase("Describing images", "Florence-2", images, _handle_image)
+        if pdfs or images:
+            await _set_status("Unloading image model", "Florence-2")
+            await asyncio.to_thread(multimedia_service.unload_local_models, "florence")
+
+        # Phase 2: lightweight document extraction that does not hold ML models.
+        await _run_phase("Extracting documents", None, docx_files, _handle_docx)
+        await _run_phase("Extracting spreadsheets", None, spreadsheets, _handle_spreadsheet)
+
+        # Phase 3: finish all Whisper work, then release Whisper.
+        await _run_phase("Transcribing audio", "Whisper", audio_files, _handle_audio)
+        await _run_phase("Transcribing video audio", "Whisper", videos, _handle_video_audio)
+        if audio_files or videos:
+            await _set_status("Unloading speech model", "Whisper")
+            await asyncio.to_thread(multimedia_service.unload_local_models, "whisper")
+
+        # Phase 4: run Marlin only after local-models no longer holds Whisper.
+        await _run_phase("Analyzing video visuals", "Marlin", videos, _handle_video_visual)
+        if videos:
+            await _set_status("Unloading video model", "Marlin")
+            await asyncio.to_thread(multimedia_service.unload_marlin)
+
+        supported_ids = {
+            id(item)
+            for item in pdfs + images + docx_files + spreadsheets + audio_files + videos
+        }
+        for item in attachments:
+            if id(item) not in supported_ids:
+                logger.info(f"Skipped (Unsupported Type): {item['url']}")
+
+        # Sync enriched content back to Postgres so notes show transcripts/extractions.
+        if media_errors:
+            raise RuntimeError(
+                "Multimedia processing failed for: " + "; ".join(media_errors)
+            )
+
+        if content_changed and content.strip() != original_content.strip():
+            if state.get("note_id"):
+                logger.info(
+                    f"Syncing processed multimedia content to Postgres for Note {state['note_id']}..."
+                )
+                await _set_status("Saving extracted attachment text")
+                await _wf._update_note_content_postgres(state["note_id"], content)
 
     t_end = time.perf_counter()
     logger.info(f"Multimedia processing took: {t_end - t_start:.4f}s")
@@ -210,6 +298,16 @@ async def extraction_node(
     state: IngestionState,
 ):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """LangGraph node: run structured LLM extraction to produce an Extraction object."""
+    from app.workflows.ingestion import ingestion_workflow as _default_wf
+
+    _wf = state.get("workflow") or _default_wf
+    if state.get("note_id"):
+        await _wf._update_note_processing_status(
+            state["note_id"],
+            "Extracting knowledge graph",
+            getattr(llm_service, "ingestion_model", None) or "Gemma4",
+        )
+
     logs = state["logs"]
     logs.append(
         f"[{datetime.now().strftime('%H:%M:%S')}] EXTRACT: Running Knowledge Architect ({llm_service.models_path})..."
@@ -518,6 +616,13 @@ async def storage_node(state: IngestionState):
     """LangGraph node: persist the validated extraction to the graph and vector stores."""
     if state.get("errors") or not state.get("extraction"):
         return {"errors": state.get("errors") or ["Missing extraction data"]}
+    from app.workflows.ingestion import ingestion_workflow as _default_wf
+
+    _wf = state.get("workflow") or _default_wf
+    if state.get("note_id"):
+        await _wf._update_note_processing_status(
+            state["note_id"], "Writing graph and note metadata", None
+        )
 
     logs = state["logs"]
     logs.append(
@@ -531,9 +636,6 @@ async def storage_node(state: IngestionState):
     created_at = state.get("input").created_at or datetime.now().isoformat()
     custom_title = state.get("input").title  # May be None
 
-    from app.workflows.ingestion import ingestion_workflow as _default_wf
-
-    _wf = state.get("workflow") or _default_wf
     try:
         # 1. Write to Kuzu (The Mind)
         title = await asyncio.to_thread(
@@ -562,6 +664,13 @@ async def summarization_node(state: IngestionState):
     """LangGraph node: update per-node context summaries and mark ingestion complete."""
     if state.get("errors") or not state.get("extraction"):
         return {}
+    from app.workflows.ingestion import ingestion_workflow as _default_wf
+
+    _wf = state.get("workflow") or _default_wf
+    if state.get("note_id"):
+        await _wf._update_note_processing_status(
+            state["note_id"], "Indexing entity contexts", "Embeddings"
+        )
     logs = state["logs"]
     logs.append(
         f"[{datetime.now().strftime('%H:%M:%S')}] INDEX_CONTEXTS: Updating Node Contexts..."
@@ -570,9 +679,6 @@ async def summarization_node(state: IngestionState):
 
     t_start = time.perf_counter()
     logger.info("[Agent] Updating Node Context Indexes (Delta Updates)...")
-    from app.workflows.ingestion import ingestion_workflow as _default_wf
-
-    _wf = state.get("workflow") or _default_wf
     await _wf._update_neighborhoods(
         state["extraction"].nodes,
         state["content"],

@@ -2,6 +2,7 @@
 
 # pylint: disable=wrong-import-order
 import time
+from collections.abc import Callable
 
 from app.core.database import AsyncSessionLocal
 from app.core.log import get_logger
@@ -27,7 +28,11 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
     def __init__(self, retrieval: RetrievalService | None = None) -> None:
         self._retrieval = retrieval or retrieval_service
 
-    async def chat(self, user_query: str) -> dict:
+    async def chat(
+        self,
+        user_query: str,
+        progress_callback: Callable[[str, str | None], None] | None = None,
+    ) -> dict:
         """
         Research-style retrieval loop:
 
@@ -39,13 +44,23 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
         start_time = time.perf_counter()
         logger.info(f"\n[Chat] Started processing query: '{user_query}'")
 
+        def _progress(stage: str, model: str | None = None) -> None:
+            if progress_callback:
+                progress_callback(stage, model)
+
         # ── Research loop retrieval ──────────────────────────────────────────
         t0 = time.perf_counter()
+        _progress("Planning retrieval", "Gemma4")
         final_answer, all_docs, thinking = (
             await self._retrieval.retrieve_with_self_correction(
-                user_query, top_k=50, max_hops=10, filter_docs=False
+                user_query,
+                top_k=50,
+                max_hops=10,
+                filter_docs=False,
+                progress_callback=progress_callback,
             )
         )
+        _progress("Selecting best evidence")
         logger.info(
             f"[Chat] Research loop retrieval: {len(all_docs)} docs accumulated "
             f"in {time.perf_counter() - t0:.2f}s"
@@ -66,6 +81,7 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
             return deduped
 
         # Deduplicate docs
+        _progress("Deduplicating retrieved context")
         unique_docs: list[dict] = _dedupe_docs(all_docs)
 
         # Precision guard: the answer is already synthesised inside the pipeline.
@@ -122,6 +138,7 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
 
         # Append references
         references = await self._extract_references(unique_docs)
+        _progress("Formatting answer")
         if references:
             answer += "\n\n### References\n" + "\n".join(references)
 

@@ -66,11 +66,13 @@ function injectEntityLinks(text: string, entities: ScannedEntity[]): string {
         return result + plain.slice(last);
     }
 
-    // Split on existing [[name|id]] markers (backward compat) — never double-process them
-    const parts = text.split(/(\[\[[^\]]*\]\])/);
+    // Split on existing links/markers so attachment links never get nested
+    // entity markdown injected into their label or URL.
+    const parts = text.split(/(\[[^\]]+\]\([^)]+\)|\[\[[^\]]*\]\])/);
     return parts
         .map((part, i) => {
             if (i % 2 === 1) {
+                if (/^\[[^\]]+\]\([^)]+\)$/.test(part)) return part;
                 const m = part.match(/\[\[([^\]|]+)\|([^\]]+)\]\]/);
                 return m ? `[${m[1]}](entity://${m[2]})` : part;
             }
@@ -197,6 +199,33 @@ function SegmentDivider({
     );
 }
 
+/** Extract display text from react-markdown link children (handles nested nodes). */
+function flattenLinkText(children: React.ReactNode): string {
+    if (children == null) return "";
+    if (typeof children === "string" || typeof children === "number") {
+        return String(children);
+    }
+    if (Array.isArray(children)) {
+        return children.map(flattenLinkText).join("");
+    }
+    if (typeof children === "object" && "props" in children) {
+        return flattenLinkText(
+            (children as React.ReactElement<{ children?: React.ReactNode }>).props
+                .children,
+        );
+    }
+    return "";
+}
+
+/** True when href points at an uploaded attachment served via the file proxy or RustFS. */
+function isAttachmentHref(href: string): boolean {
+    return (
+        /\/files\//.test(href) ||
+        /\/uploads\//.test(href) ||
+        /rustfs:\d+/i.test(href)
+    );
+}
+
 // ── Link renderer ─────────────────────────────────────────────────────────────
 
 function makeLinkComponent(
@@ -208,7 +237,15 @@ function makeLinkComponent(
         href,
         ...props
     }: React.ComponentPropsWithoutRef<"a"> & { node?: unknown }) {
-        const text = children?.toString() || "";
+        const text = flattenLinkText(children).trim();
+        const resolvedUrl = href ? resolveFileUrl(href) : "";
+        const isAttachment =
+            Boolean(href) &&
+            (text.startsWith("📎") || text.startsWith("🎤") || isAttachmentHref(href!));
+        const filename =
+            text.replace(/^[📎🎤]\s*/, "").trim() ||
+            (href ? decodeURIComponent(href.split("/").pop() ?? "file") : "file");
+
         // Entity mention pseudo-link: entity://node_id
         if (href?.startsWith("entity://")) {
             const nodeId = href.slice("entity://".length);
@@ -224,10 +261,8 @@ function makeLinkComponent(
             );
         }
         // Inline image/video rendering for 📎 file attachments
-        if (href && text.startsWith("📎")) {
-            const filename = text.replace(/^📎\s*/, "");
-            const resolvedUrl = resolveFileUrl(href);
-            if (isImageUrl(href)) {
+        if (href && isAttachment) {
+            if (isImageUrl(href) || isImageUrl(resolvedUrl)) {
                 return (
                     <span className="block my-4 not-prose">
                         <img
@@ -240,7 +275,7 @@ function makeLinkComponent(
                     </span>
                 );
             }
-            if (isVideoUrl(href)) {
+            if (isVideoUrl(href) || isVideoUrl(resolvedUrl)) {
                 return (
                     <span className="block my-4 not-prose">
                         <video
@@ -253,15 +288,13 @@ function makeLinkComponent(
                 );
             }
         }
-        if (href && (text.startsWith("📎") || text.startsWith("🎤"))) {
-            const filename = text.replace(/^[📎🎤]\s*/, "");
-            const resolvedUrl = resolveFileUrl(href);
+        if (href && isAttachment) {
             return (
                 <button
                     onClick={() => onFileClick(resolvedUrl, filename)}
                     className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20 transition-all text-sm no-underline"
                 >
-                    {text}
+                    {text || `📎 ${filename}`}
                 </button>
             );
         }
@@ -302,11 +335,7 @@ export function SegmentedNoteContent({
         return () => { cancelled = true; };
     }, [content, kb, onEntityClick]);
 
-    const processed = useMemo(() => {
-        return injectEntityLinks(content || "", scannedEntities);
-    }, [content, scannedEntities]);
-
-    const segments = parseSegments(processed || "*Empty note*");
+    const segments = useMemo(() => parseSegments(content || "*Empty note*"), [content]);
     const LinkComponent = makeLinkComponent(onFileClick, onEntityClick);
 
     return (
@@ -324,7 +353,10 @@ export function SegmentedNoteContent({
                         components={{ a: LinkComponent }}
                         urlTransform={urlTransform}
                     >
-                        {seg.content || (idx === 0 && !seg.content ? "*Empty note*" : "")}
+                        {injectEntityLinks(
+                            seg.content || (idx === 0 && !seg.content ? "*Empty note*" : ""),
+                            scannedEntities,
+                        )}
                     </ReactMarkdown>
                 </React.Fragment>
             ))}

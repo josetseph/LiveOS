@@ -20,6 +20,8 @@ export interface Message {
 interface ChatContextValue {
     messages: Message[];
     isLoading: boolean;
+    loadingStage: string | null;
+    loadingModel: string | null;
     sendMessage: (text: string, kb: string) => void;
     clearMessages: () => void;
 }
@@ -27,6 +29,8 @@ interface ChatContextValue {
 const ChatContext = createContext<ChatContextValue>({
     messages: [],
     isLoading: false,
+    loadingStage: null,
+    loadingModel: null,
     sendMessage: () => { },
     clearMessages: () => { },
 });
@@ -34,6 +38,8 @@ const ChatContext = createContext<ChatContextValue>({
 export function ChatProvider({ children }: { children: ReactNode }) {
     const [messages, setMessages] = useState<Message[]>([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [loadingStage, setLoadingStage] = useState<string | null>(null);
+    const [loadingModel, setLoadingModel] = useState<string | null>(null);
 
     const sendMessage = useCallback((text: string, kb: string) => {
         if (!text.trim() || isLoading) return;
@@ -47,10 +53,25 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
         setMessages((prev) => [...prev, userMessage]);
         setIsLoading(true);
+        setLoadingStage("Starting chat request");
+        setLoadingModel(null);
+
+        const requestId =
+            typeof crypto !== "undefined" && "randomUUID" in crypto
+                ? crypto.randomUUID()
+                : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const interval = window.setInterval(() => {
+            api.getChatStatus(requestId)
+                .then((status) => {
+                    setLoadingStage(status.stage);
+                    setLoadingModel(status.model ?? null);
+                })
+                .catch(() => { });
+        }, 1000);
 
         // Fire-and-forget — runs even if the chat page is not mounted.
         api
-            .chat(text, kb)
+            .chat(text, kb, requestId)
             .then((response) => {
                 const assistantMessage: Message = {
                     id: (Date.now() + 1).toString(),
@@ -71,7 +92,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 setMessages((prev) => [...prev, errorMessage]);
             })
             .finally(() => {
+                window.clearInterval(interval);
                 setIsLoading(false);
+                setLoadingStage(null);
+                setLoadingModel(null);
             });
     }, [isLoading]);
 
@@ -80,7 +104,16 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }, []);
 
     return (
-        <ChatContext.Provider value={{ messages, isLoading, sendMessage, clearMessages }}>
+        <ChatContext.Provider
+            value={{
+                messages,
+                isLoading,
+                loadingStage,
+                loadingModel,
+                sendMessage,
+                clearMessages,
+            }}
+        >
             {children}
         </ChatContext.Provider>
     );

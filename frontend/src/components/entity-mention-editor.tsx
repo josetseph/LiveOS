@@ -333,16 +333,14 @@ const EntityMentionEditor = forwardRef<
           background-color: rgba(96, 165, 250, 0.25);
           color: #93c5fd;
           border-radius: 3px;
-          padding: 0 2px;
-          border-bottom: 1px solid rgba(147, 197, 253, 0.5);
+          box-shadow: inset 0 -1px rgba(147, 197, 253, 0.5);
           cursor: pointer;
         }
         .entity-scanned {
           background-color: rgba(139, 92, 246, 0.15);
           color: #c4b5fd;
           border-radius: 3px;
-          padding: 0 2px;
-          border-bottom: 1px dashed rgba(196, 181, 253, 0.4);
+          box-shadow: inset 0 -1px rgba(196, 181, 253, 0.4);
           cursor: pointer;
         }
       `}</style>
@@ -358,6 +356,8 @@ const EntityMentionEditor = forwardRef<
                     fontSize: "inherit",
                     lineHeight: "inherit",
                     fontFamily: "inherit",
+                    whiteSpace: "pre-wrap",
+                    overflowWrap: "break-word",
                     wordBreak: "break-word",
                     // Text is rendered here; textarea text is transparent
                 }}
@@ -381,6 +381,8 @@ const EntityMentionEditor = forwardRef<
                     lineHeight: "inherit",
                     fontFamily: "inherit",
                     padding: "0",
+                    whiteSpace: "pre-wrap",
+                    overflowWrap: "break-word",
                     wordBreak: "break-word",
                 }}
                 spellCheck={false}

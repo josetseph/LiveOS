@@ -143,6 +143,10 @@ class Settings(BaseSettings):
     MODEL_WHISPER_LOCAL: str = "whisper-large-v3-turbo"
     MODEL_MARLIN_HF: str = "NemoStation/Marlin-2B"
     MODEL_MARLIN_LOCAL: str = "marlin-2b"
+    LOCAL_MODELS_SERVICE_URL: str | None = "http://local-models:8091"
+    LOCAL_MODELS_SERVICE_TIMEOUT_SECONDS: float = 3600
+    MARLIN_SERVICE_URL: str | None = "http://marlin:8090"
+    MARLIN_SERVICE_TIMEOUT_SECONDS: float = 3600
     # MODEL_RERANKER_LOCAL: str = "jina-reranker-v2-base-multilingual"
     MODEL_RERANKER_LOCAL: str = "qwen3-reranker-0.6b"
 
@@ -197,11 +201,13 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "DEBUG"  # "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
 
     # ── Ingestion Concurrency ─────────────────────────────────────────────────
-    # Maximum concurrent LLM calls inside the ingestion agent.
-    # Semaphore(1) was the original Gemini rate-limit guard; for local providers
-    # (Ollama / LM Studio / OpenAI) a higher value enables real parallelism.
-    # Change via .env: INGESTION_AGENT_CONCURRENCY=4
+    # Legacy per-agent concurrency knob. Keep low for local CPU setups.
     INGESTION_AGENT_CONCURRENCY: int = 2  # override to >1 for non-Gemini providers
+    # Full-note ingestion pipelines are FIFO by default on local CPU setups:
+    # multimedia -> LLM extraction -> graph writes -> indexing -> next note.
+    INGESTION_PIPELINE_CONCURRENCY: int = 1
+    # Heavy local model jobs should stay serialized on CPU/Docker Desktop.
+    MULTIMEDIA_CONCURRENCY: int = 1
 
     # ── Embedding Instructions ────────────────────────────────────────────────
     # When True, uses LLM to generate query-specific embedding instructions for

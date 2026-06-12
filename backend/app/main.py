@@ -293,6 +293,10 @@ class ChatInput(BaseModel):
     """Request body for the chat endpoint."""
 
     query: str
+    request_id: str | None = None
+
+
+_chat_status: dict[str, dict[str, str | None]] = {}
 
 
 class LLMSettings(BaseModel):
@@ -377,7 +381,29 @@ async def chat(body: ChatInput, kb: KBContext = Depends(get_kb)):
     """
     Chat with your Brain: Vector Search -> Rerank -> Synthesis.
     """
-    return await kb.get_chat_workflow().chat(body.query)
+    request_id = body.request_id or str(uuid.uuid4())
+
+    def _progress(stage: str, model: str | None = None) -> None:
+        _chat_status[request_id] = {"stage": stage, "model": model}
+
+    _progress("Starting chat request")
+    try:
+        result = await kb.get_chat_workflow().chat(body.query, progress_callback=_progress)
+        _progress("Complete")
+        result["request_id"] = request_id
+        return result
+    except Exception:
+        _progress("Failed")
+        raise
+
+
+@app.get("/api/v1/chat/status/{request_id}")
+async def get_chat_status(request_id: str):
+    """Return current progress for a non-streaming chat request."""
+    return {
+        "request_id": request_id,
+        **_chat_status.get(request_id, {"stage": "Waiting", "model": None}),
+    }
 
 
 @app.get("/api/v1/graph/summary")
@@ -570,8 +596,8 @@ async def ingest_existing_note(
 ):
     """
     Trigger (or re-trigger) ingestion for an existing note.
-    Always force-reingests — resets processed=False so the pipeline runs regardless
-    of prior ingestion status.
+    Always force-reingests — resets processed/failed flags so the pipeline runs
+    regardless of prior ingestion status.
     """
     result = await db.execute(select(Note).where(Note.id == note_id))
     note = result.scalar_one_or_none()
@@ -579,8 +605,11 @@ async def ingest_existing_note(
     if not note:
         return {"error": "Note not found"}, 404
 
-    # Reset processed flag so the pipeline treats this as a fresh ingestion.
+    # Reset flags so the pipeline treats this as a fresh ingestion.
     note.processed = False
+    note.failed = False
+    note.processing_stage = "Queued for ingestion"
+    note.processing_model = None
     await db.commit()
 
     note_data = NoteInput(
@@ -618,7 +647,13 @@ async def ingest_note(
     )
 
     new_note = Note(
-        id=note_id, content=note_data.content, created_at=c_at, processed=False
+        id=note_id,
+        content=note_data.content,
+        created_at=c_at,
+        processed=False,
+        processing_stage=(
+            "Queued for ingestion" if not note_data.skip_ingestion else "Saved"
+        ),
     )
     db.add(new_note)
     await db.commit()
@@ -697,10 +732,18 @@ async def get_note_ingestion_status(note_id: str, db: AsyncSession = Depends(get
       - processed: true once ingestion completes successfully
       - failed: true if the ingestion pipeline encountered a permanent error
       - status: "completed" | "failed" | "processing"
+      - processing_stage: user-facing current stage
+      - processing_model: model/service currently in use, if any
     """
     try:
         result = await db.execute(
-            select(Note.id, Note.processed, Note.failed).where(Note.id == note_id)
+            select(
+                Note.id,
+                Note.processed,
+                Note.failed,
+                Note.processing_stage,
+                Note.processing_model,
+            ).where(Note.id == note_id)
         )
         row = result.one_or_none()
     except TimeoutError as exc:
@@ -711,7 +754,7 @@ async def get_note_ingestion_status(note_id: str, db: AsyncSession = Depends(get
     if row is None:
         return {"error": "Note not found"}, 404
 
-    note_id, processed, failed = row
+    note_id, processed, failed, processing_stage, processing_model = row
     if processed:
         status = "completed"
     elif failed:
@@ -719,7 +762,14 @@ async def get_note_ingestion_status(note_id: str, db: AsyncSession = Depends(get
     else:
         status = "processing"
 
-    return {"id": note_id, "processed": processed, "failed": failed, "status": status}
+    return {
+        "id": note_id,
+        "processed": processed,
+        "failed": failed,
+        "status": status,
+        "processing_stage": processing_stage,
+        "processing_model": processing_model,
+    }
 
 
 @app.put("/api/v1/notes/{note_id}")
@@ -772,7 +822,9 @@ async def delete_note(
     # 0. Fetch the note content before deletion to extract attached file keys.
     note_row = await db.execute(select(Note).where(Note.id == note_id))
     note_obj = note_row.scalar_one_or_none()
-    _file_url_re = _re.compile(r"\[(?:📎|🎤)[^\]]*\]\((https?://[^)]+)\)")
+    _file_url_re = _re.compile(
+        r"\[(?:📎|🎤)[^\]]*\]\((https?://[^)]+|/(?:files|uploads)/[^)]+)\)"
+    )
     attached_file_keys: list[str] = []
     if note_obj and note_obj.content:
         for _m in _file_url_re.finditer(note_obj.content):

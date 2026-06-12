@@ -17,8 +17,6 @@ import {
   Database,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { api } from "@/lib/api";
 import { cn, resolveFileUrl, isImageUrl, isVideoUrl } from "@/lib/utils";
 import { ShaderBackground } from "@/components/shader-background";
@@ -32,6 +30,25 @@ import type { Note, FilePreview } from "@/lib/types";
 
 
 type ProcessedFilter = "all" | "ingested" | "ingesting" | "saved" | "failed";
+
+function getProcessingLabel(note: Pick<Note, "processing_stage" | "processing_model">) {
+  const stage = note.processing_stage || "Processing";
+  return note.processing_model ? `${stage} (${note.processing_model})` : stage;
+}
+
+function isActiveProcessingNote(note: Note) {
+  const terminalStages = new Set([
+    "Saved",
+    "Ingestion complete",
+    "Ingestion failed",
+  ]);
+  return Boolean(
+    !note.processed &&
+    !note.failed &&
+    note.processing_stage &&
+    !terminalStages.has(note.processing_stage),
+  );
+}
 
 export default function NotesPage() {
   const { currentKB, currentKBName, isHydrated } = useKB();
@@ -70,13 +87,54 @@ export default function NotesPage() {
   const contentBeforeEditRef = useRef<string>("");
   const searchTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const fetchNotesRequestRef = useRef(0);
+  const selectedNoteRef = useRef<Note | null>(null);
   const editorRef = useRef<EntityMentionEditorHandle>(null);
-  // Keep textareaRef as an alias so legacy code (file attach, recording) that
-  // directly reads selectionStart still compiles — the editor exposes the raw
-  // textarea element via editorRef.current.textarea.
-  const textareaRef = { get current() { return editorRef.current?.textarea ?? null; } };
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const selectedNoteId = selectedNote?.id;
+  const selectedNoteProcessed = selectedNote?.processed;
+
+  useEffect(() => {
+    selectedNoteRef.current = selectedNote;
+  }, [selectedNote]);
+
+  const syncSelectedNoteFromList = useCallback((data: Note[]) => {
+    setSelectedNote((prev) => {
+      if (!prev) return null;
+      const fresh = data.find((note) => note.id === prev.id);
+      if (!fresh) return prev;
+
+      const hasUnsavedEdits = prev.content !== contentBeforeEditRef.current;
+      if (hasUnsavedEdits) {
+        return { ...fresh, content: prev.content };
+      }
+
+      // Ignore stale list responses that predate the last successful save.
+      if (fresh.content !== contentBeforeEditRef.current) {
+        return { ...fresh, content: prev.content };
+      }
+
+      contentBeforeEditRef.current = fresh.content;
+      return fresh;
+    });
+  }, []);
+
+  const patchLocalNote = useCallback((note: Note) => {
+    setNotes((prev) => prev.map((n) => (n.id === note.id ? note : n)));
+    setSelectedNote((prev) => (prev?.id === note.id ? note : prev));
+  }, []);
+
+  const refreshSelectedNote = useCallback(async (noteId: string) => {
+    try {
+      const fresh = await api.getNote(noteId);
+      if (!fresh) return;
+      contentBeforeEditRef.current = fresh.content;
+      patchLocalNote(fresh);
+    } catch (error) {
+      console.error("Error refreshing note:", error);
+    }
+  }, [patchLocalNote]);
 
   // Fetch notes once KB context is hydrated from localStorage, and re-fetch on KB switch
   useEffect(() => {
@@ -84,6 +142,46 @@ export default function NotesPage() {
     fetchNotes(undefined, processedFilter);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentKB, isHydrated]);
+
+  // Refetch the open note when returning to this page/tab so we never show stale content.
+  useEffect(() => {
+    if (!isHydrated) return;
+
+    const restoreSelection = () => {
+      const noteId = selectedNoteRef.current?.id ?? sessionStorage.getItem("liveos:last-note-id");
+      if (noteId) {
+        void refreshSelectedNote(noteId);
+      }
+    };
+
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        void fetchNotes(searchQuery, processedFilter);
+        restoreSelection();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        restoreSelection();
+      }
+    };
+
+    restoreSelection();
+    window.addEventListener("pageshow", handlePageShow);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("pageshow", handlePageShow);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHydrated, currentKB]);
+
+  // Ingested notes show rendered attachments (video player, PDF sections) by default.
+  useEffect(() => {
+    if (!selectedNoteId) return;
+    setIsPreviewMode(Boolean(selectedNoteProcessed));
+  }, [selectedNoteId, selectedNoteProcessed]);
 
   // Debounced search and filter — skip until localStorage is hydrated so we
   // never fetch with the pre-hydration default KB slug.
@@ -103,6 +201,8 @@ export default function NotesPage() {
         clearTimeout(searchTimeoutRef.current);
       }
     };
+    // fetchNotes reads currentKB; KB changes are handled by the dedicated effect above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery, processedFilter, isHydrated]);
 
   const handleSaveNote = useCallback(async (note: Note) => {
@@ -111,15 +211,16 @@ export default function NotesPage() {
 
     try {
       setIsSaving(true);
-      await api.updateNote(note.id, note.content);
-      contentBeforeEditRef.current = note.content;
-      // Don't refresh list on autosave to avoid interrupting typing
+      const savedNote = await api.updateNote(note.id, note.content);
+      const nextNote = savedNote ?? note;
+      contentBeforeEditRef.current = nextNote.content;
+      patchLocalNote(nextNote);
     } catch (error) {
       console.error("Error saving note:", error);
     } finally {
       setIsSaving(false);
     }
-  }, []);
+  }, [patchLocalNote]);
 
   // Auto-save: Debounced save 1.5 seconds after user stops typing
   useEffect(() => {
@@ -144,6 +245,19 @@ export default function NotesPage() {
     };
   }, [selectedNote, handleSaveNote]);
 
+  // Flush pending edits when leaving the page.
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimeoutRef.current) {
+        clearTimeout(autoSaveTimeoutRef.current);
+      }
+      const note = selectedNoteRef.current;
+      if (note && note.content !== contentBeforeEditRef.current) {
+        void api.updateNote(note.id, note.content).catch(() => { });
+      }
+    };
+  }, []);
+
   // Save locally on page unload (backup)
   useEffect(() => {
     const handleBeforeUnload = () => {
@@ -160,6 +274,7 @@ export default function NotesPage() {
   }, [selectedNote, handleSaveNote]);
 
   const fetchNotes = async (search?: string, filter?: ProcessedFilter) => {
+    const requestId = ++fetchNotesRequestRef.current;
     try {
       setIsLoading(true);
       let processed: boolean | undefined;
@@ -178,24 +293,54 @@ export default function NotesPage() {
       }
       // "all" → no filters
       const data = await api.getNotes(search, processed, failed, currentKB);
+      if (requestId !== fetchNotesRequestRef.current) return;
       setNotes(data);
+      syncSelectedNoteFromList(data);
+      setIngestingNoteIds((prev) => {
+        const next = new Set(prev);
+        data.filter(isActiveProcessingNote).forEach((note: Note) => next.add(note.id));
+        return next;
+      });
     } catch (error) {
       console.error("Error fetching notes:", error);
     } finally {
-      setIsLoading(false);
+      if (requestId === fetchNotesRequestRef.current) {
+        setIsLoading(false);
+      }
     }
   };
 
-  const handleNoteSelect = (note: Note) => {
+  const handleNoteSelect = async (note: Note) => {
     // Save previous note if it has changes
     if (selectedNote && contentBeforeEditRef.current !== selectedNote.content) {
-      handleSaveNote(selectedNote);
+      await handleSaveNote(selectedNote);
     }
 
-    setSelectedNote(note);
-    // Open notes in preview mode by default
-    setIsPreviewMode(true);
-    contentBeforeEditRef.current = note.content;
+    try {
+      const fresh = await api.getNote(note.id);
+      const nextNote = fresh ?? note;
+      sessionStorage.setItem("liveos:last-note-id", nextNote.id);
+      setSelectedNote(nextNote);
+      setIsPreviewMode(true);
+      contentBeforeEditRef.current = nextNote.content;
+    } catch (error) {
+      console.error("Error loading note:", error);
+      sessionStorage.setItem("liveos:last-note-id", note.id);
+      setSelectedNote(note);
+      setIsPreviewMode(true);
+      contentBeforeEditRef.current = note.content;
+    }
+  };
+
+  const handleTogglePreviewMode = async () => {
+    if (
+      !isPreviewMode &&
+      selectedNote &&
+      selectedNote.content !== contentBeforeEditRef.current
+    ) {
+      await handleSaveNote(selectedNote);
+    }
+    setIsPreviewMode((prev) => !prev);
   };
 
   const handleCreateNote = async () => {
@@ -227,11 +372,20 @@ export default function NotesPage() {
 
     try {
       setIsSaving(true);
+      if (selectedNote.content !== contentBeforeEditRef.current) {
+        await handleSaveNote(selectedNote);
+      }
       await api.ingestNote(selectedNote.id, currentKB);
       // Track as in-flight — polling will update state when done
       setIngestingNoteIds((prev) => new Set([...prev, selectedNote.id]));
-      // Optimistically clear any previous failure flag
-      const patched = { ...selectedNote, failed: false };
+      // Optimistically clear any previous failure flag and show queue status.
+      const patched = {
+        ...selectedNote,
+        processed: false,
+        failed: false,
+        processing_stage: "Queued for ingestion",
+        processing_model: null,
+      };
       setSelectedNote(patched);
       setNotes((prev) =>
         prev.map((n) => (n.id === selectedNote.id ? patched : n)),
@@ -249,44 +403,81 @@ export default function NotesPage() {
     if (ingestingNoteIds.size === 0) return;
 
     const poll = async () => {
-      const completed: Array<{
+      const updates: Array<{
         id: string;
         processed: boolean;
         failed: boolean;
+        processing_stage?: string | null;
+        processing_model?: string | null;
       }> = [];
+      const refreshedNotes: Note[] = [];
       await Promise.all(
         Array.from(ingestingNoteIds).map(async (noteId) => {
           try {
             const status = await api.getNoteStatus(noteId);
+            updates.push({
+              id: noteId,
+              processed: status.processed,
+              failed: status.failed,
+              processing_stage: status.processing_stage,
+              processing_model: status.processing_model,
+            });
             if (status.processed || status.failed) {
-              completed.push({
-                id: noteId,
-                processed: status.processed,
-                failed: status.failed,
-              });
+              refreshedNotes.push(await api.getNote(noteId));
             }
           } catch { }
         }),
       );
-      if (completed.length === 0) return;
+      if (updates.length === 0) return;
+      const refreshedById = new Map(
+        refreshedNotes.map((note) => [note.id, note]),
+      );
       setIngestingNoteIds((prev) => {
         const next = new Set(prev);
-        completed.forEach((c) => next.delete(c.id));
+        updates
+          .filter((c) => c.processed || c.failed)
+          .forEach((c) => next.delete(c.id));
         return next;
       });
       setNotes((prev) =>
         prev.map((n) => {
-          const update = completed.find((c) => c.id === n.id);
+          const refreshed = refreshedById.get(n.id);
+          if (refreshed) return refreshed;
+          const update = updates.find((c) => c.id === n.id);
           return update
-            ? { ...n, processed: update.processed, failed: update.failed }
+            ? {
+              ...n,
+              processed: update.processed,
+              failed: update.failed,
+              processing_stage: update.processing_stage,
+              processing_model: update.processing_model,
+            }
             : n;
         }),
       );
       setSelectedNote((prev) => {
         if (!prev) return null;
-        const update = completed.find((c) => c.id === prev.id);
+        const refreshed = refreshedById.get(prev.id);
+        if (refreshed) {
+          const hasUnsavedEdits = prev.content !== contentBeforeEditRef.current;
+          if (!hasUnsavedEdits) {
+            contentBeforeEditRef.current = refreshed.content;
+            return refreshed;
+          }
+          return {
+            ...refreshed,
+            content: prev.content,
+          };
+        }
+        const update = updates.find((c) => c.id === prev.id);
         return update
-          ? { ...prev, processed: update.processed, failed: update.failed }
+          ? {
+            ...prev,
+            processed: update.processed,
+            failed: update.failed,
+            processing_stage: update.processing_stage,
+            processing_model: update.processing_model,
+          }
           : prev;
       });
     };
@@ -299,6 +490,9 @@ export default function NotesPage() {
     if (!selectedNote) return;
     const updatedNote = { ...selectedNote, content };
     setSelectedNote(updatedNote);
+    setNotes((prev) =>
+      prev.map((note) => (note.id === updatedNote.id ? updatedNote : note)),
+    );
   };
 
   const handleDeleteNote = async () => {
@@ -622,7 +816,7 @@ export default function NotesPage() {
             <div className="space-y-1 p-2">
               {/* Note list: client-side filter for "ingesting" (local state only) */}
               {(processedFilter === "ingesting"
-                ? notes.filter((n) => ingestingNoteIds.has(n.id))
+                ? notes.filter(isActiveProcessingNote)
                 : notes
               ).map((note) => (
                 <button
@@ -647,10 +841,10 @@ export default function NotesPage() {
                         className="h-2 w-2 rounded-full bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.6)]"
                         title="Ingestion failed"
                       />
-                    ) : ingestingNoteIds.has(note.id) ? (
+                    ) : isActiveProcessingNote(note) ? (
                       <div
                         className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)] animate-pulse"
-                        title="Ingesting…"
+                        title={getProcessingLabel(note)}
                       />
                     ) : (
                       <div
@@ -668,6 +862,11 @@ export default function NotesPage() {
                   <p className="mt-1 text-xs text-white/40">
                     {formatDate(note.created_at)}
                   </p>
+                  {isActiveProcessingNote(note) && (
+                    <p className="mt-1 truncate text-xs text-amber-300/80">
+                      {getProcessingLabel(note)}
+                    </p>
+                  )}
                 </button>
               ))}
             </div>
@@ -677,7 +876,7 @@ export default function NotesPage() {
         <div className="border-t border-white/10 p-3">
           <p className="text-xs text-white/40 text-center">
             {processedFilter === "ingesting"
-              ? `${ingestingNoteIds.size} ingesting`
+              ? `${notes.filter(isActiveProcessingNote).length} ingesting`
               : `${notes.length} ${notes.length === 1 ? "note" : "notes"}`}
           </p>
         </div>
@@ -716,10 +915,10 @@ export default function NotesPage() {
                           <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
                           Failed
                         </span>
-                      ) : ingestingNoteIds.has(selectedNote.id) ? (
+                      ) : isActiveProcessingNote(selectedNote) ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-400">
                           <Loader2 className="h-3 w-3 animate-spin" />
-                          Ingesting…
+                          {getProcessingLabel(selectedNote)}
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 rounded-full bg-white/8 px-2 py-0.5 text-xs font-medium text-white/40">
@@ -762,10 +961,10 @@ export default function NotesPage() {
                           <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
                           Failed
                         </span>
-                      ) : ingestingNoteIds.has(selectedNote.id) ? (
+                      ) : isActiveProcessingNote(selectedNote) ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-400">
                           <Loader2 className="h-3 w-3 animate-spin" />
-                          Ingesting…
+                          {getProcessingLabel(selectedNote)}
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 rounded-full bg-white/8 px-2 py-0.5 text-xs font-medium text-white/40">
@@ -786,14 +985,14 @@ export default function NotesPage() {
                       disabled={
                         isSaving ||
                         !selectedNote?.content.trim() ||
-                        ingestingNoteIds.has(selectedNote?.id ?? "")
+                        Boolean(selectedNote && isActiveProcessingNote(selectedNote))
                       }
                       className="flex h-9 items-center gap-2 rounded-lg bg-linear-to-r from-purple-500 to-pink-500 px-4 text-sm font-medium text-white transition-all hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      {ingestingNoteIds.has(selectedNote?.id ?? "") ? (
+                      {selectedNote && isActiveProcessingNote(selectedNote) ? (
                         <>
                           <Loader2 className="h-4 w-4 animate-spin" />
-                          Ingesting…
+                          {getProcessingLabel(selectedNote)}
                         </>
                       ) : isSaving ? (
                         <>
@@ -864,7 +1063,7 @@ export default function NotesPage() {
                   </>
                 )}
                 <button
-                  onClick={() => setIsPreviewMode(!isPreviewMode)}
+                  onClick={() => void handleTogglePreviewMode()}
                   className={cn(
                     "flex items-center gap-2 rounded-xl px-4 py-2 text-sm transition-all",
                     isPreviewMode
@@ -889,7 +1088,7 @@ export default function NotesPage() {
             {selectedNote &&
               (() => {
                 const attachmentRegex =
-                  /\[([📎🎤][^\]]+)\]\((https?:\/\/[^)]+)\)/g;
+                  /\[([📎🎤][^\]]+)\]\((https?:\/\/[^)]+|\/(?:files|uploads)\/[^)]+)\)/g;
                 const attachments: {
                   label: string;
                   url: string;
@@ -942,6 +1141,7 @@ export default function NotesPage() {
             <div className="flex-1 overflow-y-auto p-6">
               {isPreviewMode ? (
                 <SegmentedNoteContent
+                  key={`${selectedNote.id}:${selectedNote.updated_at ?? selectedNote.content.length}`}
                   content={selectedNote.content}
                   onFileClick={handleFileClick}
                   onEntityClick={handleEntityClick}
@@ -950,6 +1150,7 @@ export default function NotesPage() {
                 />
               ) : (
                 <EntityMentionEditor
+                  key={`${selectedNote.id}:${selectedNote.updated_at ?? selectedNote.content.length}`}
                   ref={editorRef}
                   value={selectedNote.content}
                   onChange={handleContentChange}

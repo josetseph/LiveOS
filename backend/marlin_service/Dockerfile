@@ -3,23 +3,21 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     curl \
     ffmpeg \
-    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
+COPY marlin_service/requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url https://download.pytorch.org/whl/cpu \
+        "torch==2.10.0+cpu" "torchvision==0.25.0+cpu" && \
     pip install -r requirements.txt
 
-# Copy application code
-COPY . .
+COPY marlin_service/app.py .
 
-EXPOSE 8000
+EXPOSE 8090
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8090"]

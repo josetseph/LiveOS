@@ -25,5 +25,7 @@ class Note(Base):  # pylint: disable=too-few-public-methods
     )
     processed = Column(Boolean, default=False)
     failed = Column(Boolean, default=False)
+    processing_stage = Column(String, nullable=True)
+    processing_model = Column(String, nullable=True)
     kb_id = Column(String, nullable=False, default="default", index=True)
     # Could add user_id later

@@ -60,29 +60,37 @@ function urlTransform(url: string): string {
 function injectEntityLinks(text: string, entities: ScannedEntity[]): string {
   if (!entities.length) return text;
   const sorted = [...entities].sort((a, b) => b.name.length - a.name.length);
-  // Collect non-overlapping ranges against the ORIGINAL text, longest-match wins
-  const ranges: { start: number; end: number; name: string; node_id: string }[] = [];
-  for (const { name, node_id } of sorted) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`\\b${escaped}\\b`, "gi");
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      const start = m.index;
-      const end = start + m[0].length;
-      if (ranges.some((r) => start < r.end && end > r.start)) continue;
-      ranges.push({ start, end, name, node_id });
+
+  function replacePlain(plain: string): string {
+    // Collect non-overlapping ranges against the ORIGINAL text, longest-match wins
+    const ranges: { start: number; end: number; name: string; node_id: string }[] = [];
+    for (const { name, node_id } of sorted) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`\\b${escaped}\\b`, "gi");
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(plain)) !== null) {
+        const start = m.index;
+        const end = start + m[0].length;
+        if (ranges.some((r) => start < r.end && end > r.start)) continue;
+        ranges.push({ start, end, name, node_id });
+      }
     }
+    // Single left-to-right substitution pass
+    ranges.sort((a, b) => a.start - b.start);
+    let result = "";
+    let last = 0;
+    for (const { start, end, name, node_id } of ranges) {
+      result += plain.slice(last, start);
+      result += `[${name}](entity://${node_id})`;
+      last = end;
+    }
+    return result + plain.slice(last);
   }
-  // Single left-to-right substitution pass
-  ranges.sort((a, b) => a.start - b.start);
-  let result = "";
-  let last = 0;
-  for (const { start, end, name, node_id } of ranges) {
-    result += text.slice(last, start);
-    result += `[${name}](entity://${node_id})`;
-    last = end;
-  }
-  return result + text.slice(last);
+
+  return text
+    .split(/(\[[^\]]+\]\([^)]+\))/)
+    .map((part, i) => (i % 2 === 1 ? part : replacePlain(part)))
+    .join("");
 }
 
 /** Prose classes shared by the two inline message renderers. */
@@ -261,7 +269,14 @@ function AssistantMessageBody({
 
 export default function ChatPage() {
   const { currentKB, currentKBName } = useKB();
-  const { messages, isLoading, sendMessage, clearMessages } = useChat();
+  const {
+    messages,
+    isLoading,
+    loadingStage,
+    loadingModel,
+    sendMessage,
+    clearMessages,
+  } = useChat();
   const [input, setInput] = useState("");
   const [previewNote, setPreviewNote] = useState<NotePreview | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
@@ -500,8 +515,15 @@ export default function ChatPage() {
                   <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-linear-to-br from-purple-500 to-pink-500">
                     <Loader2 className="h-4 w-4 animate-spin text-white" />
                   </div>
-                  <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 backdrop-blur-xl">
-                    <span className="text-white/60">Thinking...</span>
+                  <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 backdrop-blur-xl">
+                    <div className="text-sm text-white/70">
+                      {loadingStage || "Thinking..."}
+                    </div>
+                    {loadingModel && (
+                      <div className="mt-0.5 text-xs text-purple-300/80">
+                        Using {loadingModel}
+                      </div>
+                    )}
                   </div>
                 </motion.div>
               )}

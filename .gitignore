@@ -5,6 +5,12 @@
 tmp/
 .agent/
 .gemini/
+.setup-venv/
+.host-inference-venv-marlin/
+.host-inference-venv-local-models/
+.host-inference.pids
+.host-inference-logs/
+.ollama.log
 *.log
 
 # Always track Results folders (overrides *.log)
@@ -41,3 +47,4 @@ __pycache__/
 /.github/hooks
 /.github/prompts
 .github/copilot-instructions.md
+**/.DS_Store

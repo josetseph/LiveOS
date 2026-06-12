@@ -7,21 +7,23 @@ A knowledge graph and multi-hop question-answering system. Notes — including t
 ## Table of Contents
 
 1. [What It Is](#what-it-is)
-2. [Screenshots](#screenshots)
-3. [Architecture](#architecture)
-4. [Ingestion Pipeline](#ingestion-pipeline)
-5. [Retrieval Pipeline](#retrieval-pipeline)
-6. [Infrastructure](#infrastructure)
-7. [Frontend](#frontend)
-8. [LLM & Model Support](#llm--model-support)
-9. [Runtime Model Switching](#runtime-model-switching)
-10. [Benchmark Results](#benchmark-results)
-11. [Docker Deployment](#docker-deployment)
-12. [Local Setup](#local-setup)
-13. [Local Model Setup](#local-model-setup)
-14. [Environment Variables](#environment-variables)
-15. [Running the Stack](#running-the-stack)
-16. [Knowledge Bases](#knowledge-bases)
+2. [Quick Start](#quick-start)
+3. [Screenshots](#screenshots)
+4. [Architecture](#architecture)
+5. [Ingestion Pipeline](#ingestion-pipeline)
+6. [Retrieval Pipeline](#retrieval-pipeline)
+7. [Infrastructure](#infrastructure)
+8. [Frontend](#frontend)
+9. [LLM & Model Support](#llm--model-support)
+10. [Runtime Model Switching](#runtime-model-switching)
+11. [Benchmark Results](#benchmark-results)
+12. [Docker Deployment](#docker-deployment)
+13. [Uninstall / Cleanup](#uninstall--cleanup)
+14. [Local Setup](#local-setup)
+15. [Local Model Setup](#local-model-setup)
+16. [Environment Variables](#environment-variables)
+17. [Running the Stack](#running-the-stack)
+18. [Knowledge Bases](#knowledge-bases)
 
 ---
 
@@ -39,6 +41,81 @@ LiveOS is an AI-powered knowledge base. You write notes — plain text, voice re
 8. **Isolates knowledge** into multiple named knowledge bases — each with its own graph, vector store, and full-text index
 
 The system is designed to run entirely locally. All LLM inference, embedding, and reranking can run on local hardware via Ollama or LM Studio. Cloud LLM providers (Gemini, OpenAI, Anthropic, HuggingFace) are also supported and switchable via environment variables.
+
+---
+
+## Quick Start
+
+Use this path if you just want to run LiveOS on your computer.
+
+### 1. Install Requirements
+
+Install:
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- Python 3
+
+On macOS, Homebrew is recommended because the setup script can use it to install missing tools.
+
+### 2. Run Setup
+
+Open a terminal in the LiveOS folder and run the command for your computer.
+
+**macOS / Linux**
+
+```sh
+./setup.sh
+```
+
+**Windows PowerShell**
+
+```powershell
+.\setup.ps1
+```
+
+The setup script downloads the required models, starts the database/search/storage services, starts Ollama, and opens the model services.
+
+On Apple Silicon macOS, `setup.sh` automatically enables the native MPS inference services with macOS `launchd`. That means Marlin and local-models start again after login/reboot. You do not need to run a separate model command after each restart.
+
+On Windows and Linux, the setup scripts run Marlin and local-models as Docker containers. Docker handles restart behavior.
+
+### 3. Open LiveOS
+
+When setup finishes, open:
+
+[http://localhost:3700](http://localhost:3700)
+
+### Useful Commands
+
+Check whether everything is running:
+
+```sh
+docker compose ps
+```
+
+On macOS, check the native model services:
+
+```sh
+./scripts/host-inference.sh status
+```
+
+Turn off the macOS auto-start model services:
+
+```sh
+./scripts/host-inference.sh disable
+```
+
+Remove LiveOS containers and downloaded models:
+
+```sh
+./teardown.sh
+```
+
+On Windows:
+
+```powershell
+.\teardown.ps1
+```
 
 ---
 
@@ -277,7 +354,7 @@ If the active LLM exposes reasoning (e.g. `reasoning_content` from LM Studio, or
 
 ## Infrastructure
 
-All services except Kuzu (which is embedded) run as Docker containers:
+Most services run as Docker containers:
 
 ```sh
 docker compose up -d
@@ -290,9 +367,27 @@ docker compose up -d
 | Qdrant | `qdrant/qdrant:latest` | 6333 / 6334 | Vector search |
 | Typesense | `typesense/typesense:27.1` | 8108 | Full-text search (BM25) |
 | Backend | built from `./backend` | 8700 | FastAPI API server |
+| Local Models | native macOS host (default) or Docker profile `docker-models` | 8791 | Florence, Whisper, reranker, PDF visual extraction |
+| Marlin | native macOS host (default) or Docker profile `docker-models` | 8790 | Video visual understanding |
 | Frontend | built from `./frontend` | 3700 | Next.js UI |
 
 Kuzu is embedded — no container needed. The database files live at `data/kuzu/kuzu_graph`.
+Marlin runs as a separate service because it requires `transformers>=5.7`, while Florence-2 image/PDF extraction stays on the local-models service's `transformers` 4.x stack.
+
+On Apple Silicon macOS, `./setup.sh` runs Marlin and local-models **natively on the host** using MPS. The Docker backend calls them via `host.docker.internal:8790/8791`. This is much faster than CPU inference inside Docker Desktop. Setup also enables them as a per-user `launchd` service so they restart automatically after login/reboot.
+
+Manage them from the repo root with:
+
+```sh
+./scripts/host-inference.sh status
+./scripts/host-inference.sh restart
+./scripts/host-inference.sh disable
+./scripts/host-inference.sh enable
+```
+
+Use `./scripts/host-inference.sh disable` to turn off auto-start and stop the host services. Use `./scripts/host-inference.sh start` for a temporary session-only start. To fall back to Dockerized model containers instead, run `docker compose --profile docker-models up -d`.
+
+On Windows, `setup.ps1` uses the Docker `docker-models` profile by default, so the model containers restart with Docker rather than using the macOS host-inference service.
 
 ---
 
@@ -343,7 +438,7 @@ The LLM provider is set via `LLM_PROVIDER` in `backend/.env`. The same config fi
 | Anthropic | `anthropic` | Requires `ANTHROPIC_API_KEY` |
 | HuggingFace | `huggingface` | Requires `HUGGINGFACE_API_KEY` |
 
-A separate `INGESTION_LLM_MODEL` can be set to use a different (usually smaller) model for extraction vs. chat — for example, `gemma3:4b` for ingestion and `gemma4:latest` for chat.
+A separate `INGESTION_LLM_MODEL` can be set to use a different (usually smaller) model for extraction vs. chat — for example, `gemma4:e4b` for ingestion and `gemma4:latest` for chat.
 
 An optional `LLM_FALLBACK_PROVIDER` kicks in if the primary provider fails.
 
@@ -442,21 +537,106 @@ The move from Neo4j + Elasticsearch to Kuzu + Typesense cut response time from ~
 
 ## Docker Deployment
 
-This is the simplest way to run LiveOS. It starts the backend, frontend, Postgres, RustFS, Qdrant, Typesense, and the one-shot init container that runs migrations and prepares the local services.
+This is the recommended way to run LiveOS. For most users, the automated setup scripts are the only commands needed.
+
+The setup scripts start:
+
+- the LiveOS web app
+- the backend API
+- Postgres, RustFS, Qdrant, and Typesense
+- Ollama and the default local LLM/embedding models
+- local multimedia models for PDFs, images, audio, reranking, and video
 
 ### Prerequisites
 
 - Docker Desktop
-- A configured LLM provider: local Ollama/LM Studio, or a cloud provider such as Gemini, OpenAI, or Anthropic
+- Python 3
+- Internet access for the first run, because models and Docker images are downloaded
 
-### 1. Clone the repo
+The setup scripts install and use Ollama by default. You can switch to LM Studio or a cloud provider later from configuration.
+
+If Docker is not installed, install [Docker Desktop](https://www.docker.com/products/docker-desktop/) first, or let the setup script try to install it:
+
+```sh
+./setup.sh --install-docker
+```
+
+```powershell
+.\setup.ps1 -InstallDocker
+```
+
+On macOS this uses Homebrew if available. On Windows this uses `winget`. On Linux this uses Docker's official install script and may require logging out and back in before the `docker` command works without `sudo`.
+
+### Automated setup
+
+Run the script for your platform from the repository root.
+
+**macOS / Linux**
+
+```sh
+./setup.sh
+```
+
+**Windows PowerShell**
+
+```powershell
+.\setup.ps1
+```
+
+The setup script:
+
+- creates `backend/.env` if it does not exist
+- configures Docker-friendly Ollama defaults in a newly created `.env`
+- installs Ollama when possible
+- starts Ollama and pulls `gemma4:e4b` plus `qwen3-embedding:0.6b`
+- downloads Florence, Whisper, Qwen reranker, and optional Marlin models into `backend/models/`
+- starts Docker services
+- on Apple Silicon macOS, enables native MPS model services with `launchd`
+- on Windows and Linux, starts the Docker `docker-models` profile
+
+When the script finishes, open [http://localhost:3700](http://localhost:3700).
+
+### Platform Notes
+
+**Apple Silicon macOS:** `setup.sh` automatically uses native MPS inference for Marlin and local-models. This is faster than running those models inside Docker. The services auto-start after login/reboot.
+
+Manage them with:
+
+```sh
+./scripts/host-inference.sh status
+./scripts/host-inference.sh restart
+./scripts/host-inference.sh disable
+./scripts/host-inference.sh enable
+```
+
+**Windows / Linux:** setup runs Marlin and local-models inside Docker by default. Docker restart policies keep them running when Docker Desktop or Docker Engine starts.
+
+### Optional Flags
+
+Most users do not need these.
+
+```sh
+./setup.sh --install-docker --skip-ollama --skip-models --skip-compose --no-build --force-env --with-marlin
+```
+
+```powershell
+.\setup.ps1 -InstallDocker -SkipOllama -SkipModels -SkipCompose -NoBuild -ForceEnv -WithMarlin -NoDockerModels
+```
+
+`--with-marlin` / `-WithMarlin` downloads the larger optional Marlin video-visual model. If automatic Ollama installation is unavailable on your machine, install Ollama from [ollama.com/download](https://ollama.com/download), then rerun the setup script.
+
+### Manual setup
+
+Use these steps if you prefer to configure your provider and models yourself.
+
+#### 1. Clone the repo
 
 ```sh
 git clone https://github.com/josetseph/LiveOS.git
 cd LiveOS
 ```
 
-### 2. Create your environment file
+#### 2. Create your environment file
 
 ```sh
 cp backend/.env.example backend/.env
@@ -473,7 +653,7 @@ If you are using a local model server on your machine, containers cannot reach i
 | `LLM_BASE_URL` | `http://127.0.0.1:1234` | `http://host.docker.internal:1234` |
 | `EMBEDDING_BASE_URL` | `http://127.0.0.1:11434` | `http://host.docker.internal:11434` |
 
-### 3. Start everything
+#### 3. Start everything
 
 ```sh
 docker compose up -d
@@ -492,6 +672,43 @@ If you choose to expose the backend on a separate public origin instead of using
 ```env
 CORS_ORIGINS=http://localhost:3700,https://your-domain.com
 ```
+
+---
+
+## Uninstall / Cleanup
+
+Use the teardown script for your platform from the repository root.
+
+**macOS / Linux**
+
+```sh
+./teardown.sh
+```
+
+**Windows PowerShell**
+
+```powershell
+.\teardown.ps1
+```
+
+The teardown script removes the LiveOS Docker containers/networks, removes local Docker images by default, deletes `backend/models/`, and removes the Ollama models pulled by the setup script. It asks for confirmation before doing anything.
+
+Useful options:
+
+```sh
+./teardown.sh --remove-data --uninstall-ollama --remove-all-ollama-models -y
+```
+
+```powershell
+.\teardown.ps1 -RemoveData -UninstallOllama -RemoveAllOllamaModels -Yes
+```
+
+Notes:
+
+- `--remove-data` / `-RemoveData` deletes `./data`, including local Postgres, RustFS, Qdrant, Typesense, and Kuzu state.
+- `--uninstall-ollama` / `-UninstallOllama` tries to remove the Ollama app itself.
+- `--remove-all-ollama-models` / `-RemoveAllOllamaModels` deletes the whole Ollama model store, including models unrelated to LiveOS.
+- The scripts do not delete the project folder. After teardown, delete the repository directory manually if you want to remove the source code too.
 
 ---
 
@@ -583,7 +800,7 @@ The LLM used for chat and ingestion is configured separately and served by one o
 
 ```sh
 ollama pull gemma4:latest          # chat model
-ollama pull gemma3:4b              # ingestion model (smaller, faster)
+ollama pull gemma4:e4b              # ingestion model (smaller, faster)
 ollama pull qwen3-embedding:0.6b   # embedding model (required)
 ```
 
@@ -616,15 +833,18 @@ Copy `backend/.env.example` to `backend/.env` and configure:
 # LLM Provider — "ollama" | "lm_studio" | "openai" | "gemini" | "anthropic" | "huggingface"
 LLM_PROVIDER=ollama
 LLM_MODEL=gemma4:latest
-INGESTION_LLM_MODEL=gemma3:4b
+INGESTION_LLM_MODEL=gemma4:e4b
 
 # Embedding — "ollama" | "lm_studio" | "auto"
 EMBEDDING_PROVIDER=ollama
 EMBEDDING_MODEL=qwen3-embedding:0.6b
 
-# PDF visual extraction — renders scanned/image-heavy pages for Florence
+# PDF visual extraction — native text is kept for every page; 0 means render
+# every visually relevant page with Florence.
 PDF_VISUAL_EXTRACTION_ENABLED=true
-PDF_VISUAL_EXTRACTION_MAX_PAGES=0  # 0 = all visually relevant pages
+PDF_VISUAL_EXTRACTION_MAX_PAGES=0
+INGESTION_PIPELINE_CONCURRENCY=1     # FIFO: one full note ingestion at a time
+MULTIMEDIA_CONCURRENCY=1            # keep local model jobs serialized on CPU
 
 # Cloud providers (only needed if using cloud LLMs)
 GEMINI_API_KEY=

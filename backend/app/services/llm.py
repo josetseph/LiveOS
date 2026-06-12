@@ -22,9 +22,7 @@ class LLMService:
     """Multi-provider LLM client supporting structured extraction, generation, and ingestion routing."""
 
     def __init__(self):
-        import torch
-
-        self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+        self.device = "cpu"
         self.models_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "../../models")
         )

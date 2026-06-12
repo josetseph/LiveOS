@@ -8,6 +8,7 @@ import time
 import uuid
 from collections import defaultdict
 
+from app.core.config import settings
 from app.core.log import get_logger
 from app.schemas.extraction import Extraction, NoteInput
 from app.services.graph import GraphService, graph_service
@@ -21,11 +22,9 @@ from app.services.qdrant_service import QdrantService, qdrant_service
 from app.services.typesense_service import TypesenseService, typesense_service
 from app.workflows.agents.ingestion_agent import ingestion_agent
 
-# Hard cap on concurrent ingestion pipelines.
-# Each pipeline makes sequential DB calls; capping at 20 keeps peak pool
-# usage at ~20 (ingestion) + ~20 (HTTP handlers) = 40, well within the
-# pool_size=30 + max_overflow=20 = 50 ceiling set in database.py.
-_PROCESS_CONCURRENCY = 20
+# Full-note FIFO ingestion lane. The default is one note at a time so local
+# model services, Gemma extraction, graph writes, and indexing never overlap.
+_PROCESS_CONCURRENCY = settings.INGESTION_PIPELINE_CONCURRENCY
 _process_semaphore = asyncio.Semaphore(_PROCESS_CONCURRENCY)
 
 logger = get_logger("IngestionPipeline")
@@ -119,10 +118,16 @@ class IngestionWorkflow:
         # Register with the tracker BEFORE the semaphore so the community-detection
         # idle timer never fires while tasks are queued waiting for a slot.
         await _tracker.begin_ingestion()
+        await self._update_note_processing_status(
+            note_id, "Queued for ingestion", None
+        )
 
         # Wait for a pipeline slot.  Without this cap, sending 990 notes at once
         # spawns 990 concurrent coroutines that all hit the DB pool simultaneously.
         async with _process_semaphore:
+            await self._update_note_processing_status(
+                note_id, "Starting ingestion", None
+            )
             logger.info(
                 f"\n{'='*70}\n"
                 f"[Ingestion] START note_id={note_id}\n"
@@ -190,6 +195,9 @@ class IngestionWorkflow:
                 }
 
             except Exception:
+                await self._update_note_processing_status(
+                    note_id, "Ingestion failed", None
+                )
                 await self._mark_note_failed(note_id)
                 raise
 
@@ -200,6 +208,23 @@ class IngestionWorkflow:
 
     # Internal helpers reused by the Agent
     from tenacity import retry, stop_after_attempt, wait_exponential
+
+    async def _update_note_processing_status(
+        self, note_id: str, stage: str | None, model: str | None = None
+    ) -> None:
+        """Persist a user-facing ingestion stage/model for status polling."""
+        from sqlalchemy import update
+
+        from app.core.database import AsyncSessionLocal
+        from app.models.note import Note
+
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(Note)
+                .where(Note.id == note_id)
+                .values(processing_stage=stage, processing_model=model)
+            )
+            await session.commit()
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
@@ -267,7 +292,12 @@ class IngestionWorkflow:
                 await session.execute(
                     update(Note)
                     .where(Note.id == note_id)
-                    .values(processed=True, failed=False)
+                    .values(
+                        processed=True,
+                        failed=False,
+                        processing_stage="Ingestion complete",
+                        processing_model=None,
+                    )
                 )
                 await session.commit()
                 logger.info(f"[Ingestion] Marked Note {note_id} as Processed.")
@@ -291,7 +321,13 @@ class IngestionWorkflow:
         async with AsyncSessionLocal() as session:
             try:
                 await session.execute(
-                    update(Note).where(Note.id == note_id).values(failed=True)
+                    update(Note)
+                    .where(Note.id == note_id)
+                    .values(
+                        failed=True,
+                        processing_stage="Ingestion failed",
+                        processing_model=None,
+                    )
                 )
                 await session.commit()
                 logger.info(f"[Ingestion] Marked Note {note_id} as Failed.")

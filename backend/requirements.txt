@@ -28,27 +28,14 @@ instructor==1.14.3
 langgraph==1.0.6
 langchain-openai==1.1.7
 
-# ML & Transformers
-transformers>=5.7.0
-torch>=2.11.0
-accelerate==1.12.0
-einops==0.8.1
-huggingface-hub>=0.37.0
-safetensors==0.7.0
-tokenizers>=0.22.0,<=0.23.0
-scikit-learn==1.8.0
-torchcodec
-qwen-vl-utils>=0.0.14
+# Lightweight media probing (video stream detection only)
 av
 
-# Audio Processing
-librosa==0.11.0
-pydub==0.25.1
-
-# Image & Document Processing
-Pillow==12.1.0
-timm==1.0.24
+# Document parsing (non-ML)
+python-docx==1.1.2
+openpyxl==3.1.5
 PyMuPDF==1.26.7
+Pillow==12.0.0
 
 # Utilities
 python-dateutil==2.9.0.post0
@@ -60,7 +47,6 @@ python-dotenv==1.2.1
 
 # Data Processing
 numpy==2.2.6
+scikit-learn==1.8.0
 regex==2026.1.15
-python-docx==1.1.2
-openpyxl==3.1.5
 json-repair==0.55.0

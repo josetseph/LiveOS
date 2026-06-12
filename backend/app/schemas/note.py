@@ -7,10 +7,13 @@ class NoteResponse(BaseModel):
     id: str
     content: str
     created_at: str | None = None
+    updated_at: str | None = None
     title: str | None = None
     summary: str | None = None
     processed: bool = False
     failed: bool = False
+    processing_stage: str | None = None
+    processing_model: str | None = None
 
     class Config:  # pylint: disable=too-few-public-methods
         """Pydantic ORM-mode configuration for NoteResponse."""

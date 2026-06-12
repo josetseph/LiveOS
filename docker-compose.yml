@@ -88,6 +88,10 @@ services:
       TYPESENSE_HOST: typesense
       R2_ENDPOINT_URL: http://rustfs:9000
       FILES_URL: /files/liveos-assets
+      INGESTION_PIPELINE_CONCURRENCY: 1
+      MULTIMEDIA_CONCURRENCY: 1
+      LOCAL_MODELS_SERVICE_URL: http://host.docker.internal:8791
+      MARLIN_SERVICE_URL: http://host.docker.internal:8790
       DATABASE_TRANSACTION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
       DATABASE_SESSION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
       DATABASE_DIRECT_CONNECTION_URL: postgresql://user:password@postgres:5432/liveos
@@ -110,6 +114,64 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # Local Models Service (Florence, Whisper, reranker, PDF visual extraction)
+  # Optional Docker fallback — on macOS, prefer native host inference via
+  # ./scripts/host-inference.sh enable (uses Apple Silicon MPS + launchd).
+  local-models:
+    profiles: ["docker-models"]
+    build:
+      context: ./backend
+      dockerfile: local_models_service/Dockerfile
+    container_name: liveos-local-models
+    restart: unless-stopped
+    environment:
+      FLORENCE_MODEL_PATH: /models/florence-2-large
+      WHISPER_MODEL_PATH: /models/whisper-large-v3-turbo
+      RERANKER_MODEL_PATH: /models/qwen3-reranker-0.6b
+      PDF_VISUAL_EXTRACTION_ENABLED: "true"
+      PDF_VISUAL_EXTRACTION_MAX_PAGES: "0"
+      PDF_VISUAL_RENDER_DPI: "144"
+      PDF_VISUAL_TEXT_THRESHOLD: "80"
+      FLORENCE_MAX_IMAGE_PIXELS: "1500000"
+    ports:
+      - "8791:8091"
+    volumes:
+      - ./backend/models/florence-2-large:/models/florence-2-large:ro
+      - ./backend/models/whisper-large-v3-turbo:/models/whisper-large-v3-turbo:ro
+      - ./backend/models/qwen3-reranker-0.6b:/models/qwen3-reranker-0.6b:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Marlin Video Understanding Service
+  # Optional Docker fallback — on macOS, prefer native host inference via
+  # ./scripts/host-inference.sh enable (uses Apple Silicon MPS + launchd).
+  marlin:
+    profiles: ["docker-models"]
+    build:
+      context: ./backend
+      dockerfile: marlin_service/Dockerfile
+    container_name: liveos-marlin
+    restart: unless-stopped
+    environment:
+      MARLIN_MODEL_PATH: /models/marlin-2b
+      FORCE_QWENVL_VIDEO_READER: pyav
+      VIDEO_MAX_PIXELS: "200704"
+      FPS: "2.0"
+      FPS_MAX_FRAMES: "240"
+      FPS_MIN_FRAMES: "4"
+    ports:
+      - "8790:8090"
+    volumes:
+      - ./backend/models/marlin-2b:/models/marlin-2b:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # Initialization Service (one-shot — runs once, then exits)
   init:
     build:
@@ -123,6 +185,8 @@ services:
       TYPESENSE_HOST: typesense
       R2_ENDPOINT_URL: http://rustfs:9000
       FILES_URL: /files/liveos-assets
+      INGESTION_PIPELINE_CONCURRENCY: 1
+      MULTIMEDIA_CONCURRENCY: 1
       DATABASE_TRANSACTION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
       DATABASE_SESSION_POOLER_URL: postgresql://user:password@postgres:5432/liveos
       DATABASE_DIRECT_CONNECTION_URL: postgresql://user:password@postgres:5432/liveos

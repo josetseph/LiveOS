@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from datetime import datetime
+from collections.abc import Callable
 from typing import List
 
 from app.core.config import settings
@@ -1403,6 +1404,7 @@ class RetrievalService:
         top_k: int = 50,
         max_hops: int = 10,  # pylint: disable=unused-argument
         filter_docs: bool = True,  # pylint: disable=unused-argument
+        progress_callback: Callable[[str, str | None], None] | None = None,
     ) -> tuple[str | None, list[dict], str | None]:
         """Entry-point alias for the primary structured sub-question pipeline.
 
@@ -1412,7 +1414,9 @@ class RetrievalService:
         filtering internally.  They are retained in the signature so callers do
         not need to be updated when the parameters are eventually removed.
         """
-        return await self.retrieve_with_iterative_loop(query, top_k=top_k)
+        return await self.retrieve_with_iterative_loop(
+            query, top_k=top_k, progress_callback=progress_callback
+        )
 
     async def _apply_reranker_logging(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches
         self,
@@ -1525,6 +1529,7 @@ class RetrievalService:
         self,
         query: str,
         top_k: int = 50,
+        progress_callback: Callable[[str, str | None], None] | None = None,
     ) -> tuple[str | None, list[dict], str | None]:
         """
         Iterative retrieval loop — one LLM call per iteration.
@@ -1540,6 +1545,10 @@ class RetrievalService:
         """
         from app.services.llm import llm_service
 
+        def _progress(stage: str, model: str | None = None) -> None:
+            if progress_callback:
+                progress_callback(stage, model)
+
         _t_start = time.perf_counter()
         logger.info(
             f"\n{'='*70}\n"
@@ -1552,6 +1561,7 @@ class RetrievalService:
         # expansion reranking. hybrid_search runs its own analysis per sub-query
         # (type pre-filter + initial reranking). This call covers the expansion
         # docs which are reranked outside hybrid_search.
+        _progress("Analyzing question", "Gemma4")
         _loop_qa = llm_service.analyze_query(query)
         _loop_question_attr = _loop_qa.get("question_attribute") or None
         logger.info(f"  [IterLoop] question_attribute={_loop_question_attr!r}")
@@ -1563,6 +1573,10 @@ class RetrievalService:
         tried_queries: list[str] = []
 
         for iteration in range(settings.MAX_LOOP_ITERATIONS):
+            _progress(
+                f"Retrieval loop {iteration + 1}/{settings.MAX_LOOP_ITERATIONS}",
+                None,
+            )
             logger.info(
                 f"  [IterLoop] Iteration {iteration + 1}/{settings.MAX_LOOP_ITERATIONS} "
                 f"| current_query={current_query!r}"
@@ -1570,6 +1584,10 @@ class RetrievalService:
 
             # ── Retrieve docs (skip on first iteration) ───────────────────────
             if current_query is not None:
+                _progress(
+                    f"Searching knowledge base ({iteration + 1}/{settings.MAX_LOOP_ITERATIONS})",
+                    "Embeddings + Reranker",
+                )
                 selected_docs = await self.hybrid_search(current_query)
                 logger.info(
                     f"  [IterLoop] hybrid_search returned {len(selected_docs)} ranked candidates"
@@ -1585,6 +1603,7 @@ class RetrievalService:
                 # Graph expansion
                 expanded: list[dict] = []
                 try:
+                    _progress("Expanding graph neighbors", None)
                     expanded = await self._expand_relevant_neighbors(
                         selected_docs, current_query, surfaced_names
                     )
@@ -1592,6 +1611,7 @@ class RetrievalService:
                         f"  [IterLoop] Graph expansion: {len(expanded)} neighbors"
                     )
                     if expanded:
+                        _progress("Reranking graph neighbors", settings.MODEL_RERANKER_LOCAL)
                         expanded = await self._apply_reranker_logging(
                             current_query,
                             expanded,
@@ -1625,6 +1645,10 @@ class RetrievalService:
                 docs = []
 
             # ── LLM iterative step ────────────────────────────────────────────
+            _progress(
+                f"Reasoning over retrieved context ({iteration + 1}/{settings.MAX_LOOP_ITERATIONS})",
+                "Gemma4",
+            )
             result = await llm_service.iterative_step(
                 original_question=query,
                 accumulated_steps=accumulated_steps,
@@ -1678,6 +1702,7 @@ class RetrievalService:
             current_query = next_q
 
         # ── Loop exhausted: synthesize from accumulated steps ─────────────────
+        _progress("Synthesizing final answer", "Gemma4")
         # Rather than returning None (which forces an expensive fallback re-run),
         # convert accumulated steps into sub_results for final_synthesis_from_sub_results.
         _t_total = time.perf_counter() - _t_start

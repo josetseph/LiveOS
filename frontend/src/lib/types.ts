@@ -6,6 +6,8 @@ export interface Note {
     updated_at?: string;
     processed?: boolean;
     failed?: boolean;
+    processing_stage?: string | null;
+    processing_model?: string | null;
 }
 
 export interface FilePreview {
@@ -27,6 +29,14 @@ export type NoteStatus = {
     processed: boolean;
     failed: boolean;
     status: string;
+    processing_stage?: string | null;
+    processing_model?: string | null;
+};
+
+export type ChatStatus = {
+    request_id: string;
+    stage: string;
+    model?: string | null;
 };
 
 /** Knowledge base metadata returned by GET /api/v1/kb */

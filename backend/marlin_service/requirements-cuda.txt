@@ -1,0 +1,7 @@
+# Optional extras for NVIDIA CUDA hosts (not installable on macOS / Apple Silicon).
+# Use with a CUDA-enabled PyTorch wheel, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements.txt -r requirements-cuda.txt
+flash-linear-attention>=0.2.2
+causal-conv1d>=1.4.0
+einops

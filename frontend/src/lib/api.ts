@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { KnowledgeBase, NoteStatus } from "@/lib/types";
+import type { ChatStatus, KnowledgeBase, NoteStatus } from "@/lib/types";
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "/api/v1").replace(/\/$/, "");
 const API_ORIGIN = API_BASE_URL.replace(/\/api\/v1$/, "");
@@ -26,8 +26,12 @@ const http = {
 export const api = {
   // ── Chat ────────────────────────────────────────────────────────────────
 
-  async chat(query: string, kb = "default") {
-    return http.post(`/chat${kbParam(kb)}`, { query });
+  async chat(query: string, kb = "default", requestId?: string) {
+    return http.post(`/chat${kbParam(kb)}`, { query, request_id: requestId });
+  },
+
+  async getChatStatus(requestId: string): Promise<ChatStatus> {
+    return http.get(`/chat/status/${requestId}`);
   },
 
   // ── File storage ─────────────────────────────────────────────────────────
