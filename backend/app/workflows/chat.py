@@ -7,6 +7,8 @@ from collections.abc import Callable
 from app.core.database import AsyncSessionLocal
 from app.core.log import get_logger
 from app.models.note import Note
+from app.schemas.chat import ChatTurn
+from app.services.llm import llm_service
 from app.services.retrieval import RetrievalService, retrieval_service
 from sqlalchemy import select
 
@@ -31,6 +33,7 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
     async def chat(
         self,
         user_query: str,
+        history: list[ChatTurn] | None = None,
         progress_callback: Callable[[str, str | None], None] | None = None,
     ) -> dict:
         """
@@ -42,7 +45,15 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
         4. Repeat up to the loop limit, then fall back to a final synthesis.
         """
         start_time = time.perf_counter()
-        logger.info(f"\n[Chat] Started processing query: '{user_query}'")
+        history = history or []
+        history_payload = [{"role": t.role, "content": t.content} for t in history]
+        rewritten_query = llm_service.rewrite_follow_up_query(
+            history_payload, user_query
+        )
+        logger.info(
+            f"\n[Chat] Started processing query: '{user_query}'"
+            + (f" (rewritten: '{rewritten_query}')" if rewritten_query != user_query else "")
+        )
 
         def _progress(stage: str, model: str | None = None) -> None:
             if progress_callback:
@@ -53,11 +64,12 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
         _progress("Planning retrieval", "Gemma4")
         final_answer, all_docs, thinking = (
             await self._retrieval.retrieve_with_self_correction(
-                user_query,
+                rewritten_query,
                 top_k=50,
                 max_hops=10,
                 filter_docs=False,
                 progress_callback=progress_callback,
+                conversation_history=history_payload,
             )
         )
         _progress("Selecting best evidence")
@@ -147,6 +159,7 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
 
         return {
             "query": user_query,
+            "rewritten_query": rewritten_query,
             "answer": answer,
             "context": unique_docs,
             "information_needs": [user_query],

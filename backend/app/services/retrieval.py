@@ -1405,6 +1405,7 @@ class RetrievalService:
         max_hops: int = 10,  # pylint: disable=unused-argument
         filter_docs: bool = True,  # pylint: disable=unused-argument
         progress_callback: Callable[[str, str | None], None] | None = None,
+        conversation_history: list[dict] | None = None,
     ) -> tuple[str | None, list[dict], str | None]:
         """Entry-point alias for the primary structured sub-question pipeline.
 
@@ -1415,7 +1416,10 @@ class RetrievalService:
         not need to be updated when the parameters are eventually removed.
         """
         return await self.retrieve_with_iterative_loop(
-            query, top_k=top_k, progress_callback=progress_callback
+            query,
+            top_k=top_k,
+            progress_callback=progress_callback,
+            conversation_history=conversation_history,
         )
 
     async def _apply_reranker_logging(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches
@@ -1530,6 +1534,7 @@ class RetrievalService:
         query: str,
         top_k: int = 50,
         progress_callback: Callable[[str, str | None], None] | None = None,
+        conversation_history: list[dict] | None = None,
     ) -> tuple[str | None, list[dict], str | None]:
         """
         Iterative retrieval loop — one LLM call per iteration.
@@ -1548,6 +1553,23 @@ class RetrievalService:
         def _progress(stage: str, model: str | None = None) -> None:
             if progress_callback:
                 progress_callback(stage, model)
+
+        conversation_context = ""
+        if conversation_history:
+            lines: list[str] = []
+            for turn in conversation_history[-settings.CHAT_HISTORY_MAX_MESSAGES :]:
+                role = (turn.get("role") or "").strip().lower()
+                content = (turn.get("content") or "").strip()
+                if not content or role not in {"user", "assistant"}:
+                    continue
+                label = "User" if role == "user" else "Assistant"
+                if len(content) > 500:
+                    content = content[:497].rstrip() + "..."
+                lines.append(f"{label}: {content}")
+            if lines:
+                conversation_context = (
+                    "CONVERSATION SO FAR:\n" + "\n".join(lines) + "\n\n"
+                )
 
         _t_start = time.perf_counter()
         logger.info(
@@ -1655,6 +1677,7 @@ class RetrievalService:
                 search_query=current_query,
                 docs=docs,
                 tried_queries=tried_queries if tried_queries else None,
+                conversation_context=conversation_context or None,
             )
 
             logger.info(

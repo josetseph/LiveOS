@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { ChatStatus, KnowledgeBase, NoteStatus } from "@/lib/types";
+import type { ChatConversation, ChatMessageRecord, ChatStatus, KnowledgeBase, NoteStatus } from "@/lib/types";
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "/api/v1").replace(/\/$/, "");
 const API_ORIGIN = API_BASE_URL.replace(/\/api\/v1$/, "");
@@ -30,12 +30,37 @@ export const api = {
     return http.post(`/chat${kbParam(kb)}`, { query, request_id: requestId });
   },
 
-  async startChat(query: string, kb = "default", requestId?: string) {
-    return http.post(`/chat/async${kbParam(kb)}`, { query, request_id: requestId });
+  async startChat(
+    query: string,
+    kb = "default",
+    requestId?: string,
+    conversationId?: string | null,
+  ) {
+    return http.post(`/chat/async${kbParam(kb)}`, {
+      query,
+      request_id: requestId,
+      conversation_id: conversationId || undefined,
+    });
   },
 
   async getChatStatus(requestId: string): Promise<ChatStatus> {
     return http.get(`/chat/status/${requestId}`);
+  },
+
+  async listChatConversations(kb = "default"): Promise<ChatConversation[]> {
+    return http.get(`/chat/conversations${kbParam(kb)}`);
+  },
+
+  async createChatConversation(kb = "default", title?: string) {
+    return http.post(`/chat/conversations${kbParam(kb)}`, title ? { title } : {});
+  },
+
+  async getChatMessages(conversationId: string): Promise<ChatMessageRecord[]> {
+    return http.get(`/chat/conversations/${conversationId}/messages`);
+  },
+
+  async deleteChatConversation(conversationId: string) {
+    return http.del(`/chat/conversations/${conversationId}`);
   },
 
   // ── File storage ─────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import {
     type ReactNode,
 } from "react";
 import { api } from "@/lib/api";
+import type { ChatConversation } from "@/lib/types";
 
 export interface Message {
     id: string;
@@ -19,102 +20,170 @@ export interface Message {
 
 interface ChatContextValue {
     messages: Message[];
+    conversations: ChatConversation[];
+    activeConversationId: string | null;
     isLoading: boolean;
+    isLoadingConversations: boolean;
     loadingStage: string | null;
     loadingModel: string | null;
     sendMessage: (text: string, kb: string) => void;
-    clearMessages: () => void;
+    loadConversations: (kb: string) => Promise<void>;
+    selectConversation: (conversationId: string, kb: string) => Promise<void>;
+    startNewConversation: () => void;
+    deleteActiveConversation: (kb: string) => Promise<void>;
+    initializeForKb: (kb: string) => Promise<void>;
 }
 
 const ChatContext = createContext<ChatContextValue>({
     messages: [],
+    conversations: [],
+    activeConversationId: null,
     isLoading: false,
+    isLoadingConversations: false,
     loadingStage: null,
     loadingModel: null,
     sendMessage: () => { },
-    clearMessages: () => { },
+    loadConversations: async () => { },
+    selectConversation: async () => { },
+    startNewConversation: () => { },
+    deleteActiveConversation: async () => { },
+    initializeForKb: async () => { },
 });
+
+function toMessage(record: {
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    thinking?: string | null;
+    created_at?: string | null;
+}): Message {
+    return {
+        id: record.id,
+        role: record.role,
+        content: record.content,
+        timestamp: record.created_at ? new Date(record.created_at) : new Date(),
+        thinking: record.thinking || undefined,
+    };
+}
 
 export function ChatProvider({ children }: { children: ReactNode }) {
     const [messages, setMessages] = useState<Message[]>([]);
+    const [conversations, setConversations] = useState<ChatConversation[]>([]);
+    const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
+    const [isLoadingConversations, setIsLoadingConversations] = useState(false);
     const [loadingStage, setLoadingStage] = useState<string | null>(null);
     const [loadingModel, setLoadingModel] = useState<string | null>(null);
 
-    const sendMessage = useCallback((text: string, kb: string) => {
-        if (!text.trim() || isLoading) return;
+    const loadConversations = useCallback(async (kb: string) => {
+        setIsLoadingConversations(true);
+        try {
+            const rows = await api.listChatConversations(kb);
+            setConversations(rows);
+        } catch {
+            setConversations([]);
+        } finally {
+            setIsLoadingConversations(false);
+        }
+    }, []);
 
-        const userMessage: Message = {
-            id: Date.now().toString(),
-            role: "user",
-            content: text,
-            timestamp: new Date(),
-        };
+    const selectConversation = useCallback(async (conversationId: string, _kb: string) => {
+        try {
+            const rows = await api.getChatMessages(conversationId);
+            setActiveConversationId(conversationId);
+            setMessages(rows.map(toMessage));
+        } catch {
+            setActiveConversationId(conversationId);
+            setMessages([]);
+        }
+    }, []);
 
-        setMessages((prev) => [...prev, userMessage]);
-        setIsLoading(true);
-        setLoadingStage("Starting chat request");
-        setLoadingModel(null);
+    const startNewConversation = useCallback(() => {
+        setActiveConversationId(null);
+        setMessages([]);
+    }, []);
 
-        const requestId =
-            typeof crypto !== "undefined" && "randomUUID" in crypto
-                ? crypto.randomUUID()
-                : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        let interval: number | null = null;
+    const deleteActiveConversation = useCallback(
+        async (kb: string) => {
+            if (!activeConversationId) {
+                startNewConversation();
+                return;
+            }
+            try {
+                await api.deleteChatConversation(activeConversationId);
+            } catch {
+                return;
+            }
+            const remaining = conversations.filter((c) => c.id !== activeConversationId);
+            setConversations(remaining);
+            if (remaining.length > 0) {
+                await selectConversation(remaining[0].id, kb);
+            } else {
+                startNewConversation();
+            }
+            await loadConversations(kb);
+        },
+        [
+            activeConversationId,
+            conversations,
+            loadConversations,
+            selectConversation,
+            startNewConversation,
+        ],
+    );
 
-        const fail = () => {
-            if (interval !== null) window.clearInterval(interval);
-            const errorMessage: Message = {
-                id: (Date.now() + 1).toString(),
-                role: "assistant",
-                content: "Sorry, I encountered an error. Please try again.",
+    const initializeForKb = useCallback(
+        async (kb: string) => {
+            setIsLoadingConversations(true);
+            try {
+                const rows = await api.listChatConversations(kb);
+                setConversations(rows);
+                if (rows.length > 0) {
+                    const rowsMessages = await api.getChatMessages(rows[0].id);
+                    setActiveConversationId(rows[0].id);
+                    setMessages(rowsMessages.map(toMessage));
+                } else {
+                    setActiveConversationId(null);
+                    setMessages([]);
+                }
+            } catch {
+                setConversations([]);
+                setActiveConversationId(null);
+                setMessages([]);
+            } finally {
+                setIsLoadingConversations(false);
+            }
+        },
+        [],
+    );
+
+    const sendMessage = useCallback(
+        (text: string, kb: string) => {
+            if (!text.trim() || isLoading) return;
+
+            const userMessage: Message = {
+                id: `local-user-${Date.now()}`,
+                role: "user",
+                content: text,
                 timestamp: new Date(),
             };
-            setMessages((prev) => [...prev, errorMessage]);
-            setIsLoading(false);
-            setLoadingStage(null);
+
+            setMessages((prev) => [...prev, userMessage]);
+            setIsLoading(true);
+            setLoadingStage("Starting chat request");
             setLoadingModel(null);
-        };
 
-        const complete = (answer?: string, thinking?: string | null) => {
-            if (interval !== null) window.clearInterval(interval);
-            const assistantMessage: Message = {
-                id: (Date.now() + 1).toString(),
-                role: "assistant",
-                content: answer || "I couldn't generate a response.",
-                timestamp: new Date(),
-                thinking: thinking || undefined,
-            };
-            setMessages((prev) => [...prev, assistantMessage]);
-            setIsLoading(false);
-            setLoadingStage(null);
-            setLoadingModel(null);
-        };
+            const requestId =
+                typeof crypto !== "undefined" && "randomUUID" in crypto
+                    ? crypto.randomUUID()
+                    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            let interval: number | null = null;
+            let conversationId = activeConversationId;
 
-        const poll = () => {
-            api.getChatStatus(requestId)
-                .then((status) => {
-                    setLoadingStage(status.stage);
-                    setLoadingModel(status.model ?? null);
-                    if (!status.done) return;
-                    if (status.error) {
-                        fail();
-                        return;
-                    }
-                    complete(status.result?.answer, status.result?.thinking);
-                })
-                .catch(() => { });
-        };
-
-        api
-            .startChat(text, kb, requestId)
-            .then(() => {
-                interval = window.setInterval(poll, 1000);
-                poll();
-            })
-            .catch(() => {
+            const fail = () => {
+                if (interval !== null) window.clearInterval(interval);
                 const errorMessage: Message = {
-                    id: (Date.now() + 1).toString(),
+                    id: `local-error-${Date.now()}`,
                     role: "assistant",
                     content: "Sorry, I encountered an error. Please try again.",
                     timestamp: new Date(),
@@ -123,22 +192,96 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 setIsLoading(false);
                 setLoadingStage(null);
                 setLoadingModel(null);
-            });
-    }, [isLoading]);
+            };
 
-    const clearMessages = useCallback(() => {
-        setMessages([]);
-    }, []);
+            const complete = async (
+                answer?: string,
+                thinking?: string | null,
+                resultConversationId?: string,
+            ) => {
+                if (interval !== null) window.clearInterval(interval);
+                const assistantMessage: Message = {
+                    id: `local-assistant-${Date.now()}`,
+                    role: "assistant",
+                    content: answer || "I couldn't generate a response.",
+                    timestamp: new Date(),
+                    thinking: thinking || undefined,
+                };
+                setMessages((prev) => [...prev, assistantMessage]);
+                if (resultConversationId) {
+                    setActiveConversationId(resultConversationId);
+                    conversationId = resultConversationId;
+                }
+                setIsLoading(false);
+                setLoadingStage(null);
+                setLoadingModel(null);
+                await loadConversations(kb);
+                if (conversationId) {
+                    try {
+                        const rows = await api.getChatMessages(conversationId);
+                        setMessages(rows.map(toMessage));
+                    } catch {
+                        // Keep optimistic messages if refresh fails.
+                    }
+                }
+            };
+
+            const poll = () => {
+                api.getChatStatus(requestId)
+                    .then((status) => {
+                        setLoadingStage(status.stage);
+                        setLoadingModel(status.model ?? null);
+                        if (status.conversation_id) {
+                            conversationId = status.conversation_id;
+                            setActiveConversationId(status.conversation_id);
+                        }
+                        if (!status.done) return;
+                        if (status.error) {
+                            fail();
+                            return;
+                        }
+                        void complete(
+                            status.result?.answer,
+                            status.result?.thinking,
+                            status.result?.conversation_id || status.conversation_id,
+                        );
+                    })
+                    .catch(() => { });
+            };
+
+            api
+                .startChat(text, kb, requestId, activeConversationId)
+                .then((started) => {
+                    if (started.conversation_id) {
+                        conversationId = started.conversation_id;
+                        setActiveConversationId(started.conversation_id);
+                    }
+                    interval = window.setInterval(poll, 1000);
+                    poll();
+                })
+                .catch(() => {
+                    fail();
+                });
+        },
+        [activeConversationId, isLoading, loadConversations],
+    );
 
     return (
         <ChatContext.Provider
             value={{
                 messages,
+                conversations,
+                activeConversationId,
                 isLoading,
+                isLoadingConversations,
                 loadingStage,
                 loadingModel,
                 sendMessage,
-                clearMessages,
+                loadConversations,
+                selectConversation,
+                startNewConversation,
+                deleteActiveConversation,
+                initializeForKb,
             }}
         >
             {children}

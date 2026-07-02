@@ -19,7 +19,8 @@ setup_logging()
 from app.core.config import settings  # noqa: E402
 from app.core.database import get_db  # noqa: E402
 from app.models.note import Note  # noqa: E402
-from app.schemas.extraction import NoteInput  # noqa: E402
+from app.schemas.chat import CreateConversationInput
+from app.services.chat_store import chat_store
 from app.schemas.note import CreateNoteInput  # noqa: E402
 from app.services.kb_registry import KBContext, kb_registry  # noqa: E402
 from fastapi import (  # noqa: E402
@@ -295,6 +296,7 @@ class ChatInput(BaseModel):
 
     query: str
     request_id: str | None = None
+    conversation_id: str | None = None
 
 
 _chat_status: dict[str, dict] = {}
@@ -378,29 +380,98 @@ async def update_runtime_settings(body: LLMSettings):
     }
 
 
+@app.get("/api/v1/chat/conversations")
+async def list_chat_conversations(kb: KBContext = Depends(get_kb)):
+    """List saved chat conversations for the active knowledge base."""
+    return await chat_store.list_conversations(kb.kb_id)
+
+
+@app.post("/api/v1/chat/conversations")
+async def create_chat_conversation(
+    body: CreateConversationInput | None = None,
+    kb: KBContext = Depends(get_kb),
+):
+    """Create an empty chat conversation."""
+    title = body.title if body else None
+    return await chat_store.create_conversation(kb.kb_id, title=title)
+
+
+@app.get("/api/v1/chat/conversations/{conversation_id}/messages")
+async def get_chat_messages(conversation_id: str):
+    """Return all messages for a conversation."""
+    conv = await chat_store.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return await chat_store.list_messages(conversation_id)
+
+
+@app.delete("/api/v1/chat/conversations/{conversation_id}")
+async def delete_chat_conversation(conversation_id: str):
+    """Soft-delete a chat conversation."""
+    deleted = await chat_store.delete_conversation(conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"status": "deleted", "conversation_id": conversation_id}
+
+
 @app.post("/api/v1/chat")
 async def chat(body: ChatInput, kb: KBContext = Depends(get_kb)):
     """
     Chat with your Brain: Vector Search -> Rerank -> Synthesis.
     """
+    from app.schemas.chat import ChatTurn
+
     request_id = body.request_id or str(uuid.uuid4())
+    conversation = await chat_store.ensure_conversation(
+        body.conversation_id, kb.kb_id
+    )
+    conversation_id = conversation["id"]
+    history = await chat_store.get_recent_history(conversation_id)
+    history_turns = history
 
     def _progress(stage: str, model: str | None = None) -> None:
         _chat_status[request_id] = {"stage": stage, "model": model}
 
     _progress("Starting chat request")
     try:
-        result = await kb.get_chat_workflow().chat(body.query, progress_callback=_progress)
+        await chat_store.add_message(conversation_id, "user", body.query)
+        await chat_store.maybe_set_title_from_first_message(conversation_id, body.query)
+        result = await kb.get_chat_workflow().chat(
+            body.query,
+            history=history_turns,
+            progress_callback=_progress,
+        )
+        assistant = await chat_store.add_message(
+            conversation_id,
+            "assistant",
+            result.get("answer", ""),
+            thinking=result.get("thinking"),
+            metadata={
+                "rewritten_query": result.get("rewritten_query"),
+                "context_count": len(result.get("context") or []),
+            },
+        )
         _progress("Complete")
         result["request_id"] = request_id
+        result["conversation_id"] = conversation_id
+        result["assistant_message_id"] = assistant["id"]
         return result
     except Exception:
         _progress("Failed")
         raise
 
 
-async def _run_chat_job(request_id: str, query: str, kb: KBContext) -> None:
+async def _run_chat_job(
+    request_id: str,
+    query: str,
+    kb: KBContext,
+    conversation_id: str,
+    history: list[dict],
+) -> None:
     """Run a long chat request after the browser has received a request id."""
+    from app.schemas.chat import ChatTurn
+
+    history_turns = [ChatTurn(**t) for t in history]
 
     def _progress(stage: str, model: str | None = None) -> None:
         current = _chat_status.get(request_id, {})
@@ -409,16 +480,34 @@ async def _run_chat_job(request_id: str, query: str, kb: KBContext) -> None:
             "stage": stage,
             "model": model,
             "done": False,
+            "conversation_id": conversation_id,
         }
 
     _progress("Starting chat request")
     try:
-        result = await kb.get_chat_workflow().chat(query, progress_callback=_progress)
+        result = await kb.get_chat_workflow().chat(
+            query,
+            history=history_turns,
+            progress_callback=_progress,
+        )
+        assistant = await chat_store.add_message(
+            conversation_id,
+            "assistant",
+            result.get("answer", ""),
+            thinking=result.get("thinking"),
+            metadata={
+                "rewritten_query": result.get("rewritten_query"),
+                "context_count": len(result.get("context") or []),
+            },
+        )
         result["request_id"] = request_id
+        result["conversation_id"] = conversation_id
+        result["assistant_message_id"] = assistant["id"]
         _chat_status[request_id] = {
             "stage": "Complete",
             "model": None,
             "done": True,
+            "conversation_id": conversation_id,
             "result": result,
         }
     except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -427,11 +516,18 @@ async def _run_chat_job(request_id: str, query: str, kb: KBContext) -> None:
             "stage": "Failed",
             "model": None,
             "done": True,
+            "conversation_id": conversation_id,
             "error": str(exc) or exc.__class__.__name__,
         }
 
 
-def _run_chat_job_sync(request_id: str, query: str, kb: KBContext) -> None:
+def _run_chat_job_sync(
+    request_id: str,
+    query: str,
+    kb: KBContext,
+    conversation_id: str,
+    history: list[dict],
+) -> None:
     """Threadpool entry point for long chat jobs."""
     if not _chat_job_lock.acquire(blocking=False):
         current = _chat_status.get(request_id, {})
@@ -440,10 +536,13 @@ def _run_chat_job_sync(request_id: str, query: str, kb: KBContext) -> None:
             "stage": "Waiting for current chat to finish",
             "model": None,
             "done": False,
+            "conversation_id": conversation_id,
         }
         _chat_job_lock.acquire()
     try:
-        asyncio.run(_run_chat_job(request_id, query, kb))
+        asyncio.run(
+            _run_chat_job(request_id, query, kb, conversation_id, history)
+        )
     finally:
         _chat_job_lock.release()
 
@@ -456,13 +555,37 @@ async def start_chat(
 ):
     """Start a chat request and return immediately for polling clients."""
     request_id = body.request_id or str(uuid.uuid4())
+    conversation = await chat_store.ensure_conversation(
+        body.conversation_id, kb.kb_id
+    )
+    conversation_id = conversation["id"]
+    history = await chat_store.get_recent_history(conversation_id)
+    history_payload = [{"role": t.role, "content": t.content} for t in history]
+
+    await chat_store.add_message(conversation_id, "user", body.query)
+    await chat_store.maybe_set_title_from_first_message(conversation_id, body.query)
+
     _chat_status[request_id] = {
         "stage": "Queued",
         "model": None,
         "done": False,
+        "conversation_id": conversation_id,
     }
-    background_tasks.add_task(_run_chat_job_sync, request_id, body.query, kb)
-    return {"request_id": request_id, "stage": "Queued", "model": None, "done": False}
+    background_tasks.add_task(
+        _run_chat_job_sync,
+        request_id,
+        body.query,
+        kb,
+        conversation_id,
+        history_payload,
+    )
+    return {
+        "request_id": request_id,
+        "conversation_id": conversation_id,
+        "stage": "Queued",
+        "model": None,
+        "done": False,
+    }
 
 
 @app.get("/api/v1/chat/status/{request_id}")

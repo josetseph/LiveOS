@@ -35,15 +35,35 @@ export type NoteStatus = {
 
 export type ChatStatus = {
     request_id: string;
+    conversation_id?: string;
     stage: string;
     model?: string | null;
     done?: boolean;
     result?: {
         answer?: string;
         thinking?: string | null;
+        conversation_id?: string;
+        assistant_message_id?: string;
     };
     error?: string;
 };
+
+export interface ChatConversation {
+    id: string;
+    kb_id: string;
+    title: string;
+    created_at?: string | null;
+    updated_at?: string | null;
+}
+
+export interface ChatMessageRecord {
+    id: string;
+    conversation_id: string;
+    role: "user" | "assistant";
+    content: string;
+    thinking?: string | null;
+    created_at?: string | null;
+}
 
 /** Knowledge base metadata returned by GET /api/v1/kb */
 export interface KnowledgeBase {

@@ -17,6 +17,8 @@ import {
   Layers,
   ChevronDown,
   ChevronUp,
+  MessageSquarePlus,
+  MessagesSquare,
 } from "lucide-react";
 import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
@@ -271,11 +273,17 @@ export default function ChatPage() {
   const { currentKB, currentKBName } = useKB();
   const {
     messages,
+    conversations,
+    activeConversationId,
     isLoading,
+    isLoadingConversations,
     loadingStage,
     loadingModel,
     sendMessage,
-    clearMessages,
+    selectConversation,
+    startNewConversation,
+    deleteActiveConversation,
+    initializeForKb,
   } = useChat();
   const [input, setInput] = useState("");
   const [previewNote, setPreviewNote] = useState<NotePreview | null>(null);
@@ -303,6 +311,10 @@ export default function ChatPage() {
     else if (hour < 18) setGreeting("Good afternoon!");
     else setGreeting("Good evening!");
   }, []);
+
+  useEffect(() => {
+    void initializeForKb(currentKB);
+  }, [currentKB, initializeForKb]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -347,10 +359,15 @@ export default function ChatPage() {
     setFilePreview({ url, filename, type });
   };
 
-  const handleClearChat = () => {
-    if (window.confirm("Clear all chat messages? This cannot be undone.")) {
-      clearMessages();
+  const handleDeleteChat = () => {
+    if (!activeConversationId && messages.length === 0) return;
+    if (window.confirm("Delete this chat? This cannot be undone.")) {
+      void deleteActiveConversation(currentKB);
     }
+  };
+
+  const handleNewChat = () => {
+    startNewConversation();
   };
 
   const suggestions = [
@@ -386,14 +403,44 @@ export default function ChatPage() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {messages.length > 0 && (
+              <button
+                onClick={handleNewChat}
+                className="flex items-center gap-1.5 rounded-lg border border-purple-500/30 bg-purple-500/10 px-3 py-1.5 text-xs text-purple-300 transition-all hover:bg-purple-500/20"
+              >
+                <MessageSquarePlus className="h-3 w-3" />
+                New Chat
+              </button>
+              {(activeConversationId || messages.length > 0) && (
                 <button
-                  onClick={handleClearChat}
+                  onClick={handleDeleteChat}
                   className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-400 transition-all hover:bg-red-500/20"
                 >
                   <Trash2 className="h-3 w-3" />
-                  Clear Chat
+                  Delete Chat
                 </button>
+              )}
+              {conversations.length > 0 && (
+                <div className="relative">
+                  <select
+                    value={activeConversationId || ""}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      if (id) void selectConversation(id, currentKB);
+                      else startNewConversation();
+                    }}
+                    disabled={isLoadingConversations}
+                    className="max-w-[220px] appearance-none rounded-lg border border-white/10 bg-white/5 py-1.5 pl-8 pr-8 text-xs text-white/80 backdrop-blur-xl transition-all hover:bg-white/10 focus:border-purple-500/50 focus:outline-none"
+                  >
+                    <option value="">New chat</option>
+                    {conversations.map((conv) => (
+                      <option key={conv.id} value={conv.id}>
+                        {conv.title}
+                      </option>
+                    ))}
+                  </select>
+                  <MessagesSquare className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-white/50" />
+                  <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-white/50" />
+                </div>
               )}
               {/* Active KB badge */}
               <div className="flex items-center gap-1 rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1.5">

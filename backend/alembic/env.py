@@ -25,6 +25,7 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 from app.core.database import Base  # noqa: E402
+from app.models.chat import ChatConversation, ChatMessage  # noqa: E402,F401
 from app.models.note import Note  # noqa: E402,F401
 
 target_metadata = Base.metadata

@@ -112,6 +112,8 @@ class Settings(BaseSettings):
     )
     MAX_POTENTIAL_QUESTIONS: int = 10
     MAX_LOOP_ITERATIONS: int = 10
+    # Recent turns included when resolving follow-up chat questions.
+    CHAT_HISTORY_MAX_MESSAGES: int = 12
     # When True: strict benchmark prompting (exact fact extraction, terse output).
     # When False: verbose, natural-language answers for general KB use.
     BENCHMARK_MODE: bool = False

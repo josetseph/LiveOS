@@ -1032,6 +1032,75 @@ class LLMService:
         )
         return response.choices[0].message.content
 
+    def rewrite_follow_up_query(
+        self,
+        history: list[dict],
+        latest_query: str,
+        model: str | None = None,
+    ) -> str:
+        """Rewrite a follow-up into a standalone retrieval query using recent chat turns."""
+        latest = (latest_query or "").strip()
+        if not latest or not history:
+            return latest
+
+        lines: list[str] = []
+        for turn in history[-settings.CHAT_HISTORY_MAX_MESSAGES :]:
+            role = (turn.get("role") or "").strip().lower()
+            content = (turn.get("content") or "").strip()
+            if not content or role not in {"user", "assistant"}:
+                continue
+            label = "User" if role == "user" else "Assistant"
+            if len(content) > 600:
+                content = content[:597].rstrip() + "..."
+            lines.append(f"{label}: {content}")
+
+        if not lines:
+            return latest
+
+        prompt = (
+            "You rewrite follow-up questions into standalone search queries for a "
+            "personal knowledge base.\n\n"
+            "CONVERSATION:\n"
+            + "\n".join(lines)
+            + "\n\n"
+            f"LATEST USER MESSAGE: {latest}\n\n"
+            "Return ONE standalone search query that captures what the user is asking "
+            "now, resolving pronouns and references from the conversation.\n"
+            "Do not answer the question. Do not add explanation.\n"
+            "Reply with only the rewritten query."
+        )
+
+        try:
+            raw = self._reason_step_sync(prompt, model=model)
+            rewritten = (raw or "").strip().strip('"').strip("'").strip()
+            if rewritten and len(rewritten) <= 300:
+                logger.info(
+                    f"[LLM] rewrite_follow_up_query: {latest!r} -> {rewritten!r}"
+                )
+                return rewritten
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(f"[LLM] rewrite_follow_up_query failed: {exc}")
+        return latest
+
+    def _reason_step_sync(self, prompt: str, model: str | None = None) -> str:
+        """Synchronous lightweight reasoning call for query rewrite."""
+        _model = model or self.get_chat_model()
+        extra_body = self._with_keep_alive()
+        response = self.chat_client.chat.completions.create(
+            model=_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a precise query rewriter. Output only the rewritten query."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            extra_body=extra_body,
+        )
+        return (response.choices[0].message.content or "").strip()
+
     def generate_title(self, text: str, model: str | None = None) -> str:
         """
         Generates a concise 3-5 word title for a note.
@@ -1310,6 +1379,7 @@ class LLMService:
         search_query: str | None,
         docs: list[dict],
         tried_queries: list[str] | None = None,
+        conversation_context: str | None = None,
     ) -> dict:  # pylint: disable=too-many-arguments,too-many-positional-arguments
         """
         Single iteration of the iterative retrieval loop.
@@ -1423,6 +1493,7 @@ class LLMService:
 
         prompt = (
             "You are a research assistant solving a multi-hop question step by step.\n\n"
+            f"{conversation_context or ''}"
             f"ORIGINAL QUESTION: {original_question}\n\n"
             f"{prior_block}"
             f"{tried_block}"
