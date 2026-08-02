@@ -1,6 +1,6 @@
 # Orb Desktop Packaging
 
-Build unsigned macOS (`.dmg`) and Windows (`.exe`) installers that bundle Electron, embedded Python, portable Node, a Next.js standalone UI, and a seeded Firefly III + PHP runtime.
+Build unsigned macOS (`.dmg`), Windows (`.exe`), and Linux (`.AppImage`) installers that bundle Electron, embedded Python, portable Node, a Next.js standalone UI, and a seeded Firefly III + PHP runtime.
 
 ## Quick start (local build)
 
@@ -63,6 +63,7 @@ The supervisor copies the Firefly seed from bundled resources into `DATA_DIR/fir
 
 - Build **macOS** installers on macOS (Metal `llama-cpp-python` on arm64; needs `cmake`).
 - Build **Windows** installers on Windows (CPU wheels; x64 only for v1).
+- Build **Linux** installers on Linux (AppImage; x64 only for v1).
 - Do not cross-compile native Python wheels.
 
 ## CI
