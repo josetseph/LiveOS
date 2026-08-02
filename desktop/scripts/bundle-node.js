@@ -95,6 +95,23 @@ async function main() {
     fs.rmSync(path.join(outRoot, drop), { recursive: true, force: true });
   }
 
+  // Official Node archives ship npm/npx/corepack as symlinks. After cp + deleting
+  // the extract tree those can become absolute CI paths (…/runner/work/…), which
+  // break Gatekeeper ("app is damaged") and confuse xattr/codesign. Desktop only
+  // needs the `node` binary — drop the helper links (and unused npm tree).
+  const binDir = path.join(outRoot, process.platform === "win32" ? "." : "bin");
+  for (const name of ["npm", "npx", "corepack", "npm.cmd", "npx.cmd", "corepack.cmd"]) {
+    fs.rmSync(path.join(binDir, name), { force: true });
+  }
+  fs.rmSync(path.join(outRoot, "lib", "node_modules", "npm"), {
+    recursive: true,
+    force: true,
+  });
+  fs.rmSync(path.join(outRoot, "lib", "node_modules", "corepack"), {
+    recursive: true,
+    force: true,
+  });
+
   fs.rmSync(archivePath, { force: true });
   fs.rmSync(extractTo, { recursive: true, force: true });
   console.log("Node ready at", outRoot);

@@ -129,12 +129,19 @@ Installers ship as macOS `.dmg` and Windows `.exe` from [GitHub Releases](https:
 
 ### macOS
 
-1. Download the latest `.dmg` from [Releases](https://github.com/josetseph/Orb/releases/latest)
+1. Download the latest `.dmg` from [Releases](https://github.com/josetseph/Orb/releases/latest) (`arm64` for Apple Silicon, `x64` for Intel)
 2. Open it and drag **Orb** into Applications
 3. Launch Orb
 4. Complete the first-run wizard — pick a **data directory** and a **models directory**
 
 On first launch the app downloads Qdrant and Meilisearch into your data dir, and you can pull GGUF models from Setup.
+
+If macOS says the app is **damaged** (common for unsigned downloads), clear quarantine then reopen:
+
+```bash
+xattr -cr /Applications/Orb.app
+open /Applications/Orb.app
+```
 
 ### Windows
 
@@ -144,6 +151,7 @@ On first launch the app downloads Qdrant and Meilisearch into your data dir, and
 
 > [!TIP]
 > Unsigned builds may need an extra click through Gatekeeper / SmartScreen until notarization and Authenticode are enabled.
+> Prefer **v0.1.1+** — v0.1.0 Mac builds could show “damaged” due to broken Node helper symlinks from CI.
 
 ---
 

@@ -1,7 +1,7 @@
 {
   "name": "orb",
   "productName": "Orb",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "author": "Joseph Etse <projects@josetseph.com>",
   "description": "Orb desktop — supervisor for vault notes, search engines, and API",
@@ -78,6 +78,7 @@
       }
     ],
     "asar": true,
+    "artifactName": "${productName}-${version}-${arch}-${os}.${ext}",
     "publish": [
       {
         "provider": "github",
@@ -89,20 +90,8 @@
       "category": "public.app-category.productivity",
       "icon": "build/icon.png",
       "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "arm64",
-            "x64"
-          ]
-        },
-        {
-          "target": "zip",
-          "arch": [
-            "arm64",
-            "x64"
-          ]
-        }
+        "dmg",
+        "zip"
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
