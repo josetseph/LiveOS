@@ -167,6 +167,72 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
             "thinking": thinking,
         }
 
+    async def retrieve_for_query(
+        self,
+        user_query: str,
+        history: list[ChatTurn] | None = None,
+        progress_callback: Callable[[str, str | None], None] | None = None,
+    ) -> dict:
+        """Retrieve note context without synthesizing a final answer."""
+        history = history or []
+        history_payload = [{"role": t.role, "content": t.content} for t in history]
+        rewritten_query = llm_service.rewrite_follow_up_query(
+            history_payload, user_query
+        )
+
+        def _progress(stage: str, model: str | None = None) -> None:
+            if progress_callback:
+                progress_callback(stage, model)
+
+        _progress("Planning retrieval", "Gemma4")
+        final_answer, all_docs, thinking = (
+            await self._retrieval.retrieve_with_self_correction(
+                rewritten_query,
+                top_k=50,
+                max_hops=10,
+                filter_docs=False,
+                progress_callback=progress_callback,
+                conversation_history=history_payload,
+            )
+        )
+        _progress("Selecting best evidence")
+
+        def _dedupe_docs(docs: list[dict]) -> list[dict]:
+            seen_local: set[str] = set()
+            deduped: list[dict] = []
+            for doc in docs:
+                doc_id = (
+                    doc.get("original_obj", {}).get("name")
+                    or doc.get("note_id")
+                    or doc.get("text", "")
+                )
+                if doc_id and doc_id not in seen_local:
+                    deduped.append(doc)
+                    seen_local.add(doc_id)
+            return deduped
+
+        unique_docs = _dedupe_docs(all_docs)
+        # With 32k chat ctx, keep more high-confidence passages in the prompt.
+        max_context_docs = 12
+        if len(unique_docs) > max_context_docs:
+            unique_docs = sorted(
+                unique_docs,
+                key=lambda d: d.get("rerank_score", 0.0),
+                reverse=True,
+            )[:max_context_docs]
+
+        for doc in unique_docs:
+            if "rerank_score" not in doc:
+                doc["linked_notes"] = []
+
+        return {
+            "query": user_query,
+            "rewritten_query": rewritten_query,
+            "context": unique_docs,
+            "thinking": thinking,
+            "pipeline_answer": final_answer,
+        }
+
     async def _extract_references(self, docs: list) -> list:
         """
         Extract unique note references from retrieved documents.

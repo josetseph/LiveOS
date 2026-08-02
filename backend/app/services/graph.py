@@ -1296,6 +1296,47 @@ class GraphService:
             )
         return nodes
 
+    def get_node_connections(self, node_id: str, *, limit: int = 16) -> list[dict]:
+        """1-hop neighbours for a node id (semantic + REFERENCES)."""
+        if not node_id:
+            return []
+        params = {"node_id": node_id}
+        outgoing = self.execute_query(self._hop_query("->"), params)
+        for row in outgoing:
+            row["edge_direction"] = "outgoing"
+        incoming = self.execute_query(self._hop_query("<-"), params)
+        seen: set[str] = {r["node_id"] for r in outgoing if r.get("node_id")}
+        for row in incoming:
+            row["edge_direction"] = "incoming"
+            if row.get("node_id") not in seen:
+                outgoing.append(row)
+                seen.add(row["node_id"])
+        rows = sorted(outgoing, key=lambda r: (r.get("name") or "").lower())
+        return rows[: max(1, limit)]
+
+    def get_notes_referencing_node(self, node_id: str, *, limit: int = 8) -> list[dict]:
+        """Notes that REFERENCES this entity/concept node."""
+        if not node_id:
+            return []
+        rows = self.execute_query(
+            """
+            MATCH (note:Node)-[r:REFERENCES]->(n:Node {id: $nid})
+            WHERE note.kind = 'note'
+            RETURN DISTINCT note.id AS note_id, note.name AS name,
+                   coalesce(r.note_id, note.id) AS source_note_id
+            LIMIT $lim
+            """,
+            {"nid": node_id, "lim": int(limit)},
+        )
+        return [
+            {
+                "note_id": r.get("note_id") or r.get("source_note_id"),
+                "name": r.get("name") or "Untitled note",
+            }
+            for r in rows
+            if r.get("note_id") or r.get("source_note_id")
+        ]
+
     def get_node_detail(self, node_id: str) -> dict | None:
         """Return detailed content for a single node, including contexts, facts, and community membership."""
         rows = self.execute_query(
@@ -1304,7 +1345,7 @@ class GraphService:
             WHERE n.kind IN ['indexable', 'note']
             OPTIONAL MATCH (n)-[:MEMBER_OF]->(c:Node)
             RETURN n.id AS node_id, n.name AS name, n.type AS node_type,
-                   c.id AS community_id, n.kind AS kind
+                   c.id AS community_id, c.name AS community_name, n.kind AS kind
             LIMIT 1
             """,
             {"nid": node_id},
@@ -1316,7 +1357,7 @@ class GraphService:
                 WHERE c.kind = 'community'
                 RETURN c.id AS node_id, c.name AS name,
                        'community' AS node_type, NULL AS community_id,
-                       'community' AS kind
+                       NULL AS community_name, 'community' AS kind
                 LIMIT 1
                 """,
                 {"nid": node_id},
@@ -1331,6 +1372,14 @@ class GraphService:
 
         content_map = self._qdrant.get_nodes_content_by_ids([nid])
         c = content_map.get(nid, {})
+        # Single-id path can recover contexts even when bulk core retrieve misses.
+        if not c.get("description") and not c.get("isolated_contexts"):
+            single = self._qdrant.get_node_content_by_id(nid) or {}
+            if single:
+                c = {**c, **single}
+
+        connections = self.get_node_connections(nid)
+        related_notes = self.get_notes_referencing_node(nid)
 
         return {
             "node_id": nid,
@@ -1342,9 +1391,26 @@ class GraphService:
             "domain": c.get("domain"),
             "status": c.get("status"),
             "community_id": row.get("community_id"),
+            "community_name": row.get("community_name"),
             "summary": _strip_facts_prefix(c.get("description") or ""),
             "themes": c.get("themes") or [],
             "member_count": c.get("member_count") or 0,
+            "connections": [
+                {
+                    "node_id": conn.get("node_id"),
+                    "name": (conn.get("name") or "").strip(),
+                    "kind": conn.get("label"),
+                    "relationship": (
+                        (conn.get("relationship_path") or [None])[0]
+                        if isinstance(conn.get("relationship_path"), list)
+                        else conn.get("relationship_path")
+                    ),
+                    "direction": conn.get("edge_direction"),
+                }
+                for conn in connections
+                if conn.get("node_id")
+            ],
+            "related_notes": related_notes,
         }
 
 

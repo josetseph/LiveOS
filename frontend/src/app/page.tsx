@@ -38,7 +38,7 @@ export default function Home() {
           >
             <Image
               src="/logo.png"
-              alt="LiveOS"
+              alt="LifeOS"
               width={96}
               height={96}
               loading="eager"
@@ -53,7 +53,7 @@ export default function Home() {
             transition={{ duration: 0.8, delay: 0.2 }}
             className="mb-6 bg-linear-to-r from-purple-400 via-pink-400 to-purple-400 bg-clip-text text-6xl font-bold tracking-tight text-transparent md:text-8xl"
           >
-            LiveOS
+            LifeOS
           </motion.h1>
 
           {/* Subtitle */}
@@ -107,7 +107,7 @@ export default function Home() {
             </Link>
           </motion.div>
 
-          {/* System Info */}
+          {/* Tagline + stack */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -117,7 +117,7 @@ export default function Home() {
             <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 backdrop-blur-xl">
               <Brain className="h-4 w-4 text-purple-400" />
               <span className="text-sm text-white/80">
-                Models: Gemma3, Whisper V3, Florence 2, Qwen3 (Embedding and Reranker)
+                Your vault, searchable and connected — private by default
               </span>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-2">
@@ -135,7 +135,7 @@ export default function Home() {
               </div>
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
                 <Search className="h-3 w-3 text-yellow-400" />
-                <span className="text-xs text-white/70">Typesense</span>
+                <span className="text-xs text-white/70">Meilisearch</span>
               </div>
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
                 <Cpu className="h-3 w-3 text-orange-400" />

@@ -106,8 +106,11 @@ async def main():
     # Run Migrations
     run_migrations()
 
-    # Check RustFS
-    init_storage()
+    # Check object storage only when using S3/RustFS
+    if (settings.STORAGE_BACKEND or "local").lower() == "s3":
+        init_storage()
+    else:
+        print("⏭️  Skipping RustFS (STORAGE_BACKEND=local — vault attachments).")
 
     # Initialize Qdrant
     init_vectors()

@@ -204,6 +204,19 @@ class IngestionWorkflow:
             finally:
                 # Always decrement the active counter and potentially schedule
                 # community recompute, regardless of success or failure.
+                # Free whatever model the note left resident (chat/embed/HF).
+                try:
+                    from app.services.local_models import (
+                        local_gguf_reranker,
+                        local_llama_runtime,
+                    )
+                    from app.services.multimodal_runtime import multimodal_runtime
+
+                    local_llama_runtime.unload()
+                    local_gguf_reranker.unload()
+                    multimodal_runtime.unload(None)
+                except Exception as unload_exc:  # pylint: disable=broad-exception-caught
+                    logger.debug("Post-ingestion model unload skipped: %s", unload_exc)
                 await _tracker.end_ingestion(self.rebuild_leiden_communities)
 
     # Internal helpers reused by the Agent
@@ -230,24 +243,36 @@ class IngestionWorkflow:
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
     async def _update_note_content_postgres(self, note_id: str, content: str):
-        """
-        Updates the Note content in Postgres (The Body).
-        Called by Agent when new text (transcription/OCR) is found.
-        """
-        from sqlalchemy import update
+        """Persist enriched note body to the vault .md (and clear deprecated DB body)."""
+        from sqlalchemy import select
 
         from app.core.database import AsyncSessionLocal
         from app.models.note import Note
+        from app.services.kb_registry import kb_registry
+        from app.services.note_files import persist_note_body
 
         async with AsyncSessionLocal() as session:
             try:
-                await session.execute(
-                    update(Note).where(Note.id == note_id).values(content=content)
-                )
+                result = await session.execute(select(Note).where(Note.id == note_id))
+                note = result.scalar_one_or_none()
+                if note is None:
+                    raise ValueError(f"Note {note_id} not found")
+
+                kb = kb_registry.get_kb(note.kb_id) if note.kb_id else None
+                if kb and kb.vault_path:
+                    persist_note_body(note, kb, content)
+                    logger.info(
+                        f"[Ingestion] Updated vault content for Note {note_id} "
+                        f"({note.rel_path})"
+                    )
+                else:
+                    note.content = content
+                    logger.warning(
+                        f"[Ingestion] No vault for Note {note_id}; wrote deprecated content column"
+                    )
                 await session.commit()
-                logger.info(f"[Ingestion] Updated Postgres Content for Note {note_id}")
             except Exception as e:
-                logger.error(f"Error updating Postgres content: {e}")
+                logger.error(f"Error updating note content: {e}")
                 raise e  # Re-raise for tenacity
 
     @retry(
@@ -324,6 +349,7 @@ class IngestionWorkflow:
                     update(Note)
                     .where(Note.id == note_id)
                     .values(
+                        processed=False,
                         failed=True,
                         processing_stage="Ingestion failed",
                         processing_model=None,
@@ -354,16 +380,20 @@ class IngestionWorkflow:
         else:
             title = llm_service.generate_title(
                 content,
-                model=llm_service._get_ingestion_model(),  # pylint: disable=protected-access
+                model=llm_service.get_ingestion_model(),
             )
             logger.info(f"[Ontology] Generated title: '{title}'")
         # Base Note Node — structural node in Kuzu with kind='note'.
+        # Always set name so "Mentioned in notes" can show the real title.
         query_note = """
-        MERGE (n:Node {id: $id}) ON CREATE SET n.kind = 'note'
+        MERGE (n:Node {id: $id})
+        ON CREATE SET n.kind = 'note', n.name = $title
+        ON MATCH SET n.kind = 'note', n.name = $title
         """
+        note_title = (title or "").strip() or "Untitled"
         self._graph.execute_query(
             query_note,
-            {"id": note_id},
+            {"id": note_id, "title": note_title},
         )
 
         # Helper to normalize names: strip # prefix, extra whitespace, and lowercase
@@ -472,12 +502,16 @@ class IngestionWorkflow:
                 f"[Ontology] {len(node_data)} nodes resolved ({_new_count} new) — writing to Kuzu"
             )
 
-            # Write bare structural nodes to Kuzu (id only — no content)
+            # Write structural nodes to Kuzu with id + name + type so later
+            # summarization can resolve by name if Qdrant stubs are missing.
             query_nodes = """
-            MERGE (note:Node {id: $note_id}) ON CREATE SET note.kind = 'note'
+            MERGE (note:Node {id: $note_id})
+            ON CREATE SET note.kind = 'note', note.name = $note_title
+            ON MATCH SET note.kind = 'note', note.name = $note_title
             WITH note
             UNWIND $data AS item
             MERGE (n:Node {id: item.id}) ON CREATE SET n.kind = 'indexable'
+            SET n.name = item.name, n.type = item.type
             MERGE (note)-[r:REFERENCES]->(n)
             SET r.note_id = $note_id
             """
@@ -485,7 +519,18 @@ class IngestionWorkflow:
             if node_data:
                 self._graph.execute_query(
                     query_nodes,
-                    {"data": [{"id": d["id"]} for d in node_data], "note_id": note_id},
+                    {
+                        "data": [
+                            {
+                                "id": d["id"],
+                                "name": d["name"],
+                                "type": d["type"] or "unknown",
+                            }
+                            for d in node_data
+                        ],
+                        "note_id": note_id,
+                        "note_title": note_title,
+                    },
                 )
 
                 # Seed Qdrant node_cores stubs for NEW nodes so that
@@ -493,18 +538,30 @@ class IngestionWorkflow:
                 # correct ID via find_node_id_by_name instead of minting a
                 # second different ID.  The stub is overwritten moments later
                 # by _update_node_summary with the real description + embedding.
+                stub_ok = 0
+                stub_fail = 0
                 for d in node_data:
                     if d["is_new"] and d["embedding"]:
-                        self._qdrant.upsert_node_core(
+                        if self._qdrant.upsert_node_core(
                             node_id=d["id"],
                             name=d["name"],
                             node_type=d["type"],
                             description_vector=d["embedding"],
-                        )
+                        ):
+                            stub_ok += 1
+                        else:
+                            stub_fail += 1
                 logger.info(
-                    f"[Ontology] Seeded Qdrant stubs for "
-                    f"{sum(1 for d in node_data if d['is_new'])} new node(s)"
+                    f"[Ontology] Seeded Qdrant stubs: ok={stub_ok} fail={stub_fail}"
                 )
+                if stub_fail and not stub_ok and any(
+                    d["is_new"] and d["embedding"] for d in node_data
+                ):
+                    raise RuntimeError(
+                        "Failed to seed Qdrant node_cores stubs — aborting ingest "
+                        "so we do not create Kuzu/Qdrant ID split-brain. "
+                        "Check Qdrant is up and embedding dimensions match collections."
+                    )
 
         # 6. RELATIONSHIPS (New - Inter-node connections)
         if extraction.relationships:
@@ -988,20 +1045,36 @@ class IngestionWorkflow:
             # 6. Write to Qdrant (append new contexts).
             def _write_qdrant():
                 # Append each new context — existing ones stay in Qdrant untouched
+                wrote = 0
                 for _ctx_text, _ctx_vector in new_ctx_pairs:
-                    self._qdrant.append_node_item(
+                    if self._qdrant.append_node_item(
                         collection_name=self._qdrant.col_contexts,
                         node_id=node_id,
                         content=_ctx_text,
                         vector=_ctx_vector,
                         note_created_at=note_created_at,
-                    )
+                    ):
+                        wrote += 1
+                return wrote
 
-            await loop.run_in_executor(None, _write_qdrant)
-            logger.info(
-                f"  [NodeSummary] '{name}' Qdrant write complete — "
-                f"ctx_appended({len(new_ctx_pairs)})"
-            )
+            wrote_count = await loop.run_in_executor(None, _write_qdrant)
+            expected = len(new_ctx_pairs)
+            if expected:
+                if wrote_count == expected:
+                    logger.info(
+                        f"  [NodeSummary] '{name}' Qdrant contexts stored — "
+                        f"ctx_appended({wrote_count}/{expected})"
+                    )
+                else:
+                    logger.error(
+                        f"  [NodeSummary] '{name}' Qdrant context write incomplete — "
+                        f"ctx_appended({wrote_count}/{expected})"
+                    )
+                    raise RuntimeError(
+                        f"Failed to persist contexts to Qdrant for '{name}' "
+                        f"({wrote_count}/{expected}). Check Qdrant availability and "
+                        f"embedding dimensions."
+                    )
 
             # 6b. Write merged-context vector to node_cores.
             # Joining all accumulated contexts into a single passage and embedding
@@ -1014,7 +1087,7 @@ class IngestionWorkflow:
 
                 def _write_node_core():
                     merged_vec = embedding_service.embed_documents([merged_ctx_text])[0]
-                    self._qdrant.upsert_node_core(
+                    return self._qdrant.upsert_node_core(
                         node_id=node_id,
                         name=name,
                         node_type=node_type,
@@ -1022,13 +1095,18 @@ class IngestionWorkflow:
                         description=merged_ctx_text,
                     )
 
-                await loop.run_in_executor(None, _write_node_core)
+                core_ok = await loop.run_in_executor(None, _write_node_core)
+                if not core_ok:
+                    raise RuntimeError(
+                        f"Failed to upsert Qdrant node_cores for '{name}' "
+                        f"(id={node_id}). Check Qdrant and embedding dimensions."
+                    )
                 logger.debug(
                     f"  [NodeSummary] '{name}' node_cores merged vector written "
                     f"({len(existing_contexts)} context(s) merged)"
                 )
 
-            # 7. Write to Typesense
+            # 7. Write to Typesense only after Qdrant succeeded (Qdrant is SoT).
             def _write_es():
                 # Fetch relationship NL sentences from Qdrant (not Kuzu)
                 rel_qdrant = self._qdrant.get_relationships_for_node_ids([node_id])
@@ -1044,13 +1122,7 @@ class IngestionWorkflow:
                 # what Typesense already has so we don't wipe it with a blank upsert.
                 if not contexts_text:
                     try:
-                        existing_ts = (
-                            self._typesense.client.collections[
-                                self._typesense.collection
-                            ]
-                            .documents[node_id]
-                            .retrieve()
-                        )
+                        existing_ts = self._typesense.get_node(node_id) or {}
                         contexts_text = existing_ts.get("isolated_contexts", "")
                     except Exception:  # pylint: disable=broad-exception-caught
                         pass
@@ -1249,7 +1321,7 @@ class IngestionWorkflow:
         raw = (
             llm_service.reason(
                 prompt,
-                model=llm_service._get_ingestion_model(),  # pylint: disable=protected-access
+                model=llm_service.get_ingestion_model(),
             )
             or ""
         )
@@ -1302,7 +1374,7 @@ class IngestionWorkflow:
         raw = (
             llm_service.reason(
                 prompt,
-                model=llm_service._get_ingestion_model(),  # pylint: disable=protected-access
+                model=llm_service.get_ingestion_model(),
             )
             or ""
         )
@@ -2052,9 +2124,22 @@ class IngestionWorkflow:
 
     def get_maintenance_status(self) -> dict:
         """Return the running state of background maintenance jobs."""
+        tracker = _tracker.get_status_snapshot()
         return {
-            "community_detection": {"running": _community_run_running},
+            "community_detection": {
+                "running": _community_run_running
+                or bool(tracker.get("community_recompute_running")),
+                "pending_nodes": tracker.get("pending_community_nodes", 0),
+                "needed": bool(tracker.get("community_recompute_needed")),
+                "timer_armed": bool(tracker.get("community_timer_armed")),
+                "idle_seconds": tracker.get("community_idle_seconds"),
+            },
             "temporal_digests": {"running": _temporal_digest_running},
+            "ingestion": {
+                "active": int(tracker.get("active_ingestions") or 0),
+                "last_completed_at": tracker.get("last_ingestion_at"),
+            },
+            "healthy": True,
         }
 
 

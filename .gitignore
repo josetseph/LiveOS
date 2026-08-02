@@ -5,12 +5,8 @@
 tmp/
 .agent/
 .gemini/
-.setup-venv/
-.host-inference-venv-marlin/
-.host-inference-venv-local-models/
-.host-inference.pids
-.host-inference-logs/
-.ollama.log
+/backend/venv
+/backend/.venv
 *.log
 
 # Always track Results folders (overrides *.log)
@@ -38,6 +34,9 @@ __pycache__/
 /frontend/node_modules
 /frontend/out/
 /frontend/build/
+/desktop/node_modules
+/desktop/dist
+/desktop/resources
 .env
 .env.local
 /batch-note-processing/notes

@@ -1,0 +1,271 @@
+"""Move / rename vault files and rewrite markdown references."""
+
+from __future__ import annotations
+
+import re
+import shutil
+from pathlib import Path
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.note import Note
+from app.services.kb_registry import KBContext
+from app.services.note_files import note_body, persist_note_body
+from app.services.vault import mark_self_write, title_from_filename
+
+
+def _norm(rel: str) -> str:
+    return (rel or "").replace("\\", "/").lstrip("/")
+
+
+def safe_vault_join(vault: Path, rel: str) -> Path:
+    full = (vault / _norm(rel)).resolve()
+    root = vault.resolve()
+    try:
+        full.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Path escapes vault") from exc
+    return full
+
+
+def unique_rel_path(vault: Path, desired_rel: str) -> str:
+    """If ``desired_rel`` exists, append `` 2``, `` 3``, … before the suffix."""
+    rel = _norm(desired_rel)
+    if not (vault / rel).exists():
+        return rel
+    path = Path(rel)
+    stem, suffix = path.stem, path.suffix
+    parent = str(path.parent).replace("\\", "/")
+    if parent == ".":
+        parent = ""
+    n = 2
+    while True:
+        name = f"{stem} {n}{suffix}"
+        candidate = f"{parent}/{name}" if parent else name
+        if not (vault / candidate).exists():
+            return candidate
+        n += 1
+
+
+def rewrite_refs_in_text(content: str, old_rel: str, new_rel: str, kb_id: str) -> str:
+    """Rewrite attachment / vault-file links when a file moves.
+
+    Only rewrites markdown link/image *targets* — never a bare substring replace,
+    which would turn ``/vault-files/kb/attachments/x.mp4`` into
+    ``…/attachments/attachments/x.mp4`` when ``old_rel`` is just the filename.
+    """
+    old = _norm(old_rel)
+    new = _norm(new_rel)
+    if not old or old == new or not content:
+        return content
+
+    from urllib.parse import quote
+
+    encoded_old = "/".join(quote(seg, safe="") for seg in old.split("/"))
+    encoded_new = "/".join(quote(seg, safe="") for seg in new.split("/"))
+
+    text = content
+    # ](...target...)  — cover vault-files URLs and relative vault paths
+    for src, dst in (
+        (f"/vault-files/{kb_id}/{old}", f"/vault-files/{kb_id}/{new}"),
+        (f"/vault-files/{kb_id}/{encoded_old}", f"/vault-files/{kb_id}/{encoded_new}"),
+        (old, new),
+        (encoded_old, encoded_new),
+    ):
+        if not src or src == dst:
+            continue
+        text = re.sub(
+            rf"(\]\()({re.escape(src)})(\))",
+            rf"\1{dst}\3",
+            text,
+        )
+    # Collapse accidental doubled attachments/ from older buggy rewrites
+    text = re.sub(
+        r"(/vault-files/[^/]+/)attachments/attachments/",
+        r"\1attachments/",
+        text,
+    )
+    return text
+
+
+async def rewrite_refs_across_notes(
+    db: AsyncSession,
+    kb: KBContext,
+    old_rel: str,
+    new_rel: str,
+) -> int:
+    """Update every note body that referenced ``old_rel``."""
+    notes = list(
+        (await db.execute(select(Note).where(Note.kb_id == kb.kb_id))).scalars().all()
+    )
+    changed = 0
+    for note in notes:
+        body = note_body(note, kb)
+        updated = rewrite_refs_in_text(body, old_rel, new_rel, kb.kb_id)
+        if updated != body:
+            persist_note_body(note, kb, updated)
+            changed += 1
+    return changed
+
+
+def strip_refs_in_text(content: str, rel: str, kb_id: str) -> str:
+    """Remove markdown image/link references that point at ``rel``."""
+    old = _norm(rel)
+    if not old or not content:
+        return content
+    targets = {
+        old,
+        f"/vault-files/{kb_id}/{old}",
+        Path(old).name,
+    }
+    # Also match percent-encoded path variants used in markdown
+    from urllib.parse import quote
+
+    encoded = "/".join(quote(seg, safe="") for seg in old.split("/"))
+    targets.add(encoded)
+    targets.add(f"/vault-files/{kb_id}/{encoded}")
+
+    text = content
+    for target in targets:
+        if not target:
+            continue
+        escaped = re.escape(target)
+        text = re.sub(
+            rf"!\[[^\]]*\]\([^)]*{escaped}[^)]*\)",
+            "",
+            text,
+        )
+        text = re.sub(
+            rf"\[[^\]]*\]\([^)]*{escaped}[^)]*\)",
+            "",
+            text,
+        )
+    # Collapse leftover blank runs from removed embeds
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
+async def strip_refs_across_notes(
+    db: AsyncSession,
+    kb: KBContext,
+    rel: str,
+) -> int:
+    notes = list(
+        (await db.execute(select(Note).where(Note.kb_id == kb.kb_id))).scalars().all()
+    )
+    changed = 0
+    for note in notes:
+        body = note_body(note, kb)
+        updated = strip_refs_in_text(body, rel, kb.kb_id)
+        if updated != body:
+            persist_note_body(note, kb, updated)
+            changed += 1
+    return changed
+
+
+async def delete_vault_file(
+    db: AsyncSession,
+    kb: KBContext,
+    rel: str,
+) -> dict:
+    """Delete a vault attachment (not a note .md) and strip markdown links."""
+    vault = Path(kb.vault_path)
+    src_rel = _norm(rel)
+    if not src_rel or ".." in src_rel.split("/"):
+        raise ValueError("Invalid path")
+    if src_rel.lower().endswith(".md"):
+        raise ValueError("Use note delete for markdown files")
+
+    src = safe_vault_join(vault, src_rel)
+    if not src.exists() or not src.is_file():
+        raise FileNotFoundError(f"File not found: {src_rel}")
+
+    mark_self_write(vault, src_rel)
+    src.unlink()
+    stripped = await strip_refs_across_notes(db, kb, src_rel)
+    await db.commit()
+    return {"deleted": src_rel, "links_stripped": stripped}
+
+
+async def move_vault_file(
+    db: AsyncSession,
+    kb: KBContext,
+    from_rel: str,
+    to_rel: str,
+) -> dict:
+    """Move any vault file (note .md or attachment) and rewrite links."""
+    vault = Path(kb.vault_path)
+    src_rel = _norm(from_rel)
+    dst_rel = _norm(to_rel)
+    if not src_rel or not dst_rel:
+        raise ValueError("from_rel and to_rel are required")
+    if ".." in src_rel.split("/") or ".." in dst_rel.split("/"):
+        raise ValueError("Invalid path")
+
+    src = safe_vault_join(vault, src_rel)
+    dst_rel = unique_rel_path(vault, dst_rel)
+    dst = safe_vault_join(vault, dst_rel)
+    if not src.exists() or not src.is_file():
+        raise FileNotFoundError(f"Source not found: {src_rel}")
+    if src.resolve() == dst.resolve():
+        return {
+            "from": src_rel,
+            "to": dst_rel,
+            "note_id": None,
+            "links_rewritten": 0,
+        }
+    if dst.exists():
+        raise FileExistsError(f"Destination exists: {dst_rel}")
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    mark_self_write(vault, src_rel)
+    mark_self_write(vault, dst_rel)
+    shutil.move(str(src), str(dst))
+
+    # If this is a note markdown file, update its row
+    note_row = None
+    if src_rel.lower().endswith(".md"):
+        note_row = (
+            await db.execute(
+                select(Note).where(Note.kb_id == kb.kb_id, Note.rel_path == src_rel)
+            )
+        ).scalar_one_or_none()
+        if note_row:
+            note_row.rel_path = dst_rel
+            # Keep the existing display title — never overwrite from filename
+            # (users often rename the title without renaming the .md file).
+            if not (note_row.title or "").strip():
+                note_row.title = title_from_filename(dst_rel)
+
+    rewritten = await rewrite_refs_across_notes(db, kb, src_rel, dst_rel)
+    await db.commit()
+    if note_row:
+        await db.refresh(note_row)
+
+    return {
+        "from": src_rel,
+        "to": dst_rel,
+        "note_id": note_row.id if note_row else None,
+        "links_rewritten": rewritten,
+    }
+
+
+async def move_note_to_folder(
+    db: AsyncSession,
+    kb: KBContext,
+    note: Note,
+    folder: str,
+) -> dict:
+    """Move a note into ``folder`` keeping the same filename stem."""
+    current = _norm(note.rel_path or "")
+    if not current:
+        raise ValueError("Note has no vault path")
+    filename = Path(current).name
+    folder_clean = _norm(folder)
+    if folder_clean and ".." in folder_clean.split("/"):
+        raise ValueError("Invalid folder")
+    new_rel = f"{folder_clean}/{filename}" if folder_clean else filename
+    if new_rel == current:
+        return {"from": current, "to": new_rel, "note_id": note.id, "links_rewritten": 0}
+    return await move_vault_file(db, kb, current, new_rel)

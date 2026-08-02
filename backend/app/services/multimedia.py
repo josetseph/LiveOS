@@ -46,7 +46,13 @@ class MultimediaService:
                 return settings.BUCKET_NAME, key
 
         files_url = settings.FILES_URL.rstrip("/")
-        if files_url.startswith("/") and path_or_url.startswith(files_url + "/"):
+        # Desktop uses FILES_URL=/vault-files as a local vault proxy — never S3.
+        if (
+            getattr(settings, "STORAGE_BACKEND", "local") == "s3"
+            and files_url.startswith("/")
+            and path_or_url.startswith(files_url + "/")
+            and not path_or_url.startswith("/vault-files/")
+        ):
             key = path_or_url[len(files_url) + 1 :]
             if key:
                 return settings.BUCKET_NAME, key
@@ -107,14 +113,98 @@ class MultimediaService:
 
         return path_or_url
 
+    def _resolve_vault_local_path(self, path_or_url: str) -> str | None:
+        """Map ``/vault-files/<kb_id>/<rel>`` to an absolute vault file path."""
+        from pathlib import Path
+        from urllib.parse import unquote, urlparse
+
+        if not path_or_url:
+            return None
+
+        raw = path_or_url.strip()
+        if raw.startswith("http://") or raw.startswith("https://"):
+            raw = urlparse(raw).path or ""
+
+        raw = raw.split("?", 1)[0].replace("\\", "/")
+        marker = "/vault-files/"
+        if marker not in raw and not raw.startswith("vault-files/"):
+            return None
+
+        if raw.startswith("vault-files/"):
+            raw = "/" + raw
+        idx = raw.find(marker)
+        remainder = raw[idx + len(marker) :] if idx >= 0 else ""
+        parts = remainder.split("/", 1)
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            return None
+
+        kb_id, rel = parts[0], unquote(parts[1]).lstrip("/")
+        if not rel or ".." in Path(rel).parts:
+            return None
+
+        try:
+            from app.services.kb_registry import kb_registry
+
+            kb = kb_registry.get_kb(kb_id)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(f"Vault lookup failed for kb={kb_id}: {exc}")
+            return None
+
+        if not kb or not kb.vault_path:
+            logger.warning(f"No vault for kb={kb_id} (url={path_or_url})")
+            return None
+
+        vault_root = Path(kb.vault_path).resolve()
+        abs_path = (vault_root / rel).resolve()
+        try:
+            abs_path.relative_to(vault_root)
+        except ValueError:
+            logger.warning(f"Rejected path escape: {abs_path} not under {vault_root}")
+            return None
+
+        if abs_path.is_file():
+            return str(abs_path)
+        logger.warning(f"Vault file missing: {abs_path}")
+        return None
+
+    def _is_ephemeral_download(self, original_ref: str, local_path: str) -> bool:
+        """True when ``local_path`` is a temp download we must delete (not a vault file)."""
+        if not local_path or local_path == original_ref:
+            return False
+        if self._resolve_vault_local_path(original_ref) == local_path:
+            return False
+        if os.path.isfile(original_ref) and os.path.samefile(original_ref, local_path):
+            return False
+        return True
+
     def _download_temp_file(self, path_or_url: str) -> str:
-        """Download remote/storage attachments to a temporary local file."""
+        """Resolve vault/local/storage/remote attachments to a local file path."""
         import tempfile
 
         import requests
 
         if os.path.isfile(path_or_url):
             return path_or_url
+
+        # Vault attachments are local-only — never fall through to RustFS/S3.
+        if "/vault-files/" in path_or_url or path_or_url.lstrip("/").startswith(
+            "vault-files/"
+        ):
+            vault_path = self._resolve_vault_local_path(path_or_url)
+            if vault_path:
+                logger.info(f"Resolved vault attachment: {vault_path}")
+                return vault_path
+            raise FileNotFoundError(f"Vault attachment not found: {path_or_url}")
+
+        vault_path = self._resolve_vault_local_path(path_or_url)
+        if vault_path:
+            logger.info(f"Resolved vault attachment: {vault_path}")
+            return vault_path
+
+        if getattr(settings, "STORAGE_BACKEND", "local") != "s3":
+            if os.path.isfile(path_or_url):
+                return path_or_url
+            raise FileNotFoundError(f"Attachment not found: {path_or_url}")
 
         storage_ref = self._parse_storage_ref(path_or_url)
         if storage_ref:
@@ -124,6 +214,9 @@ class MultimediaService:
 
         resolved = self._resolve_storage_url(path_or_url)
         if resolved != path_or_url:
+            vault_path = self._resolve_vault_local_path(resolved)
+            if vault_path:
+                return vault_path
             storage_ref = self._parse_storage_ref(resolved)
             if storage_ref:
                 bucket, key = storage_ref
@@ -131,7 +224,9 @@ class MultimediaService:
                 return self._download_from_storage(bucket, key)
 
         if not resolved.startswith("http"):
-            return resolved
+            if os.path.isfile(resolved):
+                return resolved
+            raise FileNotFoundError(f"Attachment not found: {path_or_url}")
 
         logger.info(f"Downloading remote file: {resolved}...")
         response = requests.get(resolved, timeout=300)
@@ -141,105 +236,120 @@ class MultimediaService:
             tmp.write(response.content)
             return tmp.name
 
-    def _post_file_to_local_models(self, local_path: str, endpoint: str) -> dict:
-        """Upload a local file to the local-models service."""
-        import httpx
+    def _describe_image_local(self, local_path: str) -> str:
+        """Florence caption via in-process multimodal runtime."""
+        from app.services.multimodal_runtime import multimodal_runtime
 
-        if not settings.LOCAL_MODELS_SERVICE_URL:
-            raise RuntimeError("Local models service is disabled")
-
-        url = f"{settings.LOCAL_MODELS_SERVICE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
-        timeout = httpx.Timeout(settings.LOCAL_MODELS_SERVICE_TIMEOUT_SECONDS)
-        with open(local_path, "rb") as file_obj:
-            files = {
-                "file": (
-                    os.path.basename(local_path),
-                    file_obj,
-                    "application/octet-stream",
-                )
-            }
-            response = httpx.post(url, files=files, timeout=timeout)
-            response.raise_for_status()
-            return response.json()
+        return multimodal_runtime.describe_image_path(local_path) or ""
 
     def _caption_video_with_marlin(self, local_path: str) -> dict:
-        """Send a local video file to the dedicated Marlin service."""
-        import httpx
+        """Marlin caption via in-process multimodal runtime."""
+        from app.services.multimodal_runtime import multimodal_runtime
 
-        if not settings.MARLIN_SERVICE_URL:
-            logger.info("Marlin service is disabled; skipping visual video analysis.")
-            return {}
-
-        url = f"{settings.MARLIN_SERVICE_URL.rstrip('/')}/caption"
-        timeout = httpx.Timeout(settings.MARLIN_SERVICE_TIMEOUT_SECONDS)
-        with open(local_path, "rb") as video_file:
-            files = {
-                "file": (
-                    os.path.basename(local_path),
-                    video_file,
-                    "application/octet-stream",
-                )
-            }
-            response = httpx.post(url, files=files, timeout=timeout)
-            response.raise_for_status()
-            return response.json()
+        try:
+            return multimodal_runtime.caption_video_path(local_path)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error(f"Marlin captioning failed: {exc}")
+            raise RuntimeError(f"Marlin captioning failed: {exc}") from exc
 
     def unload_local_models(self, family: str | None = None) -> None:
-        """Ask local-models to release a loaded model family."""
-        import httpx
+        """Unload Florence/Whisper (and optionally Marlin) from the API process."""
+        from app.services.multimodal_runtime import multimodal_runtime
 
-        if not settings.LOCAL_MODELS_SERVICE_URL:
-            return
-
-        url = f"{settings.LOCAL_MODELS_SERVICE_URL.rstrip('/')}/unload"
         try:
-            response = httpx.post(
-                url,
-                json={"family": family},
-                timeout=httpx.Timeout(30.0),
-            )
-            response.raise_for_status()
-            logger.info(f"Unloaded local model family: {family or 'all'}")
+            # Legacy callers pass "florence" / "whisper"; marlin has its own unload.
+            multimodal_runtime.unload(family)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.warning(f"Local model unload skipped/failed: {exc}")
+            logger.warning(f"Multimodal unload skipped/failed: {exc}")
 
     def unload_marlin(self) -> None:
-        """Ask the Marlin service to release the loaded video model."""
-        import httpx
+        """Unload Marlin from the API process."""
+        from app.services.multimodal_runtime import multimodal_runtime
 
-        if not settings.MARLIN_SERVICE_URL:
-            return
-
-        url = f"{settings.MARLIN_SERVICE_URL.rstrip('/')}/unload"
         try:
-            response = httpx.post(url, timeout=httpx.Timeout(30.0))
-            response.raise_for_status()
-            logger.info("Unloaded Marlin model")
+            multimodal_runtime.unload("marlin")
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(f"Marlin unload skipped/failed: {exc}")
 
     def describe_image(self, image_path: str) -> str:
-        """Generate a detailed image description via the local-models service."""
+        """Generate an image description via Florence (local) or cloud vision fallback."""
         local_path = self._download_temp_file(image_path)
         try:
-            result = self._post_file_to_local_models(local_path, "/image/describe")
-            return result.get("text", "")
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.error(f"Image description failed: {exc}")
-            raise RuntimeError(f"Image description failed: {exc}") from exc
+            try:
+                text = self._describe_image_local(local_path)
+                if text:
+                    return text
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(f"Local image description failed: {exc}")
+            # Cloud vision only when not in local-only AI mode.
+            if (settings.AI_SETUP_MODE or "").lower() not in ("local", "none"):
+                cloud = self._describe_image_cloud(local_path)
+                if cloud:
+                    return cloud
+            raise RuntimeError("Image description failed (local Florence unavailable)")
         finally:
-            if local_path != image_path and os.path.exists(local_path):
+            if self._is_ephemeral_download(image_path, local_path) and os.path.exists(
+                local_path
+            ):
                 os.remove(local_path)
+
+    def _describe_image_cloud(self, image_path: str) -> str:
+        """Optional OpenAI / Gemini vision when local Florence is unavailable."""
+        try:
+            import base64
+
+            with open(image_path, "rb") as f:
+                data = f.read()
+            b64 = base64.b64encode(data).decode("ascii")
+            mime = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
+            data_url = f"data:{mime};base64,{b64}"
+
+            if settings.OPENAI_API_KEY:
+                from openai import OpenAI
+
+                client = OpenAI(api_key=settings.OPENAI_API_KEY)
+                resp = client.chat.completions.create(
+                    model=settings.OPENAI_MODEL or "gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Describe this image briefly."},
+                                {"type": "image_url", "image_url": {"url": data_url}},
+                            ],
+                        }
+                    ],
+                    max_tokens=400,
+                )
+                return (resp.choices[0].message.content or "").strip()
+
+            if settings.GEMINI_API_KEY:
+                from google import genai
+                from google.genai import types
+
+                client = genai.Client(api_key=settings.GEMINI_API_KEY)
+                part = types.Part.from_bytes(data=data, mime_type=mime)
+                resp = client.models.generate_content(
+                    model=settings.GEMINI_MODEL or "gemini-2.0-flash",
+                    contents=["Describe this image briefly.", part],
+                )
+                return (resp.text or "").strip()
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug(f"Cloud vision failed: {exc}")
+        return ""
 
     def transcribe_audio(self, audio_path: str) -> str:
         """Transcribe audio via the local-models service."""
         local_path = self._download_temp_file(audio_path)
         try:
             logger.info(f"Transcribing audio: {local_path}")
-            result = self._post_file_to_local_models(local_path, "/audio/transcribe")
-            return result.get("text", "")
+            from app.services.multimodal_runtime import multimodal_runtime
+
+            return multimodal_runtime.transcribe_audio_path(local_path) or ""
         finally:
-            if local_path != audio_path and os.path.exists(local_path):
+            if self._is_ephemeral_download(audio_path, local_path) and os.path.exists(
+                local_path
+            ):
                 os.remove(local_path)
 
     def process_video(self, video_path: str) -> str:
@@ -275,7 +385,9 @@ class MultimediaService:
                 )
                 return ""
         finally:
-            if local_path != video_path and os.path.exists(local_path):
+            if self._is_ephemeral_download(video_path, local_path) and os.path.exists(
+                local_path
+            ):
                 os.remove(local_path)
 
     def describe_video_visual(self, video_path: str) -> str:
@@ -312,15 +424,63 @@ class MultimediaService:
                 return visual
             return ""
         finally:
-            if local_path != video_path and os.path.exists(local_path):
+            if self._is_ephemeral_download(video_path, local_path) and os.path.exists(
+                local_path
+            ):
                 os.remove(local_path)
+
+    def _pdf_page_needs_render(self, page, native_text: str, image_descriptions: list[str]) -> bool:
+        """True when a full-page Florence render is useful (scanned / sparse pages)."""
+        if not settings.PDF_VISUAL_EXTRACTION_ENABLED:
+            return False
+        if len(native_text.strip()) >= settings.PDF_VISUAL_TEXT_THRESHOLD:
+            return False
+        # Embedded-image Florence already covered this page.
+        if image_descriptions:
+            return False
+        try:
+            if page.get_images(full=True):
+                return True
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        try:
+            if page.get_drawings():
+                return True
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        # Image-only / empty pages with almost no text still benefit from a render.
+        return len(native_text.strip()) == 0
+
+    def _describe_pdf_page_render(self, page) -> str:
+        """Render a PDF page to PNG and describe it with Florence."""
+        import tempfile
+
+        import fitz
+
+        dpi = max(int(settings.PDF_VISUAL_RENDER_DPI or 144), 72)
+        zoom = dpi / 72.0
+        pixmap = page.get_pixmap(
+            matrix=fitz.Matrix(zoom, zoom),
+            alpha=False,
+            annots=True,
+        )
+        image_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                image_path = tmp.name
+                pixmap.save(image_path)
+            result_text = self._describe_image_local(image_path)
+            return (result_text or "").strip()
+        finally:
+            if image_path and os.path.exists(image_path):
+                os.remove(image_path)
 
     def extract_text_from_pdf(
         self,
         pdf_path: str,
         progress_callback: Callable[[str, str | None], None] | None = None,
     ) -> str:
-        """Extract PDF page text and describe embedded images with Florence."""
+        """Extract PDF page text; Florence on embedded images and sparse page renders."""
         import tempfile
 
         import fitz
@@ -330,10 +490,13 @@ class MultimediaService:
                 progress_callback(stage, model)
 
         local_path = self._download_temp_file(pdf_path)
+        owns_temp = self._is_ephemeral_download(pdf_path, local_path)
         try:
             extracted_pages: list[str] = []
             doc = fitz.open(local_path)
             total_pages = len(doc)
+            max_visual_pages = int(settings.PDF_VISUAL_EXTRACTION_MAX_PAGES or 0)
+            visual_pages_used = 0
             try:
                 for page_index, page in enumerate(doc, start=1):
                     _progress(
@@ -369,10 +532,7 @@ class MultimediaService:
                             ) as tmp:
                                 image_path = tmp.name
                                 tmp.write(image_bytes)
-                            result = self._post_file_to_local_models(
-                                image_path, "/image/describe"
-                            )
-                            description = result.get("text", "")
+                            description = self._describe_image_local(image_path)
                         except Exception as exc:  # pylint: disable=broad-exception-caught
                             logger.warning(
                                 "PDF image description skipped "
@@ -387,6 +547,26 @@ class MultimediaService:
                             image_descriptions.append(
                                 f"Image {image_index}: {description}"
                             )
+
+                    # Scanned / sparse pages: render whole page when embeds yielded nothing.
+                    if self._pdf_page_needs_render(page, native_text, image_descriptions):
+                        if not max_visual_pages or visual_pages_used < max_visual_pages:
+                            _progress(
+                                f"PDF: page {page_index}/{total_pages}, describing page render",
+                                "Florence-2",
+                            )
+                            try:
+                                page_desc = self._describe_pdf_page_render(page)
+                                if page_desc:
+                                    image_descriptions.append(
+                                        f"Page render: {page_desc}"
+                                    )
+                                    visual_pages_used += 1
+                            except Exception as exc:  # pylint: disable=broad-exception-caught
+                                logger.warning(
+                                    f"PDF page render description skipped "
+                                    f"(page={page_index}): {exc}"
+                                )
 
                     if image_descriptions:
                         page_parts.append(
@@ -408,7 +588,7 @@ class MultimediaService:
             logger.error(f"PDF extraction failed: {exc}")
             raise RuntimeError(f"PDF extraction failed: {exc}") from exc
         finally:
-            if local_path != pdf_path and os.path.exists(local_path):
+            if owns_temp and local_path and os.path.exists(local_path):
                 os.remove(local_path)
 
     def extract_text_from_docx(self, docx_path: str) -> str:
@@ -440,14 +620,18 @@ class MultimediaService:
                     return "Word document contains no extractable text."
                 return full_text
 
-            except ImportError:
-                return "Word extraction unavailable: python-docx is not installed."
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Word extraction unavailable: python-docx is not installed."
+                ) from exc
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.error(f"DOCX extraction failed: {exc}")
-                return f"Word extraction failed: {exc}"
+                raise RuntimeError(f"Word extraction failed: {exc}") from exc
 
         finally:
-            if local_path != docx_path and os.path.exists(local_path):
+            if self._is_ephemeral_download(docx_path, local_path) and os.path.exists(
+                local_path
+            ):
                 os.remove(local_path)
 
     def extract_text_from_spreadsheet(
@@ -488,13 +672,13 @@ class MultimediaService:
                         return "Spreadsheet contains no extractable text."
                     return full_text
 
-                except ImportError:
-                    return (
+                except ImportError as exc:
+                    raise RuntimeError(
                         "Spreadsheet extraction unavailable: openpyxl is not installed."
-                    )
+                    ) from exc
                 except Exception as exc:  # pylint: disable=broad-exception-caught
                     logger.error(f"XLSX extraction failed: {exc}")
-                    return f"Spreadsheet extraction failed: {exc}"
+                    raise RuntimeError(f"Spreadsheet extraction failed: {exc}") from exc
 
             if lower_path.endswith((".csv", ".tsv")):
                 delimiter = "\t" if lower_path.endswith(".tsv") else ","
@@ -511,11 +695,15 @@ class MultimediaService:
                 return "\n".join(rows)
 
             if lower_path.endswith(".xls"):
-                return "Legacy .xls is not supported. Please convert to .xlsx."
+                raise RuntimeError(
+                    "Legacy .xls is not supported. Please convert to .xlsx."
+                )
 
-            return "Unsupported spreadsheet format."
+            raise RuntimeError("Unsupported spreadsheet format.")
         finally:
-            if local_path != sheet_path and os.path.exists(local_path):
+            if self._is_ephemeral_download(sheet_path, local_path) and os.path.exists(
+                local_path
+            ):
                 os.remove(local_path)
 
 

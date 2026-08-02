@@ -11,7 +11,6 @@ import {
   Cpu,
   X,
   FileText,
-  ExternalLink,
   Trash2,
   Search,
   Layers,
@@ -19,13 +18,21 @@ import {
   ChevronUp,
   MessageSquarePlus,
   MessagesSquare,
+  Download,
+  FolderOpen,
 } from "lucide-react";
 import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, encodeFileUrl, isAudioUrl, isImageUrl, isVideoUrl, resolveFileUrl } from "@/lib/utils";
+import { BlobMediaPlayer } from "@/components/blob-media-player";
+import {
+  isDesktopApp,
+  revealInFolder,
+  revealInFolderLabel,
+} from "@/lib/desktop";
 import { ShaderBackground } from "@/components/shader-background";
 import { useKB } from "@/lib/kb-context";
 import { useChat } from "@/lib/chat-context";
@@ -345,18 +352,37 @@ export default function ChatPage() {
   };
 
   const handleFileClick = (url: string, filename: string) => {
-    const lowerUrl = url.toLowerCase();
+    const resolvedUrl = encodeFileUrl(resolveFileUrl(url, currentKB));
     let type: FilePreview["type"] = "other";
 
-    if (lowerUrl.match(/\.(jpg|jpeg|png|webp|gif)$/)) {
+    if (isImageUrl(resolvedUrl) || isImageUrl(filename)) {
       type = "image";
-    } else if (lowerUrl.endsWith(".pdf")) {
+    } else if (/\.pdf(\?|$)/i.test(resolvedUrl) || /\.pdf$/i.test(filename)) {
       type = "pdf";
-    } else if (lowerUrl.match(/\.(webm|m4a|mp3|wav|ogg|mp4)$/)) {
+    } else if (isVideoUrl(resolvedUrl) || isVideoUrl(filename)) {
+      type = "video";
+    } else if (isAudioUrl(resolvedUrl) || isAudioUrl(filename)) {
       type = "audio";
     }
 
-    setFilePreview({ url, filename, type });
+    setFilePreview({ url: resolvedUrl, filename, type });
+  };
+
+  const handleRevealPreviewFile = async () => {
+    if (!filePreview) return;
+    try {
+      const { local_path } = await api.resolveVaultLocalPath(
+        filePreview.url,
+        currentKB,
+      );
+      const ok = await revealInFolder(local_path);
+      if (!ok) {
+        window.open(filePreview.url, "_blank", "noopener,noreferrer");
+      }
+    } catch (error) {
+      console.error("Reveal failed:", error);
+      alert("Could not reveal this file on disk.");
+    }
   };
 
   const handleDeleteChat = () => {
@@ -387,18 +413,18 @@ export default function ChatPage() {
         <div className="mx-auto max-w-4xl px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-linear-to-br from-purple-500 to-pink-500">
+              <div className="h-10 w-10 overflow-hidden rounded-xl ring-1 ring-white/15">
                 <Image
-                  src="/logo-black-background.png"
-                  alt="LiveOS"
+                  src="/logo-icon.png"
+                  alt="LifeOS"
                   width={40}
                   height={40}
                   loading="eager"
-                  className="h-full w-full object-contain"
+                  className="h-full w-full object-cover"
                 />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-white">LiveOS</h1>
+                <h1 className="text-xl font-bold text-white">LifeOS</h1>
                 <p className="text-xs text-white/60">Your Personal Brain</p>
               </div>
             </div>
@@ -417,6 +443,28 @@ export default function ChatPage() {
                 >
                   <Trash2 className="h-3 w-3" />
                   Delete Chat
+                </button>
+              )}
+              {activeConversationId && (
+                <button
+                  onClick={async () => {
+                    try {
+                      const md = await api.exportChat(activeConversationId, "markdown");
+                      const blob = new Blob([md], { type: "text/markdown" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `chat-${activeConversationId.slice(0, 8)}.md`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  className="flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs text-white/70 transition-all hover:bg-white/10"
+                >
+                  <Download className="h-3 w-3" />
+                  Export
                 </button>
               )}
               {conversations.length > 0 && (
@@ -449,7 +497,7 @@ export default function ChatPage() {
               </div>
               <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
                 <Database className="h-3 w-3 text-green-400" />
-                <span className="text-xs text-white/70">Postgres</span>
+                <span className="text-xs text-white/70">SQLite</span>
               </div>
               <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
                 <Network className="h-3 w-3 text-blue-400" />
@@ -461,11 +509,7 @@ export default function ChatPage() {
               </div>
               <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
                 <Search className="h-3 w-3 text-yellow-400" />
-                <span className="text-xs text-white/70">Typesense</span>
-              </div>
-              <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
-                <Cpu className="h-3 w-3 text-orange-400" />
-                <span className="text-xs text-white/70">RustFS</span>
+                <span className="text-xs text-white/70">Meilisearch</span>
               </div>
             </div>
           </div>
@@ -701,16 +745,22 @@ export default function ChatPage() {
                   </h2>
                 </div>
                 <div className="flex items-center gap-2">
-                  <a
-                    href={filePreview.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleRevealPreviewFile();
+                    }}
                     className="flex h-8 items-center gap-1.5 rounded-lg bg-purple-500/20 px-3 text-sm text-purple-300 transition-all hover:bg-purple-500/30"
-                    onClick={(e) => e.stopPropagation()}
+                    title={
+                      isDesktopApp()
+                        ? revealInFolderLabel()
+                        : "Open file"
+                    }
                   >
-                    <ExternalLink className="h-4 w-4" />
-                    Open
-                  </a>
+                    <FolderOpen className="h-4 w-4" />
+                    {isDesktopApp() ? revealInFolderLabel() : "Open"}
+                  </button>
                   <button
                     onClick={() => setFilePreview(null)}
                     className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/5 text-white/60 transition-all hover:bg-white/10 hover:text-white"
@@ -737,29 +787,37 @@ export default function ChatPage() {
                     title={filePreview.filename}
                   />
                 )}
+                {filePreview.type === "video" && (
+                  <div className="flex min-h-50 items-center justify-center">
+                    <BlobMediaPlayer
+                      url={filePreview.url}
+                      kind="video"
+                      className="max-h-[70vh] max-w-full rounded-lg bg-black"
+                    />
+                  </div>
+                )}
                 {filePreview.type === "audio" && (
                   <div className="flex min-h-50 items-center justify-center">
-                    <audio
-                      controls
-                      src={filePreview.url}
+                    <BlobMediaPlayer
+                      url={filePreview.url}
+                      kind="audio"
                       className="w-full max-w-2xl"
-                    >
-                      Your browser does not support the audio element.
-                    </audio>
+                    />
                   </div>
                 )}
                 {filePreview.type === "other" && (
                   <div className="flex min-h-50 flex-col items-center justify-center gap-4 text-white/60">
                     <FileText className="h-16 w-16" />
                     <p>Preview not available for this file type</p>
-                    <a
-                      href={filePreview.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    <button
+                      type="button"
+                      onClick={() => void handleRevealPreviewFile()}
                       className="rounded-lg bg-purple-500/20 px-4 py-2 text-purple-300 transition-all hover:bg-purple-500/30"
                     >
-                      Download File
-                    </a>
+                      {isDesktopApp()
+                        ? revealInFolderLabel()
+                        : "Open file"}
+                    </button>
                   </div>
                 )}
               </div>

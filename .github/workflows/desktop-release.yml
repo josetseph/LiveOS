@@ -1,0 +1,120 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+
+env:
+  LIVEOS_PYTHON_RELEASE: "20250317"
+  LIVEOS_PYTHON_VERSION: "3.12.9"
+  LIVEOS_NODE_VERSION: "22.14.0"
+
+jobs:
+  build-mac:
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install build tools (cmake for llama-cpp-python)
+        run: brew install cmake || true
+
+      - name: Install desktop deps
+        working-directory: desktop
+        run: npm ci
+
+      - name: Prepare distribution resources
+        working-directory: desktop
+        run: npm run prepare-dist
+
+      - name: Build macOS installer (unsigned)
+        working-directory: desktop
+        run: npx electron-builder --mac --arm64 -p never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: liveos-mac-arm64
+          path: |
+            desktop/dist/*.dmg
+            desktop/dist/*.zip
+
+  build-mac-x64:
+    runs-on: macos-13
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install build tools
+        run: brew install cmake || true
+
+      - name: Install desktop deps
+        working-directory: desktop
+        run: npm ci
+
+      - name: Prepare distribution resources
+        working-directory: desktop
+        run: npm run prepare-dist
+
+      - name: Build macOS x64 installer (unsigned)
+        working-directory: desktop
+        run: npx electron-builder --mac --x64 -p never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload macOS x64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: liveos-mac-x64
+          path: |
+            desktop/dist/*.dmg
+            desktop/dist/*.zip
+
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install desktop deps
+        working-directory: desktop
+        run: npm ci
+
+      - name: Prepare distribution resources
+        working-directory: desktop
+        run: npm run prepare-dist
+
+      - name: Build Windows installer (unsigned)
+        working-directory: desktop
+        run: npx electron-builder --win -p never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: liveos-windows
+          path: |
+            desktop/dist/*.exe

@@ -1,0 +1,70 @@
+/** Desktop Electron bridge (preload). Absent in browser/dev. */
+export type LiveosDesktopBridge = {
+  isDesktop?: boolean;
+  pickDirectory?: (opts?: {
+    title?: string;
+    buttonLabel?: string;
+    defaultPath?: string;
+  }) => Promise<string | null>;
+  /** Direct FastAPI base, e.g. http://127.0.0.1:17401/api/v1 */
+  getApiBaseUrl?: () => Promise<string>;
+  /** Reveal a local file in Finder / Explorer */
+  revealInFolder?: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
+  onStatus?: (cb: (message: string) => void) => void;
+};
+
+export function getDesktopBridge(): LiveosDesktopBridge | null {
+  if (typeof window === "undefined") return null;
+  return (window as Window & { liveosDesktop?: LiveosDesktopBridge }).liveosDesktop || null;
+}
+
+export function isDesktopApp(): boolean {
+  return Boolean(getDesktopBridge()?.isDesktop);
+}
+
+export async function pickDesktopDirectory(opts?: {
+  title?: string;
+  defaultPath?: string;
+}): Promise<string | null> {
+  const bridge = getDesktopBridge();
+  if (!bridge?.pickDirectory) return null;
+  return bridge.pickDirectory(opts);
+}
+
+let cachedDesktopApiBase: string | null | undefined;
+
+/** Prefer the desktop API port so large uploads skip the Next.js 10MB proxy limit. */
+export async function resolveApiBaseUrl(fallback: string): Promise<string> {
+  if (cachedDesktopApiBase !== undefined) {
+    return cachedDesktopApiBase || fallback;
+  }
+  const bridge = getDesktopBridge();
+  if (bridge?.getApiBaseUrl) {
+    try {
+      const url = (await bridge.getApiBaseUrl())?.replace(/\/$/, "") || null;
+      cachedDesktopApiBase = url;
+      return url || fallback;
+    } catch {
+      cachedDesktopApiBase = null;
+      return fallback;
+    }
+  }
+  cachedDesktopApiBase = null;
+  return fallback;
+}
+
+export async function revealInFolder(filePath: string): Promise<boolean> {
+  const bridge = getDesktopBridge();
+  if (!bridge?.revealInFolder) return false;
+  const result = await bridge.revealInFolder(filePath);
+  return Boolean(result?.ok);
+}
+
+/** Label for the reveal action on the current platform. */
+export function revealInFolderLabel(): string {
+  if (typeof navigator === "undefined") return "Reveal in folder";
+  const ua = navigator.userAgent || "";
+  if (/Mac|iPhone|iPad/i.test(ua)) return "Reveal in Finder";
+  if (/Win/i.test(ua)) return "Reveal in Explorer";
+  return "Reveal in folder";
+}

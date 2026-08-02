@@ -8,12 +8,14 @@ export interface Note {
     failed?: boolean;
     processing_stage?: string | null;
     processing_model?: string | null;
+    /** Vault-relative path e.g. Life/Daily Log/2024-07-07.md */
+    rel_path?: string | null;
 }
 
 export interface FilePreview {
     url: string;
     filename: string;
-    type: "image" | "pdf" | "audio" | "other";
+    type: "image" | "pdf" | "audio" | "video" | "other";
 }
 
 /** Subset used by the chat page when previewing a linked note. */
@@ -70,8 +72,223 @@ export interface KnowledgeBase {
     id: string;
     name: string;
     slug?: string;
+    vault_path?: string;
     kuzu_path?: string;
     qdrant_col_cores?: string;
     typesense_collection?: string;
     created_at: string | null;
+}
+
+export interface FinanceAccount {
+    id: string;
+    name: string;
+    account_type: string;
+    opening_balance: number;
+    balance: number;
+    currency?: string;
+    archived?: boolean;
+}
+
+export interface FinanceTransaction {
+    id: string;
+    group_id?: string;
+    journal_id?: string;
+    date: string | null;
+    description: string;
+    amount: number;
+    account_id: string;
+    account_name?: string;
+    counterparty_name?: string;
+    type?: string;
+    category?: string | null;
+    currency_code?: string | null;
+}
+
+export interface FinanceBudget {
+    id: string;
+    name: string;
+    active: boolean;
+    spent: number;
+    currency?: string | null;
+    auto_budget_amount?: number;
+    auto_budget_period?: string | null;
+    notes?: string | null;
+}
+
+export interface FinanceCategory {
+    id: string;
+    name: string;
+    notes?: string | null;
+}
+
+export interface FinanceBill {
+    id: string;
+    name: string;
+    amount_min: number;
+    amount_max: number;
+    currency?: string | null;
+    repeat_freq?: string | null;
+    next_expected_match?: string | null;
+    active: boolean;
+    paid?: boolean;
+    notes?: string | null;
+}
+
+export interface FinancePiggyBank {
+    id: string;
+    name: string;
+    current_amount: number;
+    target_amount: number;
+    percentage?: number;
+    currency?: string | null;
+    start_date?: string | null;
+    target_date?: string | null;
+    notes?: string | null;
+    active?: boolean;
+}
+
+export interface FinanceTag {
+    id: string;
+    tag: string;
+    date?: string | null;
+    description?: string | null;
+}
+
+export interface FinanceRecurrence {
+    id: string;
+    title: string;
+    type?: string | null;
+    description?: string | null;
+    amount: number;
+    currency?: string | null;
+    first_date?: string | null;
+    repeat_until?: string | null;
+    active: boolean;
+    repetition_type?: string | null;
+    repetition_moment?: string | null;
+    source_name?: string | null;
+    destination_name?: string | null;
+}
+
+export interface FinanceRuleGroup {
+    id: string;
+    title: string;
+    description?: string | null;
+    order?: number | null;
+    active: boolean;
+}
+
+export interface FinanceRule {
+    id: string;
+    title: string;
+    description?: string | null;
+    rule_group_id: string;
+    trigger?: string | null;
+    active: boolean;
+    strict?: boolean;
+    triggers: Array<{ type?: string | null; value?: string | null }>;
+    actions: Array<{ type?: string | null; value?: string | null }>;
+}
+
+export interface FinanceWebhook {
+    id: string;
+    title: string;
+    url?: string | null;
+    active: boolean;
+    triggers: string[];
+    responses: string[];
+    deliveries: string[];
+}
+
+export interface FinanceObjectGroup {
+    id: string;
+    title: string;
+    order?: number | null;
+}
+
+export interface FinanceExchangeRate {
+    id: string;
+    date?: string | null;
+    rate: number;
+    from?: string | null;
+    to?: string | null;
+}
+
+export interface FinanceAttachment {
+    id: string;
+    filename: string;
+    title?: string | null;
+    notes?: string | null;
+    attachable_type?: string | null;
+    attachable_id?: string;
+    size?: number | null;
+    mime?: string | null;
+    download_url?: string | null;
+}
+
+export interface FinanceSearchResult {
+    kind: "transactions" | "accounts" | string;
+    query: string;
+    results: Array<FinanceTransaction | FinanceAccount>;
+}
+
+export interface FinanceWorkspace {
+    exists: boolean;
+    ready?: boolean;
+    status?: string;
+    detail?: string;
+    scope?: string;
+    kb_id?: string;
+    kb_name?: string;
+    firefly_group_id?: number;
+    currency?: string;
+    administration_title?: string;
+    firefly_url?: string;
+}
+
+export interface FinanceSummary {
+    days: number;
+    start: string;
+    end: string;
+    asset_balance: number;
+    income_total: number;
+    expense_total: number;
+    transfer_total: number;
+    net_flow: number;
+    chart?: unknown;
+    accounts: FinanceAccount[];
+    recent_transactions: FinanceTransaction[];
+}
+
+export interface FinanceReport {
+    start: string;
+    end: string;
+    basic: Record<string, unknown>;
+    category_chart?: unknown;
+    budget_chart?: unknown;
+    balance_chart?: unknown;
+    accounts: FinanceAccount[];
+    kb_id?: string;
+    kb_name?: string;
+}
+
+export interface NotesGraphPayload {
+    nodes: Array<{ id: string; title: string; type: string; rel_path?: string | null }>;
+    edges: Array<{ source: string; target: string; type: string }>;
+    center_id?: string;
+}
+
+export interface SetupStatus {
+    data_dir: string;
+    models_dir: string;
+    paths_json?: string;
+    default_vault_path?: string;
+    active_vault_path?: string;
+    ai_setup_mode: string;
+    ai_configured: boolean;
+    local_models_ready?: boolean;
+    multimodal_ready?: boolean;
+    needs_model_download?: boolean;
+    database_backend: string;
+    llm_provider?: string;
 }

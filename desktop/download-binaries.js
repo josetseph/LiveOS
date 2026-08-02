@@ -1,0 +1,248 @@
+/**
+ * Auto-fetch Qdrant + Meilisearch into DATA_DIR/bin.
+ * End users never place binaries manually.
+ * Local LLM uses in-process llama-cpp-python (no llama-server binary).
+ */
+const fs = require("fs");
+const path = require("path");
+const https = require("https");
+const http = require("http");
+const { execFileSync } = require("child_process");
+
+const QDRANT_VERSION = process.env.LIVEOS_QDRANT_VERSION || "v1.18.2";
+const MEILI_VERSION = process.env.LIVEOS_MEILI_VERSION || "v1.49.0";
+
+function nativeArch() {
+  if (process.platform === "darwin") {
+    try {
+      const hw = execFileSync("sysctl", ["-n", "hw.optional.arm64"], {
+        encoding: "utf8",
+      }).trim();
+      if (hw === "1") return "arm64";
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      const uname = execFileSync("uname", ["-m"], { encoding: "utf8" }).trim();
+      if (uname === "arm64") return "arm64";
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  return process.arch === "arm64" ? "arm64" : "x64";
+}
+
+function platformTriple() {
+  const arch = nativeArch();
+  if (process.platform === "darwin") {
+    return {
+      key: arch === "arm64" ? "macos-arm64" : "macos-x86_64",
+      qdrantAsset:
+        arch === "arm64"
+          ? `qdrant-aarch64-apple-darwin.tar.gz`
+          : `qdrant-x86_64-apple-darwin.tar.gz`,
+      meiliAsset:
+        arch === "arm64"
+          ? "meilisearch-macos-apple-silicon"
+          : "meilisearch-macos-amd64",
+      qdrantExe: "qdrant",
+      meiliExe: "meilisearch",
+      meiliIsArchive: false,
+    };
+  }
+  if (process.platform === "linux") {
+    return {
+      key: arch === "arm64" ? "linux-aarch64" : "linux-x86_64",
+      qdrantAsset:
+        arch === "arm64"
+          ? `qdrant-aarch64-unknown-linux-musl.tar.gz`
+          : `qdrant-x86_64-unknown-linux-gnu.tar.gz`,
+      meiliAsset:
+        arch === "arm64" ? "meilisearch-linux-aarch64" : "meilisearch-linux-amd64",
+      qdrantExe: "qdrant",
+      meiliExe: "meilisearch",
+      meiliIsArchive: false,
+    };
+  }
+  if (process.platform === "win32") {
+    return {
+      key: arch === "arm64" ? "windows-arm64" : "windows-amd64",
+      qdrantAsset: `qdrant-x86_64-pc-windows-msvc.zip`,
+      meiliAsset: "meilisearch-windows-amd64.exe",
+      qdrantExe: "qdrant.exe",
+      meiliExe: "meilisearch.exe",
+      meiliIsArchive: false,
+    };
+  }
+  throw new Error(`Unsupported platform: ${process.platform}/${process.arch}`);
+}
+
+function downloadFile(url, dest, onProgress) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    const get = url.startsWith("https") ? https.get : http.get;
+    const req = get(url, { timeout: 180000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        file.close();
+        fs.unlinkSync(dest);
+        downloadFile(res.headers.location, dest, onProgress).then(resolve).catch(reject);
+        return;
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        try {
+          fs.unlinkSync(dest);
+        } catch (_) {
+          /* ignore */
+        }
+        reject(new Error(`Download failed ${res.statusCode}: ${url}`));
+        return;
+      }
+      const total = parseInt(res.headers["content-length"] || "0", 10);
+      let received = 0;
+      res.on("data", (chunk) => {
+        received += chunk.length;
+        if (onProgress && total) onProgress(Math.round((received / total) * 100));
+      });
+      res.pipe(file);
+      file.on("finish", () => file.close(() => resolve(dest)));
+    });
+    req.on("error", (err) => {
+      try {
+        file.close();
+        fs.unlinkSync(dest);
+      } catch (_) {
+        /* ignore */
+      }
+      reject(err);
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error(`Timeout downloading ${url}`));
+    });
+  });
+}
+
+function extractArchive(archivePath, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  execFileSync("tar", ["-xf", archivePath, "-C", destDir], { stdio: "ignore" });
+}
+
+function findExecutable(rootDir, name, depth = 0) {
+  if (depth > 6) return null;
+  const direct = path.join(rootDir, name);
+  if (fs.existsSync(direct) && fs.statSync(direct).isFile()) return direct;
+  let entries;
+  try {
+    entries = fs.readdirSync(rootDir, { withFileTypes: true });
+  } catch (_) {
+    return null;
+  }
+  for (const e of entries) {
+    const p = path.join(rootDir, e.name);
+    if (e.isFile() && (e.name === name || e.name === path.basename(name))) return p;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    if (e.name === "." || e.name === ".." || e.name === ".tmp") continue;
+    const found = findExecutable(path.join(rootDir, e.name), name, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function chmodExec(filePath) {
+  if (process.platform === "win32") return;
+  try {
+    fs.chmodSync(filePath, 0o755);
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function stripQuarantine(filePath) {
+  if (process.platform !== "darwin") return;
+  try {
+    execFileSync("xattr", ["-dr", "com.apple.quarantine", filePath], {
+      stdio: "ignore",
+    });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+/**
+ * @param {string} dataDir
+ * @param {(msg: string) => void} [onStatus]
+ * @param {string} [_modelsDir] — unused (GGUFs download via Python setup API)
+ */
+async function ensureBinaries(dataDir, onStatus, _modelsDir) {
+  const status = onStatus || (() => {});
+  const triple = platformTriple();
+  const binDir = path.join(dataDir, "bin", triple.key);
+  fs.mkdirSync(binDir, { recursive: true });
+  const qdrantPath = path.join(binDir, triple.qdrantExe);
+  const meiliPath = path.join(binDir, triple.meiliExe);
+  const tmpDir = path.join(dataDir, "bin", ".tmp");
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  if (!fs.existsSync(qdrantPath)) {
+    status(`Downloading Qdrant ${QDRANT_VERSION}…`);
+    const url = `https://github.com/qdrant/qdrant/releases/download/${QDRANT_VERSION}/${triple.qdrantAsset}`;
+    const archive = path.join(tmpDir, triple.qdrantAsset);
+    let lastPct = -1;
+    await downloadFile(url, archive, (pct) => {
+      if (pct >= lastPct + 10) {
+        lastPct = pct;
+        status(`Downloading Qdrant… ${pct}%`);
+      }
+    });
+    status("Extracting Qdrant…");
+    const extractTo = path.join(tmpDir, "qdrant-extract");
+    fs.rmSync(extractTo, { recursive: true, force: true });
+    fs.mkdirSync(extractTo, { recursive: true });
+    extractArchive(archive, extractTo);
+    const found = findExecutable(extractTo, triple.qdrantExe);
+    if (!found) throw new Error(`Qdrant executable not found in ${triple.qdrantAsset}`);
+    fs.copyFileSync(found, qdrantPath);
+    chmodExec(qdrantPath);
+    stripQuarantine(qdrantPath);
+    fs.rmSync(archive, { force: true });
+    fs.rmSync(extractTo, { recursive: true, force: true });
+    status("Qdrant ready");
+  }
+
+  if (!fs.existsSync(meiliPath)) {
+    status(`Downloading Meilisearch ${MEILI_VERSION}…`);
+    const url = `https://github.com/meilisearch/meilisearch/releases/download/${MEILI_VERSION}/${triple.meiliAsset}`;
+    const dest = path.join(tmpDir, triple.meiliAsset);
+    let lastPct = -1;
+    await downloadFile(url, dest, (pct) => {
+      if (pct >= lastPct + 10) {
+        lastPct = pct;
+        status(`Downloading Meilisearch… ${pct}%`);
+      }
+    });
+    fs.copyFileSync(dest, meiliPath);
+    chmodExec(meiliPath);
+    stripQuarantine(meiliPath);
+    fs.rmSync(dest, { force: true });
+    status("Meilisearch ready");
+  }
+
+  return {
+    qdrant: fs.existsSync(qdrantPath) ? qdrantPath : null,
+    meilisearch: fs.existsSync(meiliPath) ? meiliPath : null,
+    typesense: fs.existsSync(meiliPath) ? meiliPath : null,
+    binDir,
+  };
+}
+
+module.exports = {
+  ensureBinaries,
+  platformTriple,
+  nativeArch,
+  QDRANT_VERSION,
+  MEILI_VERSION,
+  TYPESENSE_VERSION: MEILI_VERSION,
+};

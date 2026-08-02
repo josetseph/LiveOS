@@ -266,6 +266,109 @@ function NodeDetailModal({
                 </div>
               </div>
             )}
+            {(display as { community_name?: string; community_id?: string })
+              .community_name ||
+              (display as { community_id?: string }).community_id ? (
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#94a3b8",
+                  fontFamily: "system-ui, sans-serif",
+                  marginBottom: 10,
+                }}
+              >
+                Community:{" "}
+                {(display as { community_name?: string }).community_name ||
+                  (display as { community_id?: string }).community_id}
+              </div>
+            ) : null}
+            {Array.isArray(
+              (display as { connections?: { node_id: string; name: string; relationship?: string }[] })
+                .connections,
+            ) &&
+              (
+                (display as { connections?: { node_id: string; name: string; relationship?: string }[] })
+                  .connections || []
+              ).length > 0 && (
+                <div style={{ marginBottom: 10 }}>
+                  <div
+                    style={{
+                      fontSize: 9,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.1em",
+                      color: "#475569",
+                      fontWeight: 700,
+                      marginBottom: 6,
+                      fontFamily: "system-ui, sans-serif",
+                    }}
+                  >
+                    Connections
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                      maxHeight: 140,
+                      overflowY: "auto",
+                    }}
+                  >
+                    {(
+                      (
+                        display as {
+                          connections?: {
+                            node_id: string;
+                            name: string;
+                            relationship?: string;
+                          }[];
+                        }
+                      ).connections || []
+                    )
+                      .slice(0, 8)
+                      .map((conn) => (
+                        <div
+                          key={conn.node_id}
+                          style={{
+                            fontSize: 12,
+                            color: "#e2e8f0",
+                            fontFamily: "system-ui, sans-serif",
+                          }}
+                        >
+                          {conn.name}
+                          {conn.relationship ? (
+                            <span style={{ color: "#64748b" }}>
+                              {" "}
+                              · {conn.relationship}
+                            </span>
+                          ) : null}
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+            {!fetching &&
+              !display.description &&
+              !(display.isolated_contexts && display.isolated_contexts.length) &&
+              !(
+                Array.isArray(
+                  (display as { connections?: unknown[] }).connections,
+                ) &&
+                ((display as { connections?: unknown[] }).connections || [])
+                  .length
+              ) && (
+                <p
+                  style={{
+                    margin: 0,
+                    fontSize: 12,
+                    color: "#64748b",
+                    lineHeight: 1.55,
+                    fontFamily: "system-ui, sans-serif",
+                  }}
+                >
+                  No stored contexts yet for this node. Re-ingest related notes
+                  if content should appear here.
+                </p>
+              )}
             {display.domain && (
               <div
                 style={{
@@ -414,6 +517,10 @@ export default function Graph3DPage() {
   // Track modal/overlay open state in a ref so camera handlers always see the latest value
   const modalOpenRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // zoomToFit must run only once — onEngineStop can re-fire and yank the camera
+  // back to the overview whenever React re-renders (e.g. proximity labels).
+  const hasFittedRef = useRef(false);
+  const userNavigatedRef = useRef(false);
 
   useEffect(() => {
     searchOpenRef.current = searchOpen;
@@ -506,24 +613,39 @@ export default function Graph3DPage() {
     [],
   );
 
-  // ── Proximity labels — show node names and relationship labels near camera ──
+  // ── Proximity labels — Obsidian/notes-graph style fade when camera is close ──
   useEffect(() => {
     if (!graphData.nodes.length) return;
 
-    const NODE_RADIUS = 400;  // world units for node name labels
-    const LINK_RADIUS = 200;  // tighter radius for edge labels
-    const MAX_NODE_LABELS = 12;
+    const MAX_NODE_LABELS = 16;
     const MAX_LINK_LABELS = 8;
+    const DEFAULT_TEXT_FADE = 0.55; // same default as notes-graph
     let rafId = 0;
     let lastUpdate = 0;
 
-    // Build a fast id→position lookup so link midpoints can be computed
-    // without iterating all nodes every frame
+    const loadTextFade = (): number => {
+      try {
+        const raw = localStorage.getItem(
+          `lifeos:notes-graph-controls:${currentKB || "default"}`,
+        );
+        if (!raw) return DEFAULT_TEXT_FADE;
+        const parsed = JSON.parse(raw) as { textFade?: number };
+        return typeof parsed.textFade === "number"
+          ? parsed.textFade
+          : DEFAULT_TEXT_FADE;
+      } catch {
+        return DEFAULT_TEXT_FADE;
+      }
+    };
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const posOf = (idOrObj: any): [number, number, number] => {
-      // After force-graph resolves links, source/target become object refs
       if (idOrObj && typeof idOrObj === "object") {
-        return [idOrObj.fx ?? idOrObj.x ?? 0, idOrObj.fy ?? idOrObj.y ?? 0, idOrObj.fz ?? idOrObj.z ?? 0];
+        return [
+          idOrObj.fx ?? idOrObj.x ?? 0,
+          idOrObj.fy ?? idOrObj.y ?? 0,
+          idOrObj.fz ?? idOrObj.z ?? 0,
+        ];
       }
       return [0, 0, 0];
     };
@@ -531,7 +653,7 @@ export default function Graph3DPage() {
     const loop = () => {
       rafId = requestAnimationFrame(loop);
       const now = Date.now();
-      if (now - lastUpdate < 120) return; // ~8 fps is enough for labels
+      if (now - lastUpdate < 100) return;
       lastUpdate = now;
 
       const fg = graphRef.current;
@@ -542,8 +664,30 @@ export default function Graph3DPage() {
       const renderer = (fg as any).renderer?.();
       if (!camera || !renderer) return;
 
-      const { width, height } = renderer.domElement as HTMLCanvasElement;
+      // CSS pixels — NOT buffer width (DPR would push labels off-screen).
+      const canvas = renderer.domElement as HTMLCanvasElement;
+      const width = canvas.clientWidth || canvas.width;
+      const height = canvas.clientHeight || canvas.height;
+      if (!width || !height) return;
+
       const camPos = camera.position as THREE.Vector3;
+      const textFade = loadTextFade();
+
+      // Adaptive radius from scene extent so labels work after zoomToFit.
+      let extent = 1;
+      for (const node of nodesRef.current) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const n = node as any;
+        const nx = n.fx ?? n.x ?? 0;
+        const ny = n.fy ?? n.y ?? 0;
+        const nz = n.fz ?? n.z ?? 0;
+        extent = Math.max(
+          extent,
+          Math.sqrt(nx * nx + ny * ny + nz * nz),
+        );
+      }
+      const nodeRadius = Math.max(150, extent * 0.55, camPos.length() * 0.22);
+      const linkRadius = nodeRadius * 0.55;
 
       // ── Node labels ─────────────────────────────────────────────────────────
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -551,6 +695,8 @@ export default function Graph3DPage() {
       for (const node of nodesRef.current) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const n = node as any;
+        const name = String(n.name ?? "").trim();
+        if (!name) continue;
         const nx = n.fx ?? n.x ?? 0;
         const ny = n.fy ?? n.y ?? 0;
         const nz = n.fz ?? n.z ?? 0;
@@ -558,12 +704,12 @@ export default function Graph3DPage() {
         const dy = camPos.y - ny;
         const dz = camPos.z - nz;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist < NODE_RADIUS) nearby.push({ node, dist });
+        if (dist < nodeRadius) nearby.push({ node, dist });
       }
 
       if (!nearby.length) {
-        setProximityLabels([]);
-        setLinkLabels([]);
+        setProximityLabels((prev) => (prev.length ? [] : prev));
+        setLinkLabels((prev) => (prev.length ? [] : prev));
         return;
       }
 
@@ -580,15 +726,24 @@ export default function Graph3DPage() {
 
         const vec = new THREE.Vector3(nx, ny, nz);
         vec.project(camera);
-        if (vec.z >= 1) continue; // behind clip plane
+        if (vec.z < -1 || vec.z > 1) continue; // outside clip volume
+        if (vec.x < -1.2 || vec.x > 1.2 || vec.y < -1.2 || vec.y > 1.2) continue;
 
         const sx = ((vec.x + 1) / 2) * width;
         const sy = ((1 - vec.y) / 2) * height;
-        const opacity = Math.max(0.4, 1 - dist / NODE_RADIUS);
+        // Mirror notes-graph: opacity = (zoomLike - textFade + 0.35) / 0.7
+        // where zoomLike rises as distance falls (closer → higher).
+        const proximity = 1 - dist / nodeRadius;
+        const zoomLike = proximity * 2;
+        const opacity = Math.max(
+          0,
+          Math.min(1, (zoomLike - textFade + 0.35) / 0.7),
+        );
+        if (opacity <= 0.02) continue;
 
         labels.push({
           id: n.node_id ?? String(n.id),
-          name: n.name ?? "?",
+          name: String(n.name).slice(0, 40),
           nodeType: n.node_type ?? "",
           sx,
           sy,
@@ -599,12 +754,12 @@ export default function Graph3DPage() {
 
       // ── Link labels ─────────────────────────────────────────────────────────
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const nearbyLinks: Array<{ link: any; dist: number }> = [];
+      const nearbyLinks: Array<{ link: any; dist: number; mx: number; my: number; mz: number }> = [];
       for (const link of linksRef.current) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const l = link as any;
         const label: string = (l.type ?? "").replace(/_/g, " ");
-        if (!label || label === "MEMBER OF") continue; // skip structural edges
+        if (!label || label === "MEMBER OF") continue;
         const [sx, sy, sz] = posOf(l.source);
         const [tx, ty, tz] = posOf(l.target);
         const mx = (sx + tx) / 2;
@@ -614,53 +769,57 @@ export default function Graph3DPage() {
         const dy = camPos.y - my;
         const dz = camPos.z - mz;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist < LINK_RADIUS) nearbyLinks.push({ link, dist });
+        if (dist < linkRadius) nearbyLinks.push({ link: l, dist, mx, my, mz });
       }
-
       nearbyLinks.sort((a, b) => a.dist - b.dist);
-      const topLinks = nearbyLinks.slice(0, MAX_LINK_LABELS);
-
-      const edgeLabels: typeof linkLabels = [];
-      for (const { link, dist } of topLinks) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const l = link as any;
-        const [sx, sy, sz] = posOf(l.source);
-        const [tx, ty, tz] = posOf(l.target);
-        const mx = (sx + tx) / 2;
-        const my = (sy + ty) / 2;
-        const mz = (sz + tz) / 2;
-
+      const linkOut: typeof linkLabels = [];
+      for (const { link: l, dist, mx, my, mz } of nearbyLinks.slice(0, MAX_LINK_LABELS)) {
         const vec = new THREE.Vector3(mx, my, mz);
         vec.project(camera);
-        if (vec.z >= 1) continue;
-
-        const screenX = ((vec.x + 1) / 2) * width;
-        const screenY = ((1 - vec.y) / 2) * height;
-        const opacity = Math.max(0.3, 1 - dist / LINK_RADIUS);
-        const linkId = `${String(typeof l.source === "object" ? l.source?.id : l.source)}-${String(typeof l.target === "object" ? l.target?.id : l.target)}-${l.type ?? ""}`;
-
-        edgeLabels.push({
+        if (vec.z < -1 || vec.z > 1) continue;
+        const proximity = 1 - dist / linkRadius;
+        const zoomLike = proximity * 2;
+        const opacity = Math.max(
+          0,
+          Math.min(1, (zoomLike - textFade + 0.35) / 0.7),
+        );
+        if (opacity <= 0.02) continue;
+        const linkId =
+          (typeof l.source === "object" ? l.source.id : l.source) +
+          "→" +
+          (typeof l.target === "object" ? l.target.id : l.target) +
+          ":" +
+          (l.type ?? "");
+        linkOut.push({
           id: linkId,
           label: (l.type ?? "").replace(/_/g, " "),
-          sx: screenX,
-          sy: screenY,
-          opacity,
+          sx: ((vec.x + 1) / 2) * width,
+          sy: ((1 - vec.y) / 2) * height,
+          opacity: opacity * 0.85,
         });
       }
-      setLinkLabels(edgeLabels);
+      setLinkLabels(linkOut);
     };
 
     rafId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafId);
-  }, [graphData.nodes.length, graphData.links.length]);
+  }, [graphData.nodes.length, graphData.links.length, currentKB]);
 
   // Fetch and adapt data: nodes need `id` field, edges become `links`
   useEffect(() => {
     if (!isHydrated) return;
+    hasFittedRef.current = false;
+    userNavigatedRef.current = false;
     api
       .getGraph3DFull(currentKB)
       .then(({ nodes, edges }) => {
         const nodeIdSet = new Set(nodes.map((n) => n.node_id));
+        const degree = new Map<string, number>();
+        for (const e of edges) {
+          if (!nodeIdSet.has(e.source) || !nodeIdSet.has(e.target)) continue;
+          degree.set(e.source, (degree.get(e.source) || 0) + 1);
+          degree.set(e.target, (degree.get(e.target) || 0) + 1);
+        }
         setGraphData({
           nodes: nodes.map((n) => ({
             ...n,
@@ -668,6 +827,8 @@ export default function Graph3DPage() {
             fx: n.x,
             fy: n.y,
             fz: n.z,
+            // Degree-weighted size so hubs stay readable after zoomToFit.
+            val: 1 + Math.min(8, degree.get(n.node_id) || 0),
           })),
           // Drop edges where either endpoint is missing from the node list
           links: edges
@@ -730,6 +891,7 @@ export default function Graph3DPage() {
         const dy = e.clientY - last.current.y;
         last.current = { x: e.clientX, y: e.clientY };
 
+        userNavigatedRef.current = true;
         if (rightDrag.current) {
           // Scale pan speed with camera distance so it feels consistent at any zoom level
           const panSpeed = camera.position.length() * 0.001;
@@ -757,7 +919,14 @@ export default function Graph3DPage() {
       const onWheel = (e: WheelEvent) => {
         if (modalOpenRef.current) return;
         e.preventDefault();
-        camera.translateZ(e.deltaY * 0.35);
+        userNavigatedRef.current = true;
+        // Distance-scaled fly so near-field scroll still moves, without
+        // overshooting through the origin and feeling "pulled back".
+        const dist = Math.max(40, camera.position.length());
+        const step = Math.min(80, dist * 0.08) * (e.deltaY > 0 ? 1 : -1);
+        // Normalize trackpad/mouse wheel units (pixels vs lines).
+        const units = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 800 : 1;
+        camera.translateZ(step * Math.min(3, Math.abs(e.deltaY) * units * 0.01));
       };
 
       const onContextMenu = (e: Event) => e.preventDefault();
@@ -795,7 +964,8 @@ export default function Graph3DPage() {
         if (modalOpenRef.current) { keysRef.current.clear(); return; }
         const keys = keysRef.current;
         if (!keys.size) return;
-        const speed = (camera.position.length() * 0.006 * dt) / 16.67;
+        userNavigatedRef.current = true;
+        const speed = (Math.max(40, camera.position.length()) * 0.006 * dt) / 16.67;
         if (keys.has("w")) camera.translateZ(-speed);
         if (keys.has("s")) camera.translateZ(speed);
         if (keys.has("a")) camera.translateX(-speed);
@@ -901,9 +1071,11 @@ export default function Graph3DPage() {
           nodeId="id"
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           nodeColor={(node: any) => nodeColor(node.node_type ?? "")}
-          nodeRelSize={4}
+          nodeRelSize={10}
           nodeOpacity={1.0}
-          nodeResolution={16}
+          nodeResolution={18}
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          nodeVal={(node: any) => Math.max(1, Number(node.val) || 1)}
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           linkColor={(link: any) => {
             const src = link.source;
@@ -922,11 +1094,11 @@ export default function Graph3DPage() {
                 : (nodeTypeMapRef.current.get(String(src)) ?? "");
             return nodeColor(type);
           }}
-          linkWidth={1.2}
-          linkOpacity={0.5}
+          linkWidth={2.8}
+          linkOpacity={0.72}
           linkCurvature={0.1}
           linkDirectionalParticles={2}
-          linkDirectionalParticleWidth={3}
+          linkDirectionalParticleWidth={4}
           linkDirectionalParticleSpeed={0.006}
           backgroundColor="#000000"
           showNavInfo={false}
@@ -935,10 +1107,11 @@ export default function Graph3DPage() {
           cooldownTicks={0}
           warmupTicks={0}
           onEngineStop={() => {
-            // Fit camera to the graph after physics is disabled.
-            // zoomToFit works on the Three.js camera directly, so it is
-            // compatible with the FPS rig that takes over afterwards.
-            graphRef.current?.zoomToFit(400, 600);
+            // Fit once on first settle only. Re-firing zoomToFit (common when
+            // parent state updates) snaps the camera back to overview mid-flight.
+            if (hasFittedRef.current || userNavigatedRef.current) return;
+            hasFittedRef.current = true;
+            graphRef.current?.zoomToFit(400, 120);
           }}
           onNodeClick={handleNodeClick}
         />
@@ -956,6 +1129,7 @@ export default function Graph3DPage() {
           inset: 0,
           pointerEvents: "none",
           overflow: "hidden",
+          zIndex: 20,
         }}
       >
         {proximityLabels.map((lbl) => (

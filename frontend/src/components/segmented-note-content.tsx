@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import { Image as ImageIcon, FileText, Mic, Film } from "lucide-react";
 import { api } from "@/lib/api";
 import { resolveFileUrl, isImageUrl, isVideoUrl } from "@/lib/utils";
+import { BlobMediaPlayer } from "@/components/blob-media-player";
 
 /** Allow entity:// pseudo-links through react-markdown's URL sanitizer. */
 function urlTransform(url: string): string {
@@ -222,6 +223,8 @@ function isAttachmentHref(href: string): boolean {
     return (
         /\/files\//.test(href) ||
         /\/uploads\//.test(href) ||
+        /\/vault-files\//.test(href) ||
+        /^attachments\//.test(href) ||
         /rustfs:\d+/i.test(href)
     );
 }
@@ -278,10 +281,10 @@ function makeLinkComponent(
             if (isVideoUrl(href) || isVideoUrl(resolvedUrl)) {
                 return (
                     <span className="block my-4 not-prose">
-                        <video
-                            src={resolvedUrl}
-                            controls
-                            className="max-w-full rounded-xl border border-white/10"
+                        <BlobMediaPlayer
+                          url={resolvedUrl}
+                          kind="video"
+                          className="max-w-full rounded-xl border border-white/10 bg-black"
                         />
                         <span className="block text-xs text-white/40 mt-1">{filename}</span>
                     </span>

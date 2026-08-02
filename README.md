@@ -1,127 +1,91 @@
-# LiveOS
+<div align="center">
 
-A knowledge graph and multi-hop question-answering system. Notes — including text, audio, images, PDFs, and other documents — are automatically extracted into a structured knowledge graph. A conversational interface then answers questions over the graph using an iterative retrieval loop that traverses entity relationships across multiple notes.
+  <img src="desktop/assets/logo.png" width="128" alt="LifeOS logo" />
 
----
+  <h1>LifeOS</h1>
 
-## Table of Contents
+  <p><b>Your knowledge, on your machine.</b></p>
 
-1. [What It Is](#what-it-is)
-2. [Quick Start](#quick-start)
-3. [Screenshots](#screenshots)
-4. [Architecture](#architecture)
-5. [Ingestion Pipeline](#ingestion-pipeline)
-6. [Retrieval Pipeline](#retrieval-pipeline)
-7. [Infrastructure](#infrastructure)
-8. [Frontend](#frontend)
-9. [LLM & Model Support](#llm--model-support)
-10. [Runtime Model Switching](#runtime-model-switching)
-11. [Benchmark Results](#benchmark-results)
-12. [Docker Deployment](#docker-deployment)
-13. [Uninstall / Cleanup](#uninstall--cleanup)
-14. [Local Setup](#local-setup)
-15. [Local Model Setup](#local-model-setup)
-16. [Environment Variables](#environment-variables)
-17. [Running the Stack](#running-the-stack)
-18. [Knowledge Bases](#knowledge-bases)
+  <p>
+    Notes, voice, images, and documents become a searchable knowledge graph.<br/>
+    Chat across it. No Docker. No cloud required.
+  </p>
 
----
+<p>
+  <a href="https://github.com/josetseph/LiveOS/actions/workflows/desktop-release.yml"><img src="https://img.shields.io/github/actions/workflow/status/josetseph/LiveOS/desktop-release.yml?branch=main&label=desktop%20build" alt="Desktop build status" /></a>
+  <a href="https://github.com/josetseph/LiveOS/blob/main/LICENSE"><img src="https://img.shields.io/github/license/josetseph/LiveOS?color=blue" alt="License: MIT" /></a>
+  <a href="https://github.com/josetseph/LiveOS/releases/latest"><img src="https://img.shields.io/github/v/release/josetseph/LiveOS?label=latest&color=red" alt="Latest release" /></a>
+  <a href="https://github.com/josetseph/LiveOS/stargazers"><img src="https://img.shields.io/github/stars/josetseph/LiveOS?color=yellow" alt="GitHub stars" /></a>
+</p>
 
-## What It Is
+  <p>
+    <a href="https://github.com/josetseph/LiveOS/releases/latest"><b>Download</b></a>
+    &nbsp;·&nbsp;
+    <a href="#installation">Install guide</a>
+    &nbsp;·&nbsp;
+    <a href="#build-from-source">Build from source</a>
+    &nbsp;·&nbsp;
+    <a href="#privacy">Privacy</a>
+  </p>
 
-LiveOS is an AI-powered knowledge base. You write notes — plain text, voice recordings, images, PDFs, Word documents, spreadsheets — and the system:
+  <img src="Platform%20Images/home_view.png" width="720" alt="LifeOS home" />
 
-1. **Extracts** entities, relationships, and concepts from the note using an LLM
-2. **Deduplicates** entities across notes using node IDs and name normalisation
-3. **Builds** a property graph where entities are nodes and LLM-extracted predicates are edges
-4. **Detects communities** of related entities using the Leiden algorithm
-5. **Indexes** everything into a vector store (Qdrant), a full-text search engine (Typesense), and a graph database (Kuzu)
-6. **Answers questions** conversationally via an iterative retrieval loop that walks the graph, accumulates findings across hops, and synthesises a final answer
-7. **Highlights** entity mentions live in notes and chat — every entity name found in ingested content is automatically underlined; clicking any mention opens an inline detail panel without leaving the page
-8. **Isolates knowledge** into multiple named knowledge bases — each with its own graph, vector store, and full-text index
-
-The system is designed to run entirely locally. All LLM inference, embedding, and reranking can run on local hardware via Ollama or LM Studio. Cloud LLM providers (Gemini, OpenAI, Anthropic, HuggingFace) are also supported and switchable via environment variables.
+</div>
 
 ---
 
-## Quick Start
+Write notes the way you already do — text, voice, photos, PDFs. LifeOS extracts entities and relationships into a knowledge graph, indexes them for search, and answers multi-hop questions in chat. Everything runs locally through the desktop app: your vault, your models, your machine.
 
-Use this path if you just want to run LiveOS on your computer.
+> [!NOTE]
+> End users install the **LifeOS** desktop app. You do not need Docker, Ollama, or a separate model server. Local chat, embedding, reranking, Florence, Whisper, and Marlin all load **in-process** in the API.
 
-### 1. Install Requirements
+---
 
-Install:
+## Features
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- Python 3
+### Notes & vault
 
-On macOS, Homebrew is recommended because the setup script can use it to install missing tools.
+- Per–knowledge-base markdown vaults (note bodies live as real `.md` files, not in SQLite)
+- Attachments stay in the vault — images, audio, PDFs, documents
+- Entity highlighting and autocomplete from the graph as you write
+- In-app voice recording and file attach on save
 
-### 2. Run Setup
+### Multimedia ingest
 
-Open a terminal in the LiveOS folder and run the command for your computer.
+On save, LifeOS enriches the note before graph indexing:
 
-**macOS / Linux**
+- **PDF** — native text plus Florence on embedded images and sparse page renders
+- **Images** — Florence captions / OCR-style descriptions
+- **Audio / video** — Whisper transcription; video also runs Marlin for visual understanding
+- Enrichment is written into the vault markdown, then ingested into the graph
 
-```sh
-./setup.sh
-```
+### Chat & retrieval
 
-**Windows PowerShell**
+- Multi-hop research loop over the knowledge graph (not a single vector lookup)
+- Hybrid retrieval: entity lookup, keyword (Meilisearch), and vectors (Qdrant)
+- Cross-encoder reranking with a local GGUF
+- Inline source citations and optional model thinking
 
-```powershell
-.\setup.ps1
-```
+### Knowledge graph
 
-The setup script downloads the required models, starts the database/search/storage services, starts Ollama, and opens the model services.
+- Embedded Kuzu property graph with Leiden communities
+- 3D graph explorer and node detail panels
+- Multiple isolated knowledge bases (separate vault, vectors, keyword index, and graph)
 
-On Apple Silicon macOS, `setup.sh` automatically enables the native MPS inference services with macOS `launchd`. That means Marlin and local-models start again after login/reboot. You do not need to run a separate model command after each restart.
+### Finance
 
-On Windows and Linux, the setup scripts run Marlin and local-models as Docker containers. Docker handles restart behavior.
+- Per-KB Firefly III administrations — accounts and transactions stay scoped to a vault
 
-### 3. Open LiveOS
+### Local models
 
-When setup finishes, open:
-
-[http://localhost:3700](http://localhost:3700)
-
-### Useful Commands
-
-Check whether everything is running:
-
-```sh
-docker compose ps
-```
-
-On macOS, check the native model services:
-
-```sh
-./scripts/host-inference.sh status
-```
-
-Turn off the macOS auto-start model services:
-
-```sh
-./scripts/host-inference.sh disable
-```
-
-Remove LiveOS containers and downloaded models:
-
-```sh
-./teardown.sh
-```
-
-On Windows:
-
-```powershell
-.\teardown.ps1
-```
+- First-run wizard chooses **data dir** and **models dir** (NAS / OneDrive friendly)
+- GGUF chat, embed, and rerank via `llama-cpp-python` in the API process
+- Only one heavy model resident at a time (chat **or** embed **or** rerank **or** Florence/Whisper/Marlin)
+- Cloud providers (Gemini, OpenAI, Anthropic, …) remain available if you want them
 
 ---
 
 ## Screenshots
-
-![Home](Platform%20Images/home_view.png)
 
 <table>
   <tr>
@@ -129,7 +93,7 @@ On Windows:
     <td><img src="Platform%20Images/notes_page_edit_view.png" alt="Notes editor"/></td>
   </tr>
   <tr>
-    <td align="center"><em>Chat interface</em></td>
+    <td align="center"><em>Chat</em></td>
     <td align="center"><em>Notes editor</em></td>
   </tr>
 </table>
@@ -138,801 +102,111 @@ On Windows:
 
 <table>
   <tr>
-    <td><img src="Platform%20Images/graph_view_node_centered.png" alt="Node-centred graph view"/></td>
-    <td><img src="Platform%20Images/graph_node_view.png" alt="Node detail panel"/></td>
-  </tr>
-  <tr>
-    <td align="center"><em>Node-centred view</em></td>
-    <td align="center"><em>Node detail panel</em></td>
-  </tr>
-</table>
-
-<table>
-  <tr>
     <td><img src="Platform%20Images/knowledge_base_selector_view.png" alt="Knowledge base manager"/></td>
     <td><img src="Platform%20Images/llm_model_settings_view.png" alt="Runtime model settings"/></td>
   </tr>
   <tr>
-    <td align="center"><em>Knowledge base manager</em></td>
-    <td align="center"><em>Runtime model settings</em></td>
+    <td align="center"><em>Knowledge bases</em></td>
+    <td align="center"><em>Model settings</em></td>
   </tr>
 </table>
 
 ---
 
-## Architecture
+## Download
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Next.js Frontend                        │
-│     Notes editor · Chat interface · 3D graph visualisation      │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ HTTP (REST, /api/v1/*)
-┌────────────────────────────▼────────────────────────────────────┐
-│                    FastAPI Backend (uvicorn)                    │
-│                                                                 │
-│          ┌─────────────────┐   ┌──────────────────┐             │
-│          │ Ingestion       │   │ Chat / Retrieval │             │
-│          │ Workflow        │   │ Workflow         │             │
-│          │ (LangGraph)     │   │ (iterative loop) │             │
-│          └────────┬────────┘   └──────────┬───────┘             │
-│                   │                       │                     │
-│          ┌────────▼───────────────────────▼───────┐             │
-│          │              Service Layer             │             │
-│          │  LLM · Embedding · Reranker · Graph    │             │
-│          │  Qdrant · Typesense · Multimedia       │             │
-│          └────────┬────────────────────────┬──────┘             │
-└───────────────────┼────────────────────────┼────────────────────┘
-                    │                        │
-┌───────────────────▼──────┐   ┌─────────────▼────────────────────┐
-│      Kuzu (embedded)     │   │      Docker-managed services     │
-│      graph database      │   │      Qdrant · Typesense          │
-│                          │   │      PostgreSQL · RustFS         │
-└──────────────────────────┘   └──────────────────────────────────┘
-```
+<div align="center">
 
-### Key design decisions
+<a href="https://github.com/josetseph/LiveOS/releases/latest"><img src="https://img.shields.io/badge/download-LifeOS-2EA043?style=flat&logo=apple&logoColor=white" alt="Download LifeOS" /></a>
 
-| Decision | Choice | Reason |
-|---|---|---|
-| Graph database | Kuzu (embedded) | Replaces Neo4j — no container, no Cypher syntax constraints on dynamic edge types |
-| Full-text search | Typesense | Replaces Elasticsearch — lighter, BM25 + exact match, much simpler to operate |
-| Vector store | Qdrant | Three collections: `node_cores`, `node_relationships`, `node_isolated_contexts` |
-| Relational DB | PostgreSQL | Stores raw notes with processing status; asyncpg for async access |
-| Object store | RustFS | S3-compatible, Apache 2.0; stores uploaded files (audio, images, PDFs) |
-| Embedding | `qwen3-embedding:0.6b` (local) | 1024-dim; requires Qwen3 instruction prefix for queries |
-| Reranker | `qwen3-reranker-0.6b` (local) | Cross-encoder; filters top-10 candidates before LLM context window |
-| LLM | Configurable | Ollama, LM Studio, Gemini, OpenAI, Anthropic, or HuggingFace |
-| Multi-KB | `KBRegistry` (JSON-persisted) | Each KB has its own Kuzu graph, Qdrant collections, and Typesense collection; notes are isolated per KB in Postgres |
+</div>
+
+Installers ship as macOS `.dmg` and Windows `.exe` from [GitHub Releases](https://github.com/josetseph/LiveOS/releases) (tags `desktop-v*`).
 
 ---
 
-## Ingestion Pipeline
+## Installation
 
-When a note is saved, the backend triggers a LangGraph workflow:
+### macOS
 
-```
-Note saved
-    │
-    ▼
-[1] Multimedia node
-    ├── Audio (.webm/.m4a/.mp3/.wav) → Whisper large-v3-turbo transcription
-    ├── Images → Florence-2-large captioning + OCR
-    ├── PDF → PyMuPDF text extraction
-    └── Word/Excel → python-docx / openpyxl extraction
-    │
-    ▼
-[2] LLM extraction (single call)
-    ├── Entities (name, type, description)
-    ├── Relationships (subject → predicate → object, confidence, strength)
-    ├── Concepts (abstract ideas from the note)
-    └── Note title (folded into same call — no second round-trip)
-    │
-    ▼
-[3] Graph write (Kuzu)
-    ├── Upsert entity nodes by normalised name + type
-    ├── Write SEMANTIC_REL edges with full provenance
-    ├── Predicate cleaning (strip entity name tokens from rel types)
-    └── Link note node → entity nodes via REFERENCES edges
-    │
-    ▼
-[4] Vector indexing (Qdrant)
-    ├── node_cores: entity summary embeddings
-    ├── node_relationships: NL relationship sentence embeddings
-    └── node_isolated_contexts: per-entity context embeddings
-    │
-    ▼
-[5] Full-text indexing (Typesense)
-    └── node name, type, isolated contexts, relationship NL text
-    │
-    ▼
-[6] Community detection (Leiden, batched)
-    └── Recomputed in background after each ingestion batch
-```
+1. Download the latest `.dmg` from [Releases](https://github.com/josetseph/LiveOS/releases/latest)
+2. Open it and drag **LifeOS** into Applications
+3. Launch LifeOS
+4. Complete the first-run wizard — pick a **data directory** and a **models directory**
 
-**Extraction stats from benchmark runs (990 HotPotQA notes):**
+On first launch the app downloads Qdrant and Meilisearch into your data dir, and you can pull GGUF models from Setup.
 
-| Metric | Value |
-|---|---|
-| Avg entities extracted per note | 9.22 |
-| Total entity nodes (post-dedup) | 7,284 |
-| Deduplication rate | 20.2% (9,129 instances → 7,284 unique) |
-| Total relationships written | 8,238 |
-| Unique predicate types | 3,168 |
-| Predicates auto-cleaned | 607 |
-| Community nodes (Leiden) | 1,362 |
-| Avg ingestion time per note (local LLM) | 49.71 s (Gemma3:4b via Ollama) |
-| Avg ingestion time per note (cloud LLM) | 34.02 s (Gemini Flash Lite) |
+### Windows
+
+1. Download the latest `.exe` installer from [Releases](https://github.com/josetseph/LiveOS/releases/latest)
+2. Run the installer and open LifeOS
+3. Complete the first-run wizard (data dir + models dir)
+
+> [!TIP]
+> Unsigned builds may need an extra click through Gatekeeper / SmartScreen until notarization and Authenticode are enabled.
 
 ---
 
-## Retrieval Pipeline
+## Build from source
 
-Chat queries go through a multi-iteration research loop, not a single vector lookup:
-
-```
-User query
-    │
-    ▼
-[1] LLM query analysis
-    ├── Intent classification
-    ├── Entity extraction (names explicitly mentioned)
-    ├── Keywords + concepts
-    ├── date_filter (YYYY-MM-DD) — set when query targets a specific day
-    └── period_filter (YYYY-MM) — set when query targets a whole month
-    │
-    ▼
-[2] HYBRID RETRIEVAL (three independent result lists)
-    │
-    ├── entity_nodes  — exact name match via graph lookup
-    │   └── Enriched from Qdrant; isolated_contexts filtered to date_filter / period_filter
-    │
-    ├── typesense_nodes  — BM25 keyword search (Typesense)
-    │   ├── Enriched from Qdrant (description + isolated_contexts)
-    │   ├── isolated_contexts filtered to matching date(s)
-    │   └── Temporal post-filter applied (see below)
-    │
-    └── vector_nodes  — semantic search (Qdrant cosine, threshold 0.45 pre-rerank)
-        ├── Date annotation appended to content: "Had coffee with John - 2026-05-10"
-        └── Temporal post-filter applied (see below)
-    │
-    ▼
-[3] TEMPORAL POST-FILTER (applied to typesense_nodes and vector_nodes)
-    │
-    ├── temporal_digest nodes — include only when period_filter matches period_key
-    ├── community nodes      — exclude entirely for any temporal query
-    └── all other nodes      — include only if isolated_contexts contain a matching
-                               date string after enrichment
-    │
-    ▼
-[4] ITERATIVE LOOP (up to 10 iterations, configurable)
-    │
-    ├── all_found_nodes = entity_nodes + typesense_nodes + vector_nodes
-    │
-    ├── Graph neighbour expansion
-    │   ├── 1-hop Kuzu graph traversal from top candidates
-    │   └── Qdrant NL relationship lookup for neighbour context
-    │
-    ├── Reranking (qwen3-reranker-0.6b, top-10)
-    │
-    └── LLM step
-        ├── Extract FINDING from accumulated context, or
-        └── Emit NEXT_QUERY for next iteration
-    │
-    ▼
-[5] Loop exits when can_answer = True or iteration limit reached
-    └── Returns best FINDING + top-6 scored context docs
-    │
-    ▼
-[6] Response with inline note citations
-    └── Model thinking exposed in collapsible dropdown (when available)
-```
-
-### Candidate types
-
-| Type | Source | Description |
-|---|---|---|
-| `entity_match` | Entity name lookup | Nodes whose name was explicitly mentioned in the query |
-| `keyword_match` | Typesense BM25 | Nodes found by full-text keyword search |
-| `vector_match` | Qdrant vector search | Nodes found by semantic/cosine similarity |
-| `community_summary` | Qdrant vector search | Community rollup nodes (excluded for temporal queries) |
-
-### Temporal filtering
-
-When the LLM detects a date or month in the query it sets `date_filter` (YYYY-MM-DD) or `period_filter` (YYYY-MM). These are **never passed to Qdrant** — all searches run unrestricted and temporal filtering is applied as a post-filter on the accumulated results:
-
-- **`entity_nodes`**: always included; their `isolated_contexts` are filtered to the matching date so only relevant context is surfaced.
-- **`typesense_nodes` / `vector_nodes`**: filtered by the rules above. A node passes only if its enriched `isolated_contexts` contain at least one entry whose date suffix matches (`"content - YYYY-MM-DD"`).
-- **`temporal_digest` nodes**: kept only for month queries where the node's `period_key` equals `period_filter`.
-- **`community` nodes**: excluded for all temporal queries (they hold aggregate, undated summaries).
-
-The loop accumulates findings across iterations. On exhaustion (no `can_answer=True`), the last non-empty FINDING is returned without an additional synthesis call.
-
-If the active LLM exposes reasoning (e.g. `reasoning_content` from LM Studio, or `<think>` tags from models like Gemma4), the thinking is passed through to the frontend and shown in a collapsible "Model thinking" section above the answer.
-
----
-
-## Infrastructure
-
-Most services run as Docker containers:
-
-```sh
-docker compose up -d
-```
-
-| Service | Image | Port | Purpose |
-|---|---|---|---|
-| PostgreSQL | `postgres:latest` | 15432 | Notes + processing status |
-| RustFS | `rustfs/rustfs:latest` | 9000 / 9001 | File storage (S3-compatible) |
-| Qdrant | `qdrant/qdrant:latest` | 6333 / 6334 | Vector search |
-| Typesense | `typesense/typesense:27.1` | 8108 | Full-text search (BM25) |
-| Backend | built from `./backend` | 8700 | FastAPI API server |
-| Local Models | native macOS host (default) or Docker profile `docker-models` | 8791 | Florence, Whisper, reranker, PDF visual extraction |
-| Marlin | native macOS host (default) or Docker profile `docker-models` | 8790 | Video visual understanding |
-| Frontend | built from `./frontend` | 3700 | Next.js UI |
-
-Kuzu is embedded — no container needed. The database files live at `data/kuzu/kuzu_graph`.
-Marlin runs as a separate service because it requires `transformers>=5.7`, while Florence-2 image/PDF extraction stays on the local-models service's `transformers` 4.x stack.
-
-On Apple Silicon macOS, `./setup.sh` runs Marlin and local-models **natively on the host** using MPS. The Docker backend calls them via `host.docker.internal:8790/8791`. This is much faster than CPU inference inside Docker Desktop. Setup also enables them as a per-user `launchd` service so they restart automatically after login/reboot.
-
-Manage them from the repo root with:
-
-```sh
-./scripts/host-inference.sh status
-./scripts/host-inference.sh restart
-./scripts/host-inference.sh disable
-./scripts/host-inference.sh enable
-```
-
-Use `./scripts/host-inference.sh disable` to turn off auto-start and stop the host services. Use `./scripts/host-inference.sh start` for a temporary session-only start. To fall back to Dockerized model containers instead, run `docker compose --profile docker-models up -d`.
-
-On Windows, `setup.ps1` uses the Docker `docker-models` profile by default, so the model containers restart with Docker rather than using the macOS host-inference service.
-
----
-
-## Frontend
-
-Built with Next.js 16 (App Router) and Tailwind CSS.
-
-| Route | Purpose |
-|---|---|
-| `/` | Landing page with navigation |
-| `/notes` | Notes editor — create, edit, search, filter by ingestion status; supports file attachments and voice recording |
-| `/chat` | Conversational interface — markdown rendering, file previews, thumbs up/down feedback, source citations |
-| `/graph-3d` | 3D graph visualisation |
-| `/kb` | Knowledge base manager — create, rename, switch, and delete knowledge bases |
-| `/settings` | Runtime LLM settings — switch provider, chat model, ingestion model, and server URL without restarting; also has maintenance controls to manually trigger community detection and temporal digest builds |
-
-The notes editor supports:
-- Plain text with Markdown preview
-- **Entity mention highlighting** — after ingestion, known entity names are scanned in the note at load time and highlighted as clickable badges in both edit and preview modes; no special markup is stored in the note
-- **Entity autocomplete** — typing a capitalised word surfaces matching entities from the knowledge graph as inline suggestions
-- **Entity detail panel** — clicking any highlighted entity name slides in a panel showing the entity's type, description, relationships, and isolated contexts, with a link to its node in the 3D graph
-- File attachments (images, audio, PDF, Word, Excel)
-- In-browser voice recording — audio is transcoded to AAC/M4A server-side on upload, ensuring playback works across all browsers including Safari
-- Per-note ingestion status filter (all / ingested / ingesting / saved / failed)
-- Auto-save on edit
-- Note content segmentation — image, PDF, and audio sections are visually separated with labelled dividers in preview mode
-
-The chat interface supports:
-- Multi-hop answers with inline source citations
-- **Entity highlighting in AI responses** — entity names mentioned in answers are scanned and rendered as clickable badges; the same entity detail panel slides in on click
-- Collapsible model thinking display (for models that expose reasoning tokens)
-- Note preview modal with segmented content display and entity highlighting
-
----
-
-## LLM & Model Support
-
-The LLM provider is set via `LLM_PROVIDER` in `backend/.env`. The same config file controls the ingestion model, chat model, embedding model, and reranker.
-
-**Supported providers:**
-
-| Provider | `LLM_PROVIDER` value | Notes |
-|---|---|---|
-| Ollama | `ollama` | Default. Runs locally at `http://127.0.0.1:11434` |
-| LM Studio | `lm_studio` | Local OpenAI-compatible server; exposes `reasoning_content` for thinking models |
-| OpenAI | `openai` | Requires `OPENAI_API_KEY` |
-| Google Gemini | `gemini` | Requires `GEMINI_API_KEY` |
-| Anthropic | `anthropic` | Requires `ANTHROPIC_API_KEY` |
-| HuggingFace | `huggingface` | Requires `HUGGINGFACE_API_KEY` |
-
-A separate `INGESTION_LLM_MODEL` can be set to use a different (usually smaller) model for extraction vs. chat — for example, `gemma4:e4b` for ingestion and `gemma4:latest` for chat.
-
-An optional `LLM_FALLBACK_PROVIDER` kicks in if the primary provider fails.
-
----
-
-## Runtime Model Switching
-
-The provider, chat model, ingestion model, and server URL can be changed live from the `/settings` page — no server restart or `.env` edit required.
-
-Changes are persisted to `data/runtime_config.json` and re-applied automatically on the next server start, so they survive restarts. API keys are never stored here — those remain in `backend/.env`.
-
-| Field | What it controls |
-|---|---|
-| Provider | Active LLM backend (`ollama`, `lm_studio`, `gemini`, `openai`, `anthropic`, `huggingface`) |
-| Chat model | Model used for all chat queries (`CHAT_MODEL` — highest-priority override) |
-| Ingestion model | Model used during note ingestion — extraction, entity reasoning (`INGESTION_MODEL`) |
-| Server URL | Base URL for local providers (LM Studio / Ollama) |
-
-Model-only changes take effect on the next request with zero overhead. Provider or server URL changes trigger a full LLM client reinitialisation in-process.
-
----
-
-## Benchmark Results
-
-All benchmarks use the [HotPotQA](https://hotpotqa.github.io/) multi-hop QA dataset (100 questions, 990-note knowledge graph). HotPotQA requires bridging facts from two or more documents to answer correctly — it is a strong stress test for multi-hop retrieval.
-
-### Final Implementation — Model Comparison
-
-Knowledge graph: 9,636 nodes / 8,238 relationships — ingested with `gemma3:4b` (local, Ollama). Infrastructure identical across all three runs; only the chat LLM varies.
-
-| Metric | Gemini 3.1 Flash Lite | Gemma3:4b (local) | Gemma4:e4b (local) |
-|---|---|---|---|
-| **Inference** | Google Cloud API | Ollama local | Ollama local |
-| **Exact Match (EM)** | **59.0%** | 30.0% | 58.0% |
-| **Fuzzy Match** | 76.0% | 41.0% | **81.0%** |
-| **Token F1** | 0.705 | 0.383 | **0.737** |
-| **Contains expected** | 67.0% | 36.0% | **74.0%** |
-| **Hard failures** | 24 | 59 | **19** |
-| **Avg response time** | **18.10 s** | 91.66 s | 212.10 s |
-| **Retrieval Recall** | 0.665 | 0.625 | **0.715** |
-| **Retrieval Precision** | **0.330** | **0.351** | 0.349 |
-| **Retrieval F1** | 0.441 | 0.449 | **0.469** |
-| **Full-recall questions** | 42 | 37 | **52** |
-| **EM at full recall** | 62% | 24% | 50% |
-| **Wall clock (100 Qs)** | ~30 min | ~2.5 h | ~8.75 h |
-| **Error count** | 0 | 0 | 0 |
-
-**Key takeaways:**
-
-- **The LLM is the dominant variable.** The 29 pp EM spread (30% → 59%) is entirely attributable to reasoning quality — retrieval precision across all three runs is nearly identical (0.330–0.351).
-- **Gemma4:e4b matches cloud accuracy locally.** At 58% EM vs. 59% for Gemini Flash Lite and 81% fuzzy match (best of any run), a sufficiently large local model can match cloud API quality. The cost is 212 s mean latency.
-- **Gemini Flash Lite is the interactive production choice.** 18.10 s mean, 59% EM, 76% fuzzy — 4.4× faster than Gemma3:4b with nearly double the accuracy.
-- **Gemma3:4b under-performs on reasoning, not retrieval.** Its retrieval precision (0.351) is the highest of the three — but EM at full-recall is only 24%, versus 62% for Flash Lite. The model retrieves correctly and then fails to reason over what it retrieved.
-
-### After Optimizations — Gemma4:e4b
-
-Post-Final Implementation pipeline optimizations evaluated with Gemma4:e4b against the same HotPotQA benchmark. Improvements include refined answer synthesis, more targeted retrieval, reduced inter-query overhead, and an updated knowledge graph (fixing the Animorphs KB gap).
-
-| Metric | Final Implementation | After Optimizations | Δ |
-|---|---|---|---|
-| **Exact Match (EM)** | 58.0% | **62.0%** | +4 pp |
-| **Fuzzy Match** | 81.0% | **81.0%** | — |
-| **Token F1** | 0.7366 | 0.7358 | −0.001 |
-| **Contains expected** | 74.0% | 74.0% | — |
-| **Hard failures** | 19 | 19 | — |
-| **Fuzzy-only** | 23 | **19** | −4 |
-| **Avg response time** | 212.10 s | 231.17 s | +19 s |
-| **Retrieval Recall** | **0.715** | 0.610 | −0.105 |
-| **Retrieval Precision** | 0.349 | **0.361** | +0.012 |
-| **Retrieval F1** | **0.469** | 0.453 | −0.016 |
-| **EM at full recall (Rc=1.0)** | 50% | **75%** | +25 pp |
-| **EM at zero recall (Rc=0.0)** | 56% | **71%** | +15 pp |
-| **Wall clock (100 Qs)** | ~8.75 h | **~6.5 h** | −2.25 h |
-
-**Key takeaways:**
-
-- **EM improves 4 pp (58% → 62%) with no change in fuzzy match** — gains are at the answer precision boundary, not in semantic correctness.
-- **Answer synthesis at full recall dramatically improved.** EM at Rc=1.0 jumped 25 pp (50% → 75%), reversing the prior counter-intuitive result where excessive context hurt exact match.
-- **Retrieval is more precise but less exhaustive.** Precision improved (+0.012) while recall dropped (−0.105) — the pipeline is more targeted, surfacing fewer gold documents overall but synthesising more accurately from the ones it finds.
-- **Wall clock cut by 26%** — near-elimination of inter-query overhead reduced total wall clock from ~8.75 h to ~6.5 h.
-- **Animorphs KB gap resolved** — the one question that failed in every prior run is now correctly answered (EM ✓, Rc=1.0, 146 s).
-
-### Historical Architecture Progression
-
-| Approach | Graph DB | Search | LLM | EM | Fuzzy | Avg response |
-|---|---|---|---|---|---|---|
-| Sub Questions (Feb 2026) | Neo4j | Elasticsearch | Gemini 3 Flash Preview | 62% | 75% | 50.5 s |
-| Joint Approach (Mar 2026) | Neo4j | Elasticsearch | Gemini Flash Lite | 61% | — | ~43 s |
-| Final Implementation (May 2026) | **Kuzu** | **Typesense** | Gemini Flash Lite | **59%** | 76% | **18.10 s** |
-| Final Implementation (May 2026) | **Kuzu** | **Typesense** | Gemma4:e4b (local) | 58% | **81%** | 212.10 s |
-| After Optimizations (May 2026) | **Kuzu** | **Typesense** | Gemma4:e4b (local) | **62%** | **81%** | 231.17 s |
-
-The move from Neo4j + Elasticsearch to Kuzu + Typesense cut response time from ~43 s to 18.10 s (2.4×) while maintaining near-identical accuracy, and eliminated all external graph database and search service dependencies. Post-Final Implementation pipeline optimizations pushed Gemma4:e4b to **62% EM** — the highest exact match of any fully local configuration evaluated.
-
----
-
-## Docker Deployment
-
-This is the recommended way to run LiveOS. For most users, the automated setup scripts are the only commands needed.
-
-The setup scripts start:
-
-- the LiveOS web app
-- the backend API
-- Postgres, RustFS, Qdrant, and Typesense
-- Ollama and the default local LLM/embedding models
-- local multimedia models for PDFs, images, audio, reranking, and video
+Prefer to run or package LifeOS yourself? Use the Electron shell under [`desktop/`](desktop/).
 
 ### Prerequisites
 
-- Docker Desktop
-- Python 3
-- Internet access for the first run, because models and Docker images are downloaded
-
-The setup scripts install and use Ollama by default. You can switch to LM Studio or a cloud provider later from configuration.
-
-If Docker is not installed, install [Docker Desktop](https://www.docker.com/products/docker-desktop/) first, or let the setup script try to install it:
-
-```sh
-./setup.sh --install-docker
-```
-
-```powershell
-.\setup.ps1 -InstallDocker
-```
-
-On macOS this uses Homebrew if available. On Windows this uses `winget`. On Linux this uses Docker's official install script and may require logging out and back in before the `docker` command works without `sudo`.
-
-### Automated setup
-
-Run the script for your platform from the repository root.
-
-**macOS / Linux**
-
-```sh
-./setup.sh
-```
-
-**Windows PowerShell**
-
-```powershell
-.\setup.ps1
-```
-
-The setup script:
-
-- creates `backend/.env` if it does not exist
-- configures Docker-friendly Ollama defaults in a newly created `.env`
-- installs Ollama when possible
-- starts Ollama and pulls `gemma4:e4b` plus `qwen3-embedding:0.6b`
-- downloads Florence, Whisper, Qwen reranker, and optional Marlin models into `backend/models/`
-- starts Docker services
-- on Apple Silicon macOS, enables native MPS model services with `launchd`
-- on Windows and Linux, starts the Docker `docker-models` profile
-
-When the script finishes, open [http://localhost:3700](http://localhost:3700).
-
-### Platform Notes
-
-**Apple Silicon macOS:** `setup.sh` automatically uses native MPS inference for Marlin and local-models. This is faster than running those models inside Docker. The services auto-start after login/reboot.
-
-Manage them with:
-
-```sh
-./scripts/host-inference.sh status
-./scripts/host-inference.sh restart
-./scripts/host-inference.sh disable
-./scripts/host-inference.sh enable
-```
-
-**Windows / Linux:** setup runs Marlin and local-models inside Docker by default. Docker restart policies keep them running when Docker Desktop or Docker Engine starts.
-
-### Optional Flags
-
-Most users do not need these.
-
-```sh
-./setup.sh --install-docker --skip-ollama --skip-models --skip-compose --no-build --force-env --with-marlin
-```
-
-```powershell
-.\setup.ps1 -InstallDocker -SkipOllama -SkipModels -SkipCompose -NoBuild -ForceEnv -WithMarlin -NoDockerModels
-```
-
-`--with-marlin` / `-WithMarlin` downloads the larger optional Marlin video-visual model. If automatic Ollama installation is unavailable on your machine, install Ollama from [ollama.com/download](https://ollama.com/download), then rerun the setup script.
-
-### Manual setup
-
-Use these steps if you prefer to configure your provider and models yourself.
-
-#### 1. Clone the repo
-
-```sh
-git clone https://github.com/josetseph/LiveOS.git
-cd LiveOS
-```
-
-#### 2. Create your environment file
-
-```sh
-cp backend/.env.example backend/.env
-```
-
-Edit `backend/.env` and set your LLM provider and API keys. For Docker, leave the database, Qdrant, Typesense, and RustFS hostnames as their defaults; Docker Compose overrides them to service names that resolve inside the container network.
-
-The frontend calls the API and file storage through same-origin routes (`/api/v1`, `/health`, and `/files/...`). Next.js proxies those routes to the backend and RustFS containers, so remote HTTPS deployments do not need to expose backend port `8700` or RustFS port `9000` to browsers.
-
-If you are using a local model server on your machine, containers cannot reach it at `127.0.0.1`. Use `host.docker.internal` instead:
-
-| Variable | Local machine value | Docker value |
-|---|---|---|
-| `LLM_BASE_URL` | `http://127.0.0.1:1234` | `http://host.docker.internal:1234` |
-| `EMBEDDING_BASE_URL` | `http://127.0.0.1:11434` | `http://host.docker.internal:11434` |
-
-#### 3. Start everything
-
-```sh
-docker compose up -d
-```
-
-Open [http://localhost:3700](http://localhost:3700).
-
-The `init` container runs automatically before the backend starts. It runs migrations and initializes the storage bucket, Qdrant collections, Typesense schema, and Kuzu graph. If startup fails, check it first:
-
-```sh
-docker compose logs init
-```
-
-If you choose to expose the backend on a separate public origin instead of using the same-origin proxy, set `CORS_ORIGINS` in `backend/.env` to include every frontend origin, for example:
-
-```env
-CORS_ORIGINS=http://localhost:3700,https://your-domain.com
-```
-
----
-
-## Uninstall / Cleanup
-
-Use the teardown script for your platform from the repository root.
-
-**macOS / Linux**
-
-```sh
-./teardown.sh
-```
-
-**Windows PowerShell**
-
-```powershell
-.\teardown.ps1
-```
-
-The teardown script removes the LiveOS Docker containers/networks, removes local Docker images by default, deletes `backend/models/`, and removes the Ollama models pulled by the setup script. It asks for confirmation before doing anything.
-
-Useful options:
-
-```sh
-./teardown.sh --remove-data --uninstall-ollama --remove-all-ollama-models -y
-```
-
-```powershell
-.\teardown.ps1 -RemoveData -UninstallOllama -RemoveAllOllamaModels -Yes
-```
-
-Notes:
-
-- `--remove-data` / `-RemoveData` deletes `./data`, including local Postgres, RustFS, Qdrant, Typesense, and Kuzu state.
-- `--uninstall-ollama` / `-UninstallOllama` tries to remove the Ollama app itself.
-- `--remove-all-ollama-models` / `-RemoveAllOllamaModels` deletes the whole Ollama model store, including models unrelated to LiveOS.
-- The scripts do not delete the project folder. After teardown, delete the repository directory manually if you want to remove the source code too.
-
----
-
-## Local Setup
-
-Use this path only if you want to run the backend and frontend directly on your machine while keeping Postgres, RustFS, Qdrant, and Typesense in Docker.
-
-### Prerequisites
-
-- Docker Desktop
-- Python 3.11+
 - Node.js 20+
-- ffmpeg (for server-side audio transcoding — `brew install ffmpeg` on macOS)
-- Ollama or LM Studio if you are using local models
+- Python 3.11+ (dev uses the repo `backend/.venv` when present)
+- macOS: Xcode CLT + `cmake` for Metal `llama-cpp-python` when packaging
+- ffmpeg (audio transcoding)
 
-### 1. Start infrastructure services
+### Develop
 
-```sh
-docker compose up -d postgres qdrant typesense rustfs
-```
-
-### 2. Configure backend environment
-
-```sh
-cp backend/.env.example backend/.env
-```
-
-Because this setup runs Python from your host machine, uncomment the localhost overrides in `backend/.env` for Postgres, Qdrant, Typesense, and RustFS before running initialization.
-
-### 3. Backend
-
-```sh
-cd backend
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python scripts/init_local.py
-uvicorn app.main:app --reload --port 8700
-```
-
-### 4. Frontend
-
-```sh
-cd frontend
+```bash
+git clone https://github.com/josetseph/LiveOS.git
+cd LiveOS/desktop
 npm install
-npm run dev
+npm start
 ```
 
-Open [http://localhost:3700](http://localhost:3700).
+This starts the supervisor with the repo backend and `next dev` frontend. Ports: UI `17400`, API `17401`, Qdrant `17433`, Meilisearch `17470`.
+
+More detail: [`desktop/README.md`](desktop/README.md).
+
+### Package installers
+
+```bash
+cd desktop
+npm install
+npm run prepare-dist   # bundle Python + Node + frontend (~10–20 min)
+npm run dist:mac       # or dist:win on Windows
+```
+
+Full packaging notes: [`desktop/PACKAGING.md`](desktop/PACKAGING.md).
+
+### Contributors — optional Docker infra
+
+`docker-compose.yml` can still bring up Postgres, Qdrant, Meilisearch, API, and UI for contributor stacks. It is **not** the product install path and does **not** run model HTTP sidecars — multimodal and GGUF inference stay in-process in the API.
+
+```bash
+# Optional contributor path only
+docker compose up -d
+```
+
+Or from the desktop shell: `LIVEOS_USE_DOCKER=1 npm start`.
 
 ---
 
-## Local Model Setup
+## Privacy
 
-Three models must be downloaded manually and placed in `backend/models/` before starting the backend. These run locally — no cloud API needed for multimedia processing or reranking.
-
-### Required models
-
-| Directory | Hugging Face source | Purpose |
-|---|---|---|
-| `backend/models/florence-2-large/` | [`microsoft/Florence-2-large`](https://huggingface.co/microsoft/Florence-2-large) | Vision — image captioning, OCR-like descriptions, and visual PDF pages |
-| `backend/models/whisper-large-v3-turbo/` | [`openai/whisper-large-v3-turbo`](https://huggingface.co/openai/whisper-large-v3-turbo) | Audio — speech-to-text transcription |
-| `backend/models/qwen3-reranker-0.6b/` | [`Qwen/Qwen3-Reranker-0.6B`](https://huggingface.co/Qwen/Qwen3-Reranker-0.6B) | Retrieval — reranking search results |
-
-### Download instructions
-
-```sh
-pip install huggingface_hub
-
-huggingface-cli download microsoft/Florence-2-large \
-  --local-dir backend/models/florence-2-large
-
-huggingface-cli download openai/whisper-large-v3-turbo \
-  --local-dir backend/models/whisper-large-v3-turbo
-
-huggingface-cli download Qwen/Qwen3-Reranker-0.6B \
-  --local-dir backend/models/qwen3-reranker-0.6b
-```
-
-> **Note:** Florence-2-large requires `trust_remote_code=True` and includes custom modeling code. Do not rename or restructure the downloaded files.
-
-The backend reads models from the path configured by `MODELS_PATH` in `backend/app/core/config.py`, which defaults to `models` relative to the backend root.
-
-### LLM models
-
-The LLM used for chat and ingestion is configured separately and served by one of the supported providers.
-
-**Ollama (local)**
-
-```sh
-ollama pull gemma4:latest          # chat model
-ollama pull gemma4:e4b              # ingestion model (smaller, faster)
-ollama pull qwen3-embedding:0.6b   # embedding model (required)
-```
-
-**LM Studio (local)**
-
-1. Open LM Studio and go to the **Discover** tab
-2. Search for a model by name (e.g. `google/gemma-3-4b-it`) and download it
-3. Load the model and start the local server
-4. Set `LLM_PROVIDER=lm_studio` in `backend/.env` — or switch provider live from `/settings`
-
-Models can also be downloaded from [Hugging Face](https://huggingface.co/models) and loaded into LM Studio via **My Models → Load from disk**.
-
-**Cloud providers**
-
-Set the API key in `backend/.env` and configure `LLM_PROVIDER`:
-
-```sh
-LLM_PROVIDER=gemini
-GEMINI_API_KEY=your_key_here
-LLM_MODEL=gemini-2.0-flash-lite
-```
+LifeOS is local-first. Notes, vault files, vectors, and models live under the directories you chose (or Application Support / `%APPDATA%\LifeOS`). Nothing is uploaded unless you explicitly configure a cloud LLM provider.
 
 ---
 
-## Environment Variables
+## Benchmarks
 
-Copy `backend/.env.example` to `backend/.env` and configure:
-
-```sh
-# LLM Provider — "ollama" | "lm_studio" | "openai" | "gemini" | "anthropic" | "huggingface"
-LLM_PROVIDER=ollama
-LLM_MODEL=gemma4:latest
-INGESTION_LLM_MODEL=gemma4:e4b
-
-# Embedding — "ollama" | "lm_studio" | "auto"
-EMBEDDING_PROVIDER=ollama
-EMBEDDING_MODEL=qwen3-embedding:0.6b
-
-# PDF visual extraction — native text is kept for every page; 0 means render
-# every visually relevant page with Florence.
-PDF_VISUAL_EXTRACTION_ENABLED=true
-PDF_VISUAL_EXTRACTION_MAX_PAGES=0
-INGESTION_PIPELINE_CONCURRENCY=1     # FIFO: one full note ingestion at a time
-MULTIMEDIA_CONCURRENCY=1            # keep local model jobs serialized on CPU
-
-# Cloud providers (only needed if using cloud LLMs)
-GEMINI_API_KEY=
-OPENAI_API_KEY=
-ANTHROPIC_API_KEY=
-
-# Web fallback search (optional)
-TAVILY_API_KEY=
-
-# Retrieval tuning
-RERANKER_ENABLED=true
-RERANKER_TOP_K=10
-MAX_LOOP_ITERATIONS=10
-VECTOR_SIMILARITY_THRESHOLD=0.50
-VECTOR_PRE_RERANK_THRESHOLD=0.45
-
-# Benchmark mode (set true only when testing against external datasets)
-BENCHMARK_MODE=false
-```
-
-Full reference: [`backend/app/core/config.py`](backend/app/core/config.py)
+Retrieval and HotPotQA evaluation reports live under [`Results/`](Results/). They document earlier pipeline experiments; the shipping product path is the desktop app above.
 
 ---
 
-## Running the Stack
+## License
 
-### Reset everything (start fresh)
-
-```sh
-cd backend
-source venv/bin/activate
-python scripts/reset_all.py
-```
-
-Individual reset scripts exist for each store: `reset_vectors.py`, `reset_index.py`, `reset_graph.py`, `reset_database.py`, `reset_storage.py`, `reset_ingestion.py`.
-
-> **Note:** If the backend is running in Docker, restart it after `reset_ingestion.py` to release stale Kuzu file handles: `docker compose restart backend`.
-
-### Benchmark evaluation
-
-Before running the benchmark, enable benchmark mode in `backend/.env`:
-
-```sh
-BENCHMARK_MODE=true
-```
-
-Full instructions — dataset ingestion, evaluation flags, and LLM model setup — are in [`backend/tests/benchmark/README.md`](backend/tests/benchmark/README.md).
-
-```sh
-cd backend
-source venv/bin/activate
-
-# Ingest the benchmark notes
-python tests/benchmark/prepare_dataset.py --dataset hotpotqa
-
-# Run evaluation
-python tests/benchmark/evaluate.py --dataset hotpotqa --verbose
-```
-
-Results are written to `backend/tests/benchmark/results/` as timestamped JSON files, and to `Results/` as Markdown reports.
-
----
-
-## Knowledge Bases
-
-LiveOS supports multiple isolated knowledge bases. Each KB maintains its own:
-
-- **Kuzu graph** — separate database directory under `data/kuzu/<slug>/`
-- **Qdrant collections** — `<slug>_node_cores`, `<slug>_node_relationships`, `<slug>_node_isolated_contexts`
-- **Typesense collection** — `<slug>_nodes`
-- **Notes** — filtered by `kb_id` in PostgreSQL
-
-KBs are managed by `KBRegistry` (`backend/app/services/kb_registry.py`), a JSON-persisted singleton at `data/kb_registry.json`. The `default` KB always exists and cannot be deleted or renamed — it maps to the original single-KB configuration.
-
-The active KB is selected via a `?kb=<slug>` query parameter on all API endpoints. The frontend stores the active KB in `localStorage` and displays its name in the sidebar. All routes — notes, chat, graph — are automatically scoped to the active KB.
-
-To manage knowledge bases, open `/kb` in the frontend or use the API:
-
-```sh
-# List all KBs
-GET /api/v1/kb
-
-# Create a KB
-POST /api/v1/kb          { "name": "Work" }
-
-# Rename a KB
-PATCH /api/v1/kb/{id}    { "name": "New Name" }
-
-# Delete a KB (drops all data)
-DELETE /api/v1/kb/{id}
-```
+LifeOS is released under the [MIT License](LICENSE).

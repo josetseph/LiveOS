@@ -6,7 +6,27 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 REPO_ROOT = BACKEND_DIR.parent
-DEFAULT_KUZU_DB_PATH = str(REPO_ROOT / "data" / "kuzu" / "kuzu_graph")
+
+
+def _default_data_dir() -> str:
+    try:
+        from app.core.paths import resolve_data_dir
+
+        return str(resolve_data_dir())
+    except Exception:  # pylint: disable=broad-exception-caught
+        return str(REPO_ROOT / "data")
+
+
+def _default_models_dir() -> str:
+    try:
+        from app.core.paths import resolve_models_dir
+
+        return str(resolve_models_dir())
+    except Exception:  # pylint: disable=broad-exception-caught
+        return str(BACKEND_DIR / "models")
+
+
+DEFAULT_KUZU_DB_PATH = str(Path(_default_data_dir()) / "kuzu" / "kuzu_graph")
 
 
 class Settings(BaseSettings):
@@ -18,203 +38,136 @@ class Settings(BaseSettings):
 
     PROJECT_NAME: str = "LiveOS"
     API_V1_STR: str = "/api/v1"
-    # Comma-separated browser origins allowed to call the API directly.
-    # Same-origin frontend proxying avoids CORS for normal Docker deployments.
-    CORS_ORIGINS: str = "http://localhost:3700,http://localhost:3701"
+    # Include 127.0.0.1 — Electron desktop loads that origin (≠ localhost for CORS)
+    CORS_ORIGINS: str = (
+        "http://localhost:3700,http://localhost:3701,"
+        "http://127.0.0.1:3700,http://127.0.0.1:3701"
+    )
     CORS_ALLOW_ORIGIN_REGEX: str | None = None
+
+    # ── Desktop / path layout ─────────────────────────────────────────────────
+    DATA_DIR: str = _default_data_dir()
+    MODELS_DIR: str = _default_models_dir()
+    # "sqlite" (desktop default) | "postgres" (contributor docker)
+    DATABASE_BACKEND: str = "sqlite"
+    # AI setup: "local" | "cloud" | "hybrid" | "none"
+    AI_SETUP_MODE: str = "none"
 
     # ── Kuzu (embedded graph database) ──────────────────────────────────────
     KUZU_DB_PATH: str = DEFAULT_KUZU_DB_PATH
 
-    # ── LLM Provider ──────────────────────────────────────────────────────────
-    # "local"  — any OpenAI-compatible server (LM Studio, Ollama, vLLM, etc.)
-    #            set LLM_BASE_URL, LLM_API_KEY, LLM_MODEL below
-    # "ollama" / "lm_studio" — legacy aliases (still work; prefer "local")
-    # "openai", "gemini", "anthropic", "huggingface" — cloud providers
+    # ── LLM Provider (local = in-process GGUF via llama-cpp-python)
     LLM_PROVIDER: str = "local"
-    LLM_FALLBACK_PROVIDER: str | None = None  # Optional fallback if primary fails
-
-    # ── Local / OpenAI-compatible server ─────────────────────────────────────
-    # Used when LLM_PROVIDER is "local", "ollama", or "lm_studio".
-    LLM_BASE_URL: str = (
-        "http://127.0.0.1:1234"  # LM Studio default; Ollama: http://127.0.0.1:11434
-    )
-    LLM_API_KEY: str = "lm-studio"  # Ollama: "ollama"
-    LLM_MODEL: str = "google/gemma-4-e4b"  # model name as shown in your server
-    LLM_KEEP_ALIVE: str = "10m"  # Keep model loaded after last request
-    # Response format for local JSON extraction ("text", "json_object", "auto").
-    # LM Studio no longer accepts "json_object" (returns 400) — use "text".
+    LLM_FALLBACK_PROVIDER: str | None = None
+    # Legacy OpenAI-compat URL fields — unused for in-process local; kept for cloud HTTP
+    LLM_BASE_URL: str = "http://127.0.0.1:8080"
+    LLM_API_KEY: str = "local"
+    LLM_MODEL: str = "local-chat"
+    LLM_KEEP_ALIVE: str = "10m"
     LLM_RESPONSE_FORMAT: str = "text"
-
-    # ── Universal model overrides (provider-agnostic) ─────────────────────────
-    # Set these instead of provider-specific keys (GEMINI_MODEL, LLM_MODEL, etc.).
-    # Works regardless of which provider is active.
-    #   CHAT_MODEL=gemini-2.5-pro       → used for chat/retrieval
-    #   INGESTION_MODEL=gemma-4-e4b     → used for extraction/entity reasoning
-    # If blank, falls back to the provider-specific key (GEMINI_MODEL, LLM_MODEL, etc.)
     CHAT_MODEL: str | None = None
     INGESTION_MODEL: str | None = None
+    INGESTION_PROVIDER: str | None = None
+    INGESTION_BASE_URL: str | None = None
+    INGESTION_API_KEY: str | None = None
+    INGESTION_LLM_MODEL: str | None = "local-chat"
+    INGESTION_GEMINI_MODEL: str | None = None
 
-    # ── Ingestion overrides (extraction / entity reasoning) ───────────────────
-    # Leave blank to share the main LLM settings above.
-    # Set any of these to route ingestion to a different provider or server.
-    INGESTION_PROVIDER: str | None = (
-        None  # e.g. "gemini", "local" — defaults to LLM_PROVIDER
-    )
-    INGESTION_BASE_URL: str | None = (
-        None  # defaults to LLM_BASE_URL (local providers only)
-    )
-    INGESTION_API_KEY: str | None = None  # defaults to LLM_API_KEY
-    # Provider-specific model fallbacks (used when INGESTION_MODEL is not set)
-    INGESTION_LLM_MODEL: str | None = "google/gemma-4-e4b"  # for local/ollama providers
-    INGESTION_GEMINI_MODEL: str | None = None  # for Gemini provider
-
-    # ── Embeddings ────────────────────────────────────────────────────────────
-    # "local" / "ollama" / "lm_studio" — any OpenAI-compatible /v1/embeddings server
-    # "auto" — follows LLM_PROVIDER
-    EMBEDDING_PROVIDER: str = "ollama"
-    EMBEDDING_BASE_URL: str = (
-        "http://localhost:11434"  # LM Studio: http://127.0.0.1:1234
-    )
-    EMBEDDING_API_KEY: str = "ollama"  # LM Studio: "lm-studio"
-    EMBEDDING_MODEL: str = (
-        "qwen3-embedding:0.6b"  # LM Studio: "text-embedding-qwen3-embedding-8b"
-    )
+    EMBEDDING_PROVIDER: str = "local"
+    EMBEDDING_BASE_URL: str = "http://127.0.0.1:8081"
+    EMBEDDING_API_KEY: str = "local"
+    EMBEDDING_MODEL: str = "local-embed"
     EMBEDDING_DIMENSIONS: int = 1024
 
-    # ── Retrieval / Pipeline Controls ────────────────────────────────────────
     VECTOR_SIMILARITY_THRESHOLD: float = 0.50
-    # When the reranker is enabled, vector hits above this score are passed to
-    # the reranker. Using the original natural-language question for embedding
-    # (not the reformulated sub-query) means 0.45 safely includes the target
-    # node while keeping the candidate pool small enough for fast reranking.
     VECTOR_PRE_RERANK_THRESHOLD: float = 0.45
     COMMUNITY_RECOMPUTE_BATCH_SIZE: int = 100
-    # ── Feature switches ──────────────────────────────────────────────────────
-    # Set to False to disable the automatic post-ingestion trigger only.
-    # The manual endpoint (Rebuild Communities button) always remains available.
     COMMUNITY_DETECTION_ENABLED: bool = False
-    # Set to False to disable the automatic post-ingestion trigger only.
-    # The manual endpoint (Build Temporal Digests button) always remains available.
     TEMPORAL_DIGESTS_ENABLED: bool = False
-    # Default time granularity for temporal digests: "month" | "week" | "year"
     TEMPORAL_DIGEST_PERIOD: str = "month"
     RERANKER_ENABLED: bool = True
-    RERANKER_TOP_K: int = 10  # Candidates passed to LLM after reranking
-    RERANKER_SCORE_THRESHOLD: float = (
-        0.05  # Drop candidates below this score after top_k slice
-    )
-    GRAPH_EXPAND_TOP_NEIGHBORS: int = (
-        10  # Keep top N neighbors per expansion pass after individual ranking
-    )
-    GRAPH_EXPAND_SCORE_THRESHOLD: float = (
-        0  # Drop expansion neighbors below this score after top-N slice
-    )
+    RERANKER_TOP_K: int = 10
+    RERANKER_SCORE_THRESHOLD: float = 0.05
+    GRAPH_EXPAND_TOP_NEIGHBORS: int = 10
+    GRAPH_EXPAND_SCORE_THRESHOLD: float = 0
     MAX_POTENTIAL_QUESTIONS: int = 10
-    MAX_LOOP_ITERATIONS: int = 10
-    # Recent turns included when resolving follow-up chat questions.
-    CHAT_HISTORY_MAX_MESSAGES: int = 12
-    # When True: strict benchmark prompting (exact fact extraction, terse output).
-    # When False: verbose, natural-language answers for general KB use.
+    # Desktop UX: 3 is enough for most personal-KB questions; HotPotQA-style
+    # multi-hop rarely benefits past ~3 before KB-miss exhaustion (see Results/).
+    MAX_LOOP_ITERATIONS: int = 3
+    CHAT_HISTORY_MAX_MESSAGES: int = 24
     BENCHMARK_MODE: bool = False
-    FALLBACK_MODE: str = "none"  # "none" | "web" | "self"
+    FALLBACK_MODE: str = "none"
     TAVILY_API_KEY: str | None = None
 
-    # ── Qdrant ───────────────────────────────────────────────────────────────
-    QDRANT_HOST: str = (
-        "qdrant"  # Docker service name; override to 127.0.0.1 for local dev
-    )
+    QDRANT_HOST: str = "127.0.0.1"
     QDRANT_PORT: int = 6333
     QDRANT_API_KEY: str | None = None
     QDRANT_COLLECTION_NODE_CORES: str = "node_cores"
     QDRANT_COLLECTION_NODE_RELATIONSHIPS: str = "node_relationships"
     QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS: str = "node_isolated_contexts"
 
-    # ── Typesense ─────────────────────────────────────────────────────────────
-    TYPESENSE_HOST: str = (
-        "typesense"  # Docker service name; override to 127.0.0.1 for local dev
-    )
-    TYPESENSE_PORT: int = 8108
+    TYPESENSE_HOST: str = "127.0.0.1"  # deprecated alias → MEILI_HOST
+    TYPESENSE_PORT: int = 7700  # deprecated; Meilisearch default port
     TYPESENSE_API_KEY: str = "liveos-dev-key"
     TYPESENSE_COLLECTION_NAME: str = "liveos_nodes"
 
-    # ── Vision / Audio Models ─────────────────────────────────────────────────
+    # Meilisearch (replaces Typesense — has native Windows binary)
+    MEILI_HOST: str = "127.0.0.1"
+    MEILI_PORT: int = 7700
+    MEILI_MASTER_KEY: str = "liveos-dev-key"
+    MEILI_INDEX_NAME: str = "liveos_nodes"
+
     MODEL_FLORENCE_HF: str = "microsoft/Florence-2-large"
     MODEL_FLORENCE_LOCAL: str = "florence-2-large"
     MODEL_WHISPER_HF: str = "openai/whisper-large-v3-turbo"
     MODEL_WHISPER_LOCAL: str = "whisper-large-v3-turbo"
-    MODEL_MARLIN_HF: str = "NemoStation/Marlin-2B"
+    MODEL_MARLIN_HF: str = "lunahr/Marlin-2B-ungated"
     MODEL_MARLIN_LOCAL: str = "marlin-2b"
-    LOCAL_MODELS_SERVICE_URL: str | None = "http://local-models:8091"
-    LOCAL_MODELS_SERVICE_TIMEOUT_SECONDS: float = 3600
-    MARLIN_SERVICE_URL: str | None = "http://marlin:8090"
-    MARLIN_SERVICE_TIMEOUT_SECONDS: float = 3600
-    # MODEL_RERANKER_LOCAL: str = "jina-reranker-v2-base-multilingual"
+    # Multimodal (Florence / Whisper / Marlin) — loaded in-process, not via HTTP.
+    # Optional until first multimedia ingest; Setup / supervisor can pip-install these.
+    FLORENCE_MAX_IMAGE_PIXELS: int = 1500000
     MODEL_RERANKER_LOCAL: str = "qwen3-reranker-0.6b"
 
-    # Model storage path (relative to backend root)
+    FIREFLY_BASE_URL: str | None = None
+    FIREFLY_RUNTIME_FILE: str | None = None
+    FIREFLY_API_TOKEN: str | None = None
+
     MODELS_PATH: str = "models"
     PDF_VISUAL_EXTRACTION_ENABLED: bool = True
-    # 0 means no cap; render every PDF page that needs visual extraction.
     PDF_VISUAL_EXTRACTION_MAX_PAGES: int = 0
     PDF_VISUAL_RENDER_DPI: int = 144
     PDF_VISUAL_TEXT_THRESHOLD: int = 80
 
-    # ── Cloud LLM Providers ───────────────────────────────────────────────────
-    # OpenAI
     OPENAI_API_KEY: str | None = None
-    OPENAI_MODEL: str | None = None  # e.g. "gpt-4o-2024-08-06"
-
-    # Google Gemini
+    OPENAI_MODEL: str | None = None
     GEMINI_API_KEY: str | None = None
-    GEMINI_MODEL: str | None = None  # e.g. "gemini-2.5-pro"
-
-    # Anthropic Claude
+    GEMINI_MODEL: str | None = None
     ANTHROPIC_API_KEY: str | None = None
-    ANTHROPIC_MODEL: str | None = None  # e.g. "claude-3-5-sonnet-20241022"
-
-    # HuggingFace Inference API
+    ANTHROPIC_MODEL: str | None = None
     HUGGINGFACE_API_KEY: str | None = None
-    HUGGINGFACE_MODEL: str | None = None  # e.g. "meta-llama/Llama-3.3-70B-Instruct"
+    HUGGINGFACE_MODEL: str | None = None
 
-    # ── Storage (R2 / RustFS) ─────────────────────────────────────────────────
     BUCKET_NAME: str = "liveos-assets"
     BUCKET_ACCESS_KEY_ID: str = "rustfsadmin"
     BUCKET_SECRET_ACCESS_KEY: str = "rustfsadmin"
-    R2_ENDPOINT_URL: str = (
-        "http://rustfs:9000"  # Docker service name; override to http://localhost:9000 for local dev
-    )
-    FILES_URL: str = "http://rustfs:9000/liveos-assets"
+    R2_ENDPOINT_URL: str = "http://127.0.0.1:9000"
+    FILES_URL: str = "/vault-files"
     BUCKET_TOKEN: str | None = None
+    STORAGE_BACKEND: str = "local"
 
-    # ── Database (Postgres) ───────────────────────────────────────────────────
-    # Defaults use the Docker service name. Override in .env for local dev.
-    DATABASE_TRANSACTION_POOLER_URL: str | None = (
-        "postgresql://user:password@postgres:5432/liveos"
-    )
-    DATABASE_SESSION_POOLER_URL: str | None = (
-        "postgresql://user:password@postgres:5432/liveos"
-    )
-    DATABASE_DIRECT_CONNECTION_URL: str | None = (
-        "postgresql://user:password@postgres:5432/liveos"
-    )
+    DATABASE_TRANSACTION_POOLER_URL: str | None = None
+    DATABASE_SESSION_POOLER_URL: str | None = None
+    DATABASE_DIRECT_CONNECTION_URL: str | None = None
 
-    # ── Logging ───────────────────────────────────────────────────────────────
-    LOG_LEVEL: str = "DEBUG"  # "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
-
-    # ── Ingestion Concurrency ─────────────────────────────────────────────────
-    # Legacy per-agent concurrency knob. Keep low for local CPU setups.
-    INGESTION_AGENT_CONCURRENCY: int = 2  # override to >1 for non-Gemini providers
-    # Full-note ingestion pipelines are FIFO by default on local CPU setups:
-    # multimedia -> LLM extraction -> graph writes -> indexing -> next note.
+    LOG_LEVEL: str = "DEBUG"
+    INGESTION_AGENT_CONCURRENCY: int = 2
     INGESTION_PIPELINE_CONCURRENCY: int = 1
-    # Heavy local model jobs should stay serialized on CPU/Docker Desktop.
     MULTIMEDIA_CONCURRENCY: int = 1
-
-    # ── Embedding Instructions ────────────────────────────────────────────────
-    # When True, uses LLM to generate query-specific embedding instructions for
-    # Qwen3 models. Adds ~0.1-0.2 s per query but may improve recall precision.
     USE_DYNAMIC_EMBEDDING_INSTRUCTION: bool = True
 
 
 settings = Settings()
+
+_data = Path(settings.DATA_DIR)
+settings.KUZU_DB_PATH = str(_data / "kuzu" / "kuzu_graph")
+settings.MODELS_PATH = settings.MODELS_DIR

@@ -3,16 +3,20 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { Home, MessageSquare, FileText, Box, Database, Settings } from "lucide-react";
+import { Home, MessageSquare, FileText, Box, Database, Settings, Wallet, Link2, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useKB } from "@/lib/kb-context";
+import { SystemStatusIndicator } from "@/components/system-status-indicator";
 
 const navigation = [
   { name: "Home", href: "/", icon: Home },
   { name: "Chat", href: "/chat", icon: MessageSquare },
   { name: "Notes", href: "/notes", icon: FileText },
+  { name: "Notes graph", href: "/notes-graph", icon: Link2 },
   { name: "Graph", href: "/graph-3d", icon: Box },
+  { name: "Finance", href: "/finance", icon: Wallet },
   { name: "Knowledge Bases", href: "/kb", icon: Database },
+  { name: "Setup", href: "/setup", icon: Sparkles },
   { name: "Settings", href: "/settings", icon: Settings },
 ];
 
@@ -27,8 +31,8 @@ export function Sidebar() {
         {/* Logo */}
         <div className="mb-8 flex h-12 w-12 items-center justify-center rounded-xl overflow-hidden">
           <Image
-            src="/logo-black-background.png"
-            alt="LiveOS"
+            src="/logo.png"
+            alt="LifeOS"
             width={48}
             height={48}
             loading="eager"
@@ -84,9 +88,7 @@ export function Sidebar() {
               {currentKBName.length > 6 ? currentKBName.slice(0, 5) + "…" : currentKBName}
             </span>
           </div>
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-green-500/10 text-green-500">
-            <div className="h-2 w-2 animate-pulse rounded-full bg-green-500" />
-          </div>
+          <SystemStatusIndicator />
         </div>
       </div>
     </aside>

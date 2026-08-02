@@ -34,8 +34,14 @@ class LLMService:
         self.async_chat_client = None
         self._lm_studio_model_cache: Optional[str] = None
 
-        # Determine Primary Provider
-        self.provider = settings.LLM_PROVIDER.lower()
+        # Determine Primary Provider — Ollama / LM Studio removed; map to local
+        raw = settings.LLM_PROVIDER.lower()
+        if raw in ("ollama", "lm_studio"):
+            logger.warning(
+                f"LLM_PROVIDER={raw} is deprecated; using in-process llama-cpp-python instead"
+            )
+            raw = "local"
+        self.provider = raw
         self.fallback_provider = settings.LLM_FALLBACK_PROVIDER
 
         logger.info(f"Primary LLM Provider: {self.provider.upper()}")
@@ -86,32 +92,19 @@ class LLMService:
 
     def init_clients(self):  # pylint: disable=too-many-statements
         """Initialize clients for the configured provider."""
-        if self.provider == "ollama":
-            base_url = f"{settings.LLM_BASE_URL.rstrip('/')}/v1"
-            logger.info(f"Initializing Ollama (URL: {base_url})")
-            _local_timeout = httpx.Timeout(
-                connect=30.0, read=3600.0, write=60.0, pool=60.0
-            )
-            self._make_local_openai_clients(
-                base_url=base_url,
-                api_key=settings.LLM_API_KEY,
-                timeout=_local_timeout,
-                instructor_mode=instructor.Mode.MD_JSON,
-            )
+        if self.provider in ("ollama", "lm_studio", "local"):
+            # In-process GGUF via llama-cpp-python (content-machine style; no HTTP server)
+            from app.services.local_models import local_llama_runtime
 
-        elif self.provider in ("lm_studio", "local"):
-            base_url = f"{settings.LLM_BASE_URL.rstrip('/')}/v1"
+            accel = local_llama_runtime.accel
             logger.info(
-                f"Initializing local OpenAI-compatible server (URL: {base_url}, Model: {settings.LLM_MODEL})"
+                f"Initializing in-process llama-cpp-python "
+                f"(backend={accel.get('backend')}, model={settings.LLM_MODEL})"
             )
-            _local_timeout = httpx.Timeout(
-                connect=30.0, read=3600.0, write=60.0, pool=60.0
-            )
-            self._make_local_openai_clients(
-                base_url=base_url,
-                api_key=settings.LLM_API_KEY,
-                timeout=_local_timeout,
-            )
+            sync, async_client, extraction = local_llama_runtime.make_chat_clients()
+            self.chat_client = sync
+            self.async_chat_client = async_client
+            self.extraction_client = extraction
 
         elif self.provider == "openai":
             if not settings.OPENAI_API_KEY:
@@ -281,16 +274,12 @@ class LLMService:
         ).strip() or settings.LLM_API_KEY
 
         # Determine whether ingestion truly differs from the main provider
-        same_local = (
-            self.ingestion_provider in ("local", "ollama", "lm_studio")
-            and self.provider in ("local", "ollama", "lm_studio")
-            and ingestion_base_url == settings.LLM_BASE_URL
-            and ingestion_api_key == settings.LLM_API_KEY
-        )
-        same_provider = self.ingestion_provider == self.provider and (
-            same_local
-            or self.ingestion_provider not in ("local", "ollama", "lm_studio")
-        )
+        same_local = self.ingestion_provider in (
+            "local",
+            "ollama",
+            "lm_studio",
+        ) and self.provider in ("local", "ollama", "lm_studio")
+        same_provider = self.ingestion_provider == self.provider or same_local
 
         if same_provider:
             # Alias main clients — no extra connections needed
@@ -309,33 +298,12 @@ class LLMService:
         )
 
         if self.ingestion_provider in ("local", "ollama", "lm_studio"):
-            base_url = f"{ingestion_base_url.rstrip('/')}/v1"
-            _timeout = httpx.Timeout(connect=30.0, read=3600.0, write=60.0, pool=60.0)
-            instructor_mode = (
-                instructor.Mode.MD_JSON if self.ingestion_provider == "ollama" else None
-            )
-            raw = OpenAI(
-                base_url=base_url,
-                api_key=ingestion_api_key,
-                timeout=_timeout,
-                max_retries=3,
-            )
-            patch_kwargs = (
-                {"mode": instructor_mode} if instructor_mode is not None else {}
-            )
-            self.i_extraction_client = instructor.patch(raw, **patch_kwargs)
-            self.i_chat_client = OpenAI(
-                base_url=base_url,
-                api_key=ingestion_api_key,
-                timeout=_timeout,
-                max_retries=3,
-            )
-            self.i_async_chat_client = AsyncOpenAI(
-                base_url=base_url,
-                api_key=ingestion_api_key,
-                timeout=_timeout,
-                max_retries=3,
-            )
+            from app.services.local_models import local_llama_runtime
+
+            sync, async_client, extraction = local_llama_runtime.make_chat_clients()
+            self.i_chat_client = sync
+            self.i_async_chat_client = async_client
+            self.i_extraction_client = extraction
             self.i_gemini_client = None
             self.i_anthropic_client = None
 
@@ -1345,7 +1313,7 @@ class LLMService:
                 response = await asyncio.to_thread(
                     self.chat_client.messages.create,
                     model=model or self.get_chat_model(),
-                    max_tokens=max_tokens if max_tokens is not None else 8192,
+                    max_tokens=max_tokens if max_tokens is not None else 10240,
                     temperature=temperature,
                     messages=[{"role": "user", "content": prompt}],
                 )
@@ -1360,9 +1328,8 @@ class LLMService:
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": temperature,
                 "extra_body": extra_body,
+                "max_tokens": max_tokens if max_tokens is not None else 10240,
             }
-            if max_tokens is not None:
-                _kwargs["max_tokens"] = max_tokens
             response = await asyncio.to_thread(
                 self.chat_client.chat.completions.create, **_kwargs
             )
@@ -1760,7 +1727,7 @@ class LLMService:
                 response = await asyncio.to_thread(
                     self.i_anthropic_client.messages.create,
                     model=settings.ANTHROPIC_MODEL,
-                    max_tokens=max_tokens if max_tokens is not None else 8192,
+                    max_tokens=max_tokens if max_tokens is not None else 10240,
                     temperature=temperature,
                     messages=[{"role": "user", "content": prompt}],
                 )
@@ -1772,9 +1739,8 @@ class LLMService:
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": temperature,
                 "extra_body": self._with_ingestion_keep_alive(),
+                "max_tokens": max_tokens if max_tokens is not None else 10240,
             }
-            if max_tokens is not None:
-                _kwargs["max_tokens"] = max_tokens
             response = await asyncio.to_thread(
                 self.i_chat_client.chat.completions.create, **_kwargs
             )

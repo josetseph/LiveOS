@@ -392,7 +392,15 @@ class RetrievalService:
 
             _scores = await reranker_service.rerank(question, _per_neighbor_texts)
             _score_map: dict[int, float] = (
-                {r["index"]: r["relevance_score"] for r in _scores} if _scores else {}
+                {
+                    r["index"]: float(
+                        r.get("relevance_score", r.get("score", 0.0)) or 0.0
+                    )
+                    for r in _scores
+                    if "index" in r
+                }
+                if _scores
+                else {}
             )
             for i, entry in enumerate(relationship_entries):
                 entry["_expand_score"] = _score_map.get(i, 0.0)
@@ -1486,11 +1494,16 @@ class RetrievalService:
             results = await reranker_service.rerank(rerank_query, texts)
             if results:
                 for r in results:
-                    model_scores[r["index"]] = r["relevance_score"]
-                logger.info(
-                    f"  [Reranker] {settings.MODEL_RERANKER_LOCAL} scored {len(model_scores)} "
-                    f"candidates (top score: {max(model_scores.values()):.4f})"
-                )
+                    if "index" not in r:
+                        continue
+                    model_scores[r["index"]] = float(
+                        r.get("relevance_score", r.get("score", 0.0)) or 0.0
+                    )
+                if model_scores:
+                    logger.info(
+                        f"  [Reranker] {settings.MODEL_RERANKER_LOCAL} scored {len(model_scores)} "
+                        f"candidates (top score: {max(model_scores.values()):.4f})"
+                    )
             else:
                 logger.warning(
                     "  [Reranker] Model returned no scores, skipping candidate scoring"

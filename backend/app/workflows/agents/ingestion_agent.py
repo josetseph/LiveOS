@@ -2,6 +2,7 @@
 
 # pylint: disable=import-outside-toplevel,protected-access
 import asyncio
+import re
 import uuid
 from datetime import datetime
 from typing import Any, List, Optional, TypedDict
@@ -19,6 +20,30 @@ logger = get_logger("IngestionPipeline")
 # Heavy local model multimedia extraction is serialized by default so Florence,
 # Whisper, and Marlin do not compete for the same CPU/RAM budget.
 multimedia_concurrency_limit = asyncio.Semaphore(settings.MULTIMEDIA_CONCURRENCY)
+
+# Blocks appended by multimodal_node — strip before re-processing so re-ingest
+# does not duplicate Florence/Whisper/Marlin output in the vault .md.
+_ENRICHMENT_BLOCK_RE = re.compile(
+    r"\n\n\[(?:"
+    r"PDF Extraction \([^\]]+\)|"
+    r"Image:[^\]]+|"
+    r"Audio Transcript \([^\]]+\)|"
+    r"Video Audio Transcript \([^\]]+\)|"
+    r"Video Visual Analysis \([^\]]+\)|"
+    r"Word Extraction \([^\]]+\)|"
+    r"Spreadsheet Extraction \([^\]]+\)"
+    r")\]"
+)
+
+
+def _strip_prior_multimedia_enrichment(content: str) -> str:
+    """Remove previously appended extraction/transcript blocks; keep user body + links."""
+    if not content:
+        return content or ""
+    match = _ENRICHMENT_BLOCK_RE.search(content)
+    if not match:
+        return content
+    return content[: match.start()].rstrip()
 
 
 # 1. Define Agent State
@@ -67,24 +92,55 @@ async def multimodal_node(
             f"Multimedia semaphore acquired. (Active: {settings.MULTIMEDIA_CONCURRENCY - multimedia_concurrency_limit._value if hasattr(multimedia_concurrency_limit, '_value') else '?'})"  # pylint: disable=line-too-long
         )
         original_content = state["input"].content or ""
-        content = original_content
-        content_changed = False  # Persist enriched text (transcripts, PDF, etc.)
+        # Re-ingest safety: drop prior extraction/transcript appendages so we
+        # re-run multimedia once and rewrite a single clean enrichment section.
+        content = _strip_prior_multimedia_enrichment(original_content)
+        content_changed = content.strip() != original_content.strip()
         media_errors: list[str] = []
 
-        # Unified file link parsing: [📎 Filename](URL) or [🎤 Voice Recording](URL)
+        # Unified file link parsing:
+        # - [📎 Filename](/vault-files/...) or /files/ /uploads/ / http(s)
+        # - [🎤 Voice Recording](...)
+        # - ![alt](...) image markdown from the notes UI
+        # URLs may contain unencoded spaces/commas (common for uploaded filenames);
+        # stop at ')' only — not at whitespace.
+        import os
         import re
+        from urllib.parse import unquote
 
-        attachments = [
-            {"emoji": emoji, "filename": filename, "url": url, "lower_url": url.lower()}
-            for emoji, filename, url in re.findall(
-                r"\[(📎|🎤)\s*(.*?)\]\((https?://[^)]+|/(?:files|uploads)/[^)]+)\)",
-                content,
+        _URL = r"(?:https?://[^)]+|/(?:files|uploads|vault-files)/[^)]+)"
+        _ATTACH_RE = re.compile(rf"\[(📎|🎤)\s*(.*?)\]\(({_URL})\)")
+        _IMAGE_MD_RE = re.compile(rf"!\[([^\]]*)\]\(({_URL})\)")
+
+        attachments: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+
+        def _add_attachment(emoji: str, filename: str, url: str) -> None:
+            cleaned_url = (url or "").strip()
+            key = unquote(cleaned_url.split("?", 1)[0]).lower()
+            if not key or key in seen_urls:
+                return
+            seen_urls.add(key)
+            display_name = (filename or "").strip() or os.path.basename(
+                unquote(cleaned_url.split("?", 1)[0])
             )
-        ]
+            attachments.append(
+                {
+                    "emoji": emoji,
+                    "filename": display_name,
+                    "url": cleaned_url,
+                    "lower_url": key,
+                }
+            )
+
+        for emoji, filename, url in _ATTACH_RE.findall(content):
+            _add_attachment(emoji, filename, url)
+        for alt, url in _IMAGE_MD_RE.findall(content):
+            _add_attachment("📎", alt, url)
 
         video_exts = (".mp4", ".mov", ".webm", ".mkv", ".avi")
-        audio_exts = (".m4a", ".mp3", ".wav", ".ogg")
-        image_exts = (".jpg", ".jpeg", ".png", ".webp")
+        audio_exts = (".m4a", ".mp3", ".wav", ".ogg", ".aac")
+        image_exts = (".jpg", ".jpeg", ".png", ".webp", ".gif")
         spreadsheet_exts = (".xlsx", ".xls", ".csv", ".tsv")
 
         def _append(section: str) -> None:
@@ -231,12 +287,16 @@ async def multimodal_node(
         audio_files = [
             item
             for item in attachments
-            if item["lower_url"].endswith(audio_exts) or item["emoji"] == "🎤"
+            if (
+                item["lower_url"].endswith(audio_exts) or item["emoji"] == "🎤"
+            )
+            and not item["lower_url"].endswith(video_exts)
         ]
+        # Classify by extension — do not require emoji 📎 (same marker as images).
         videos = [
             item
             for item in attachments
-            if item["emoji"] == "📎" and item["lower_url"].endswith(video_exts)
+            if item["lower_url"].endswith(video_exts)
         ]
 
         # Phase 1: finish all Florence-backed work, then release Florence.
@@ -271,7 +331,7 @@ async def multimodal_node(
             if id(item) not in supported_ids:
                 logger.info(f"Skipped (Unsupported Type): {item['url']}")
 
-        # Sync enriched content back to Postgres so notes show transcripts/extractions.
+        # Sync enriched content back to the vault .md (source of truth).
         if media_errors:
             raise RuntimeError(
                 "Multimedia processing failed for: " + "; ".join(media_errors)
@@ -280,7 +340,7 @@ async def multimodal_node(
         if content_changed and content.strip() != original_content.strip():
             if state.get("note_id"):
                 logger.info(
-                    f"Syncing processed multimedia content to Postgres for Note {state['note_id']}..."
+                    f"Syncing processed multimedia content to vault for Note {state['note_id']}..."
                 )
                 await _set_status("Saving extracted attachment text")
                 await _wf._update_note_content_postgres(state["note_id"], content)
@@ -679,11 +739,22 @@ async def summarization_node(state: IngestionState):
 
     t_start = time.perf_counter()
     logger.info("[Agent] Updating Node Context Indexes (Delta Updates)...")
-    await _wf._update_neighborhoods(
-        state["extraction"].nodes,
-        state["content"],
-        note_created_at=state.get("created_at"),
-    )
+    try:
+        await _wf._update_neighborhoods(
+            state["extraction"].nodes,
+            state["content"],
+            note_created_at=state.get("created_at"),
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error(f"[Agent] Context indexing failed: {e}", exc_info=True)
+        logs.append(
+            f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: Context indexing failed: {e}"
+        )
+        return {
+            "logs": logs,
+            "errors": [f"Context indexing failed: {e}"],
+            "status": "FAILED",
+        }
     t_end = time.perf_counter()
     logger.info(f"  [Perf] Context indexing took: {t_end - t_start:.4f}s")
 

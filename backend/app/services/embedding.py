@@ -28,56 +28,69 @@ class EmbeddingService:
         configured = settings.EMBEDDING_PROVIDER.lower().strip()
         _local_providers = ("local", "ollama", "lm_studio")
         if configured == "auto":
-            # Follow main LLM provider; any local variant maps to lm_studio behavior
             llm_p = settings.LLM_PROVIDER.lower()
             self.embedding_provider = (
-                "lm_studio" if llm_p in _local_providers else "ollama"
+                "local" if llm_p in _local_providers else "lm_studio"
             )
+        elif configured in _local_providers:
+            # ollama/lm_studio aliases → in-process local GGUF
+            self.embedding_provider = "local"
         else:
-            # "local" is a clean alias for lm_studio-style OpenAI-compatible endpoint
-            self.embedding_provider = (
-                "lm_studio" if configured == "local" else configured
-            )
+            self.embedding_provider = configured
 
-        if self.embedding_provider not in ("ollama", "lm_studio"):
+        if self.embedding_provider not in ("local", "ollama", "lm_studio"):
             raise ValueError(
                 f"Unsupported EMBEDDING_PROVIDER: '{settings.EMBEDDING_PROVIDER}'. "
                 "Supported: 'local', 'ollama', 'lm_studio', 'auto'."
             )
 
-        # For LM Studio/local, attempt to auto-resolve the exact loaded model ID.
-        # For Ollama, use the configured model name directly.
+        self.embedding_model = settings.EMBEDDING_MODEL
+        self.query_instruction = (
+            "Instruct: Given a question, retrieve relevant context.\nQuery: "
+        )
+        self._configure_embeddings()
+        model_name_lower = os.path.basename(self.embedding_model).lower()
+        self.is_qwen3 = "qwen3" in model_name_lower
+
+    def _configure_embeddings(self) -> None:
+        """Bind embed backend (in-process local or OpenAI-compat HTTP)."""
+        if self.embedding_provider == "local":
+            from app.services.local_models import LocalLlamaEmbeddings, local_llama_runtime
+
+            self.embeddings = LocalLlamaEmbeddings(local_llama_runtime)
+            logger.info(
+                f"[Embedding] Provider: local (llama-cpp-python in-process) | "
+                f"Model: {self.embedding_model}"
+            )
+            return
+
         if self.embedding_provider == "lm_studio":
             self.embedding_model = self._resolve_lm_studio_embedding_model(
                 settings.EMBEDDING_MODEL
             )
-        else:
-            self.embedding_model = settings.EMBEDDING_MODEL
 
-        # Both providers speak the OpenAI /v1/embeddings protocol.
         base_url = f"{settings.EMBEDDING_BASE_URL.rstrip('/')}/v1"
         self.embeddings = OpenAIEmbeddings(
             model=self.embedding_model,
             base_url=base_url,
             api_key=settings.EMBEDDING_API_KEY,
-            # Disables HuggingFace tokenizer pre-processing so raw text is sent
-            # directly to the server (required for LM Studio; harmless for Ollama).
             check_embedding_ctx_length=False,
         )
-
         logger.info(
             f"[Embedding] Provider: {self.embedding_provider} | "
             f"URL: {base_url} | Model: {self.embedding_model}"
         )
 
-        # Qwen3-Embedding instruction prefix for QUERIES (not documents).
-        # Critical for Qwen3 series — omitting it degrades recall significantly.
-        # Exact prefix specified in plan: "Instruct: Given a question, retrieve relevant context.\nQuery: "
-        self.query_instruction = (
-            "Instruct: Given a question, retrieve relevant context.\nQuery: "
-        )
-
-        # Detect Qwen3 by leaf model name so MODELS_PATH depth doesn't matter.
+    def reconfigure(self) -> None:
+        """Re-bind after local models are loaded or settings change."""
+        configured = settings.EMBEDDING_PROVIDER.lower().strip()
+        if configured in ("local", "ollama", "lm_studio") or (
+            configured == "auto"
+            and settings.LLM_PROVIDER.lower() in ("local", "ollama", "lm_studio")
+        ):
+            self.embedding_provider = "local"
+            self.embedding_model = settings.EMBEDDING_MODEL
+        self._configure_embeddings()
         model_name_lower = os.path.basename(self.embedding_model).lower()
         self.is_qwen3 = "qwen3" in model_name_lower
 

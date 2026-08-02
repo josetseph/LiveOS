@@ -5,8 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 from app.core.database import Base
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, JSON
 from sqlalchemy.orm import relationship
 
 
@@ -49,7 +48,7 @@ class ChatMessage(Base):  # pylint: disable=too-few-public-methods
     role = Column(String, nullable=False)  # "user" | "assistant"
     content = Column(Text, nullable=False)
     thinking = Column(Text, nullable=True)
-    metadata_json = Column("metadata", JSONB, nullable=True)
+    metadata_json = Column("metadata", JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     conversation = relationship("ChatConversation", back_populates="messages")

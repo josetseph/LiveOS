@@ -1,0 +1,124 @@
+{
+  "name": "lifeos",
+  "productName": "LifeOS",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LifeOS desktop — supervisor for vault notes, search engines, and API",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "prefetch-binaries": "node scripts/prefetch-binaries.js",
+    "prefetch-firefly": "node scripts/prefetch-firefly.js",
+    "build-frontend": "node scripts/build-frontend.js",
+    "bundle-python": "node scripts/bundle-python.js",
+    "bundle-node": "node scripts/bundle-node.js",
+    "prepare-dist": "node scripts/prepare-dist.js",
+    "predist": "node scripts/check-resources.js",
+    "predist:mac": "node scripts/check-resources.js",
+    "predist:win": "node scripts/check-resources.js",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.liveos.app",
+    "productName": "LifeOS",
+    "executableName": "LifeOS",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "supervisor.js",
+      "paths.js",
+      "ports.js",
+      "download-binaries.js",
+      "firefly-runtime.js",
+      "preload.js",
+      "splash.html",
+      "wizard.html",
+      "assets/**/*",
+      "binaries/**/*",
+      "build/icon.png",
+      "scripts/notarize.js",
+      "build/entitlements.mac.plist"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/backend",
+        "to": "backend",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "resources/frontend",
+        "to": "frontend",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "resources/node",
+        "to": "node",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "resources/firefly",
+        "to": "firefly",
+        "filter": ["**/*"]
+      }
+    ],
+    "asar": true,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "josetseph",
+        "repo": "LiveOS"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "afterSign": "scripts/notarize.js",
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^2.5.0",
+    "electron": "^37.10.3",
+    "electron-builder": "^26.0.12"
+  }
+}

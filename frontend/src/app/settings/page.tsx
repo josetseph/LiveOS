@@ -1,21 +1,49 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Settings, Check, Loader2, AlertCircle, ChevronDown, RefreshCw, Calendar, Trash2, RotateCcw } from "lucide-react";
+import Link from "next/link";
+import {
+    Settings,
+    Check,
+    Loader2,
+    AlertCircle,
+    ChevronDown,
+    RefreshCw,
+    Calendar,
+    Trash2,
+    RotateCcw,
+    BookOpen,
+    Database,
+} from "lucide-react";
 import { motion } from "framer-motion";
 import { api } from "@/lib/api";
 import { ShaderBackground } from "@/components/shader-background";
+import { useKB } from "@/lib/kb-context";
+import type { SetupStatus } from "@/lib/types";
 
-const LOCAL_PROVIDERS = new Set(["local", "lm_studio", "ollama"]);
+const LOCAL_PROVIDERS = new Set(["local", "ollama", "lm_studio"]);
 
 const PROVIDERS = [
-    { value: "local", label: "Local / LM Studio" },
-    { value: "ollama", label: "Ollama" },
-    { value: "gemini", label: "Google Gemini" },
-    { value: "openai", label: "OpenAI" },
-    { value: "anthropic", label: "Anthropic" },
-    { value: "huggingface", label: "HuggingFace" },
+    { value: "local", label: "Local (on this device)" },
+    { value: "openai", label: "OpenAI (cloud)" },
+    { value: "gemini", label: "Google Gemini (cloud)" },
+    { value: "anthropic", label: "Anthropic (cloud)" },
 ];
+
+const CLOUD_MODEL_HINTS: Record<string, { chat: string; examples: string }> = {
+    openai: {
+        chat: "OpenAI model id for Chat.",
+        examples: "e.g. gpt-4.1, gpt-4o-mini",
+    },
+    gemini: {
+        chat: "Gemini model id for Chat.",
+        examples: "e.g. gemini-2.5-pro, gemini-2.5-flash",
+    },
+    anthropic: {
+        chat: "Anthropic model id for Chat.",
+        examples: "e.g. claude-sonnet-4-5, claude-haiku-4-5",
+    },
+};
 
 interface LLMSettings {
     provider: string;
@@ -25,6 +53,7 @@ interface LLMSettings {
 }
 
 export default function SettingsPage() {
+    const { currentKB, currentKBName } = useKB();
     const [settings, setSettings] = useState<LLMSettings | null>(null);
     const [form, setForm] = useState({ provider: "", model: "", ingestion_model: "", base_url: "" });
     const [loading, setLoading] = useState(true);
@@ -43,6 +72,14 @@ export default function SettingsPage() {
     const [reingestCount, setReingestCount] = useState<number | null>(null);
     const confirmResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+    const [paths, setPaths] = useState<SetupStatus | null>(null);
+    const [emptyStatus, setEmptyStatus] = useState<"idle" | "confirming" | "running" | "done" | "error">("idle");
+    const [financeClearStatus, setFinanceClearStatus] = useState<
+        "idle" | "confirming" | "running" | "done" | "error"
+    >("idle");
+    const confirmEmptyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const confirmFinanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
     useEffect(() => {
         api
             .getLLMSettings()
@@ -52,12 +89,18 @@ export default function SettingsPage() {
             })
             .catch(() => setError("Could not load settings. Is the backend running?"))
             .finally(() => setLoading(false));
+        api
+            .getSetupStatus()
+            .then(setPaths)
+            .catch(() => {
+                /* optional for guide */
+            });
     }, []);
 
     useEffect(() => {
         const poll = async () => {
             try {
-                const status = await api.getMaintenanceStatus();
+                const status = await api.getMaintenanceStatus(currentKB);
                 if (status.community_detection.running) {
                     setCommunityStatus("running");
                 } else {
@@ -91,7 +134,7 @@ export default function SettingsPage() {
         poll();
         const interval = setInterval(poll, 3000);
         return () => clearInterval(interval);
-    }, []);
+    }, [currentKB]);
 
     const isLocal = LOCAL_PROVIDERS.has(form.provider);
 
@@ -99,7 +142,7 @@ export default function SettingsPage() {
         communityTriggeredRef.current = true;
         setCommunityStatus("running");
         try {
-            await api.rebuildCommunities();
+            await api.rebuildCommunities(currentKB);
         } catch {
             communityTriggeredRef.current = false;
             setCommunityStatus("error");
@@ -111,7 +154,7 @@ export default function SettingsPage() {
         digestTriggeredRef.current = true;
         setDigestStatus("running");
         try {
-            await api.buildTemporalDigests();
+            await api.buildTemporalDigests(undefined, currentKB);
         } catch {
             digestTriggeredRef.current = false;
             setDigestStatus("error");
@@ -132,7 +175,7 @@ export default function SettingsPage() {
             if (confirmResetTimer.current) clearTimeout(confirmResetTimer.current);
             setResetStatus("running");
             try {
-                await api.resetIngestionData();
+                await api.resetIngestionData(currentKB);
                 setResetStatus("done");
                 setTimeout(() => setResetStatus("idle"), 4000);
             } catch {
@@ -142,11 +185,53 @@ export default function SettingsPage() {
         }
     }
 
+    async function handleEmptyKB() {
+        if (emptyStatus === "idle") {
+            setEmptyStatus("confirming");
+            if (confirmEmptyTimer.current) clearTimeout(confirmEmptyTimer.current);
+            confirmEmptyTimer.current = setTimeout(() => setEmptyStatus("idle"), 6000);
+            return;
+        }
+        if (emptyStatus === "confirming") {
+            if (confirmEmptyTimer.current) clearTimeout(confirmEmptyTimer.current);
+            setEmptyStatus("running");
+            try {
+                await api.emptyKB(currentKB);
+                setEmptyStatus("done");
+                setTimeout(() => setEmptyStatus("idle"), 4000);
+            } catch {
+                setEmptyStatus("error");
+                setTimeout(() => setEmptyStatus("idle"), 4000);
+            }
+        }
+    }
+
+    async function handleClearFinance() {
+        if (financeClearStatus === "idle") {
+            setFinanceClearStatus("confirming");
+            if (confirmFinanceTimer.current) clearTimeout(confirmFinanceTimer.current);
+            confirmFinanceTimer.current = setTimeout(() => setFinanceClearStatus("idle"), 6000);
+            return;
+        }
+        if (financeClearStatus === "confirming") {
+            if (confirmFinanceTimer.current) clearTimeout(confirmFinanceTimer.current);
+            setFinanceClearStatus("running");
+            try {
+                await api.resetFinanceAdministration(currentKB);
+                setFinanceClearStatus("done");
+                setTimeout(() => setFinanceClearStatus("idle"), 4000);
+            } catch {
+                setFinanceClearStatus("error");
+                setTimeout(() => setFinanceClearStatus("idle"), 4000);
+            }
+        }
+    }
+
     async function handleReingestAll() {
         setReingestStatus("running");
         setReingestCount(null);
         try {
-            const result = await api.reingestAll();
+            const result = await api.reingestAll(currentKB);
             setReingestCount(result.notes_queued);
             setReingestStatus("done");
             setTimeout(() => setReingestStatus("idle"), 5000);
@@ -164,9 +249,13 @@ export default function SettingsPage() {
         try {
             const patch: Partial<typeof form> = {};
             if (form.provider !== settings.provider) patch.provider = form.provider;
-            if (form.model !== settings.model) patch.model = form.model;
-            if (form.ingestion_model !== settings.ingestion_model) patch.ingestion_model = form.ingestion_model;
-            if (isLocal && form.base_url !== settings.base_url) patch.base_url = form.base_url;
+            // Model name fields only apply to cloud providers.
+            if (!isLocal) {
+                if (form.model !== settings.model) patch.model = form.model;
+                if (form.ingestion_model !== settings.ingestion_model) {
+                    patch.ingestion_model = form.ingestion_model;
+                }
+            }
 
             if (Object.keys(patch).length === 0) {
                 setSaved(true);
@@ -206,8 +295,14 @@ export default function SettingsPage() {
                         </h1>
                     </div>
                     <p className="text-white/50 text-sm">
-                        Configure the LLM provider and models. Changes take effect immediately — no restart needed.
+                        Choose where Chat and note ingestion get their AI from. Changes apply immediately.
                     </p>
+                    <a
+                        href="/setup"
+                        className="mt-3 inline-flex text-sm text-amber-300/90 underline-offset-2 hover:underline"
+                    >
+                        Open Setup (paths + local GGUF download) →
+                    </a>
                 </motion.div>
 
                 {loading ? (
@@ -224,7 +319,13 @@ export default function SettingsPage() {
                     >
                         {/* Provider */}
                         <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 space-y-4">
-                            <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wide">Provider</h2>
+                            <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wide">
+                                AI provider
+                            </h2>
+                            <p className="text-xs text-white/40">
+                                Who answers Chat and powers note ingestion. Local keeps everything on this
+                                machine; cloud sends prompts to an API.
+                            </p>
                             <div className="relative">
                                 <select
                                     value={form.provider}
@@ -240,59 +341,95 @@ export default function SettingsPage() {
                                 <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/40" />
                             </div>
 
-                            {isLocal && (
-                                <div className="space-y-1.5">
-                                    <label className="text-xs text-white/40">Server URL</label>
-                                    <input
-                                        type="text"
-                                        value={form.base_url}
-                                        onChange={(e) => setForm((f) => ({ ...f, base_url: e.target.value }))}
-                                        placeholder="http://127.0.0.1:1234"
-                                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 font-mono text-sm text-white placeholder-white/25 outline-none transition focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
-                                    />
-                                    <p className="text-xs text-white/30">LM Studio: http://127.0.0.1:1234 · Ollama: http://127.0.0.1:11434</p>
+                            {isLocal ? (
+                                <div className="space-y-2 rounded-xl border border-teal-500/20 bg-teal-500/5 px-4 py-3 text-xs text-teal-100/80">
+                                    <p>
+                                        <span className="font-medium text-teal-100">Local mode:</span> LifeOS
+                                        loads your downloaded GGUF in-process (no Ollama / LM Studio / server
+                                        URL). Embed + rerank models for search are chosen automatically.
+                                    </p>
+                                    <p>
+                                        Pick which chat GGUF to use and download it in{" "}
+                                        <a href="/setup" className="underline underline-offset-2 text-amber-200/90">
+                                            Setup → Local models
+                                        </a>
+                                        . Models sit on disk until Chat or ingest needs them, then unload after
+                                        idle.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="space-y-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs text-amber-100/80">
+                                    <p>
+                                        <span className="font-medium text-amber-100">Cloud mode:</span> Chat and
+                                        ingestion call {PROVIDERS.find((p) => p.value === form.provider)?.label || "the provider"} over the internet.
+                                    </p>
+                                    <p>
+                                        Put the API key in <code className="font-mono text-amber-50/90">backend/.env</code>{" "}
+                                        (<code className="font-mono">OPENAI_API_KEY</code>,{" "}
+                                        <code className="font-mono">GOOGLE_API_KEY</code>, or{" "}
+                                        <code className="font-mono">ANTHROPIC_API_KEY</code>) — keys are not edited
+                                        here. Then set the model names below to match that provider&apos;s catalog.
+                                    </p>
                                 </div>
                             )}
+                        </div>
 
-                            {!isLocal && (
-                                <p className="text-xs text-amber-300/60 bg-amber-500/5 border border-amber-500/15 rounded-xl px-4 py-3">
-                                    API keys for cloud providers are set in <code className="font-mono">backend/.env</code> and cannot be changed here.
+                        {/* Models — cloud only; local GGUF is chosen in Setup */}
+                        {!isLocal && (
+                            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 space-y-4">
+                                <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wide">
+                                    Cloud models
+                                </h2>
+                                <p className="text-xs text-white/40">
+                                    Exact model ids from your provider. Wrong ids usually show up as API errors
+                                    in Chat.
                                 </p>
-                            )}
-                        </div>
 
-                        {/* Models */}
-                        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 space-y-4">
-                            <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wide">Models</h2>
+                                <div className="space-y-1.5">
+                                    <label className="text-xs text-white/40">Chat model</label>
+                                    <input
+                                        type="text"
+                                        value={form.model}
+                                        onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
+                                        placeholder={
+                                            CLOUD_MODEL_HINTS[form.provider]?.examples || "e.g. gemini-2.5-pro"
+                                        }
+                                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white placeholder-white/25 outline-none transition focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
+                                    />
+                                    <p className="text-xs text-white/30">
+                                        {CLOUD_MODEL_HINTS[form.provider]?.chat ||
+                                            "Used for all chat queries."}
+                                    </p>
+                                </div>
 
-                            <div className="space-y-1.5">
-                                <label className="text-xs text-white/40">Chat model</label>
-                                <input
-                                    type="text"
-                                    value={form.model}
-                                    onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
-                                    placeholder={isLocal ? "e.g. google/gemma-4-e4b" : "e.g. gemini-2.5-pro"}
-                                    className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white placeholder-white/25 outline-none transition focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
-                                />
-                                <p className="text-xs text-white/30">Used for all chat queries.</p>
+                                <div className="space-y-1.5">
+                                    <label className="text-xs text-white/40">Ingestion model</label>
+                                    <input
+                                        type="text"
+                                        value={form.ingestion_model}
+                                        onChange={(e) =>
+                                            setForm((f) => ({ ...f, ingestion_model: e.target.value }))
+                                        }
+                                        placeholder={
+                                            CLOUD_MODEL_HINTS[form.provider]?.examples ||
+                                            "Same as chat, or leave blank"
+                                        }
+                                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white placeholder-white/25 outline-none transition focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
+                                    />
+                                    <p className="text-xs text-white/30">
+                                        Used when notes are ingested (extraction, entities). Leave blank to reuse
+                                        the chat model — a cheaper/faster model here can save cost.
+                                    </p>
+                                </div>
                             </div>
-
-                            <div className="space-y-1.5">
-                                <label className="text-xs text-white/40">Ingestion model</label>
-                                <input
-                                    type="text"
-                                    value={form.ingestion_model}
-                                    onChange={(e) => setForm((f) => ({ ...f, ingestion_model: e.target.value }))}
-                                    placeholder={isLocal ? "e.g. google/gemma-4-e4b" : "e.g. gemini-2.5-pro"}
-                                    className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white placeholder-white/25 outline-none transition focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
-                                />
-                                <p className="text-xs text-white/30">Used during note ingestion (extraction, entity reasoning). Leave blank to use the chat model.</p>
-                            </div>
-                        </div>
+                        )}
 
                         {/* Maintenance */}
                         <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 space-y-4">
                             <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wide">Maintenance</h2>
+                            <p className="text-xs text-white/40">
+                                Active knowledge base: <span className="text-white/70">{currentKBName}</span>
+                            </p>
                             <div className="flex flex-col gap-2">
                                 <button
                                     onClick={handleRebuildCommunities}
@@ -360,6 +497,21 @@ export default function SettingsPage() {
                                                 ? "Failed — check logs"
                                                 : "Re-ingest All Notes"}
                                 </button>
+                            </div>
+                            <p className="text-xs text-white/30">Jobs run in the background — monitor progress via server logs.</p>
+                        </div>
+
+                        {/* Data cleanup */}
+                        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 space-y-4">
+                            <div className="flex items-center gap-2">
+                                <Database className="h-4 w-4 text-white/50" />
+                                <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wide">Data</h2>
+                            </div>
+                            <p className="text-xs text-white/40">
+                                Destructive actions for <span className="text-white/70">{currentKBName}</span>.
+                                Prefer the lightest wipe that solves your problem.
+                            </p>
+                            <div className="flex flex-col gap-2">
                                 <button
                                     onClick={handleResetIngestion}
                                     disabled={resetStatus === "running"}
@@ -378,7 +530,7 @@ export default function SettingsPage() {
                                         <Trash2 className="h-4 w-4 shrink-0" />
                                     )}
                                     {resetStatus === "confirming"
-                                        ? "Confirm? Click again to wipe all data"
+                                        ? "Confirm? Clear entities & indexes (keep vault files)"
                                         : resetStatus === "running"
                                             ? "Resetting…"
                                             : resetStatus === "done"
@@ -387,8 +539,142 @@ export default function SettingsPage() {
                                                     ? "Failed — check logs"
                                                     : "Reset Ingestion Data"}
                                 </button>
+                                <p className="px-1 text-[11px] text-white/30">
+                                    Clears entities, relationships, and search indexes for this KB.
+                                    Vault markdown files stay; notes are marked unprocessed.
+                                </p>
+
+                                <button
+                                    onClick={handleEmptyKB}
+                                    disabled={emptyStatus === "running"}
+                                    className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm transition disabled:opacity-50 ${emptyStatus === "confirming"
+                                            ? "border-red-500/50 bg-red-500/10 text-red-300 hover:bg-red-500/20"
+                                            : "border-white/10 bg-white/5 text-white/70 hover:border-red-500/30 hover:bg-red-500/5 hover:text-red-300"
+                                        }`}
+                                >
+                                    {emptyStatus === "running" ? (
+                                        <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                                    ) : emptyStatus === "done" ? (
+                                        <Check className="h-4 w-4 shrink-0 text-green-400" />
+                                    ) : emptyStatus === "error" ? (
+                                        <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
+                                    ) : (
+                                        <Trash2 className="h-4 w-4 shrink-0" />
+                                    )}
+                                    {emptyStatus === "confirming"
+                                        ? "Confirm? Empty entire KB (notes + vault + finance)"
+                                        : emptyStatus === "running"
+                                            ? "Emptying…"
+                                            : emptyStatus === "done"
+                                                ? "Done!"
+                                                : emptyStatus === "error"
+                                                    ? "Failed — check logs"
+                                                    : "Empty this knowledge base"}
+                                </button>
+                                <p className="px-1 text-[11px] text-white/30">
+                                    Always deletes notes, vault files, indexes, and Firefly admin.
+                                    The KB itself remains.
+                                </p>
+
+                                <button
+                                    onClick={handleClearFinance}
+                                    disabled={financeClearStatus === "running"}
+                                    className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm transition disabled:opacity-50 ${financeClearStatus === "confirming"
+                                            ? "border-red-500/50 bg-red-500/10 text-red-300 hover:bg-red-500/20"
+                                            : "border-white/10 bg-white/5 text-white/70 hover:border-red-500/30 hover:bg-red-500/5 hover:text-red-300"
+                                        }`}
+                                >
+                                    {financeClearStatus === "running" ? (
+                                        <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                                    ) : financeClearStatus === "done" ? (
+                                        <Check className="h-4 w-4 shrink-0 text-green-400" />
+                                    ) : financeClearStatus === "error" ? (
+                                        <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
+                                    ) : (
+                                        <Trash2 className="h-4 w-4 shrink-0" />
+                                    )}
+                                    {financeClearStatus === "confirming"
+                                        ? "Confirm? Destroy Firefly admin for this KB"
+                                        : financeClearStatus === "running"
+                                            ? "Clearing…"
+                                            : financeClearStatus === "done"
+                                                ? "Done!"
+                                                : financeClearStatus === "error"
+                                                    ? "Failed — check logs"
+                                                    : "Clear finance data"}
+                                </button>
                             </div>
-                            <p className="text-xs text-white/30">Jobs run in the background — monitor progress via server logs.</p>
+                            <div className="flex flex-wrap gap-3 pt-1 text-xs">
+                                <Link href="/notes" className="text-purple-300/90 hover:text-purple-200 underline-offset-2 hover:underline">
+                                    Notes — batch select &amp; delete
+                                </Link>
+                                <Link href="/kb" className="text-purple-300/90 hover:text-purple-200 underline-offset-2 hover:underline">
+                                    Knowledge bases — empty / delete
+                                </Link>
+                                <Link href="/finance" className="text-purple-300/90 hover:text-purple-200 underline-offset-2 hover:underline">
+                                    Finance
+                                </Link>
+                            </div>
+                        </div>
+
+                        {/* Data guide */}
+                        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 space-y-4">
+                            <div className="flex items-center gap-2">
+                                <BookOpen className="h-4 w-4 text-white/50" />
+                                <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wide">
+                                    Data guide
+                                </h2>
+                            </div>
+                            <div className="space-y-3 text-xs text-white/45 leading-relaxed">
+                                <p>
+                                    <span className="text-white/70 font-medium">Reset Ingestion Data</span> —
+                                    graph + vectors + keyword index gone; <code className="text-white/55">.md</code> files stay.
+                                </p>
+                                <p>
+                                    <span className="text-white/70 font-medium">Empty / Delete KB</span> —
+                                    always removes notes, vault files, indexes, and Firefly admin for that KB.
+                                    Delete also unregisters the KB (not allowed for default — use Empty instead).
+                                </p>
+                                <p>
+                                    <span className="text-white/70 font-medium">Where data lives</span> —
+                                    your chosen data directory holds SQLite, Qdrant, Meilisearch, Kuzu, Firefly, binaries, and logs.
+                                </p>
+                                {paths?.data_dir && (
+                                    <p className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 font-mono text-[11px] text-teal-200/80 break-all">
+                                        data_dir: {paths.data_dir}
+                                    </p>
+                                )}
+                                <p>
+                                    <span className="text-white/70 font-medium">Where models live</span> —
+                                    GGUF chat/embed/rerank plus Florence / Whisper / Marlin snapshots.
+                                </p>
+                                {paths?.models_dir && (
+                                    <p className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 font-mono text-[11px] text-teal-200/80 break-all">
+                                        models_dir: {paths.models_dir}
+                                    </p>
+                                )}
+                                <p>
+                                    <span className="text-white/70 font-medium">How to delete models</span> —
+                                    quit LifeOS, delete files inside <code className="text-white/55">models_dir</code>{" "}
+                                    (or the whole folder), relaunch, then use Setup to re-download what you need.
+                                    Do not delete models while the app is running — they may be memory-mapped.
+                                </p>
+                                <p>
+                                    <span className="text-white/70 font-medium">Wipe all app data</span> —
+                                    quit LifeOS, delete the entire <code className="text-white/55">data_dir</code>, relaunch
+                                    (wizard if needed). The app binary stays. Models are untouched unless you also clear{" "}
+                                    <code className="text-white/55">models_dir</code>.
+                                </p>
+                                <p>
+                                    <span className="text-white/70 font-medium">paths.json</span> —
+                                    records data_dir and models_dir from the first-run wizard.
+                                </p>
+                                {paths?.paths_json && (
+                                    <p className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 font-mono text-[11px] text-teal-200/80 break-all">
+                                        {paths.paths_json}
+                                    </p>
+                                )}
+                            </div>
                         </div>
 
                         {/* Error */}

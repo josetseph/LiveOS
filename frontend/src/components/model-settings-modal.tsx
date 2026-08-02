@@ -8,13 +8,26 @@ import { api } from "@/lib/api";
 const LOCAL_PROVIDERS = new Set(["local", "lm_studio", "ollama"]);
 
 const PROVIDERS = [
-    { value: "local", label: "Local / LM Studio" },
-    { value: "ollama", label: "Ollama" },
-    { value: "gemini", label: "Google Gemini" },
-    { value: "openai", label: "OpenAI" },
-    { value: "anthropic", label: "Anthropic" },
-    { value: "huggingface", label: "HuggingFace" },
+    { value: "local", label: "Local (on this device)" },
+    { value: "gemini", label: "Google Gemini (cloud)" },
+    { value: "openai", label: "OpenAI (cloud)" },
+    { value: "anthropic", label: "Anthropic (cloud)" },
 ];
+
+const CLOUD_MODEL_HINTS: Record<string, { chat: string; examples: string }> = {
+    openai: {
+        chat: "OpenAI model id for Chat.",
+        examples: "e.g. gpt-4.1, gpt-4o-mini",
+    },
+    gemini: {
+        chat: "Gemini model id for Chat.",
+        examples: "e.g. gemini-2.5-pro, gemini-2.5-flash",
+    },
+    anthropic: {
+        chat: "Anthropic model id for Chat.",
+        examples: "e.g. claude-sonnet-4-5, claude-haiku-4-5",
+    },
+};
 
 interface LLMSettings {
     provider: string;
@@ -116,11 +129,11 @@ export function ModelSettingsModal({ open, onClose }: Props) {
         try {
             const patch: Partial<typeof form> = {};
             if (form.provider !== settings.provider) patch.provider = form.provider;
-            if (form.model !== settings.model) patch.model = form.model;
-            if (form.ingestion_model !== settings.ingestion_model)
-                patch.ingestion_model = form.ingestion_model;
-            if (isLocal && form.base_url !== settings.base_url)
-                patch.base_url = form.base_url;
+            if (!isLocal) {
+                if (form.model !== settings.model) patch.model = form.model;
+                if (form.ingestion_model !== settings.ingestion_model)
+                    patch.ingestion_model = form.ingestion_model;
+            }
 
             if (Object.keys(patch).length === 0) {
                 onClose();
@@ -217,8 +230,11 @@ export function ModelSettingsModal({ open, onClose }: Props) {
                                         {/* Provider */}
                                         <div className="space-y-1.5">
                                             <label className="text-xs font-medium text-white/50 uppercase tracking-wide">
-                                                Provider
+                                                AI provider
                                             </label>
+                                            <p className="text-xs text-white/35">
+                                                Where Chat and note ingestion get their AI from.
+                                            </p>
                                             <select
                                                 value={form.provider}
                                                 onChange={(e) =>
@@ -238,84 +254,77 @@ export function ModelSettingsModal({ open, onClose }: Props) {
                                             </select>
                                         </div>
 
-                                        {/* Model name */}
-                                        <div className="space-y-1.5">
-                                            <label className="text-xs font-medium text-white/50 uppercase tracking-wide">
-                                                Chat Model
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={form.model}
-                                                onChange={(e) =>
-                                                    setForm((f) => ({ ...f, model: e.target.value }))
-                                                }
-                                                placeholder={
-                                                    isLocal
-                                                        ? "e.g. google/gemma-4-e4b"
-                                                        : "e.g. gemini-2.5-pro"
-                                                }
-                                                className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-white/25 outline-none transition focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
-                                            />
-                                            <p className="text-xs text-white/30">
-                                                {isLocal
-                                                    ? "Model name exactly as shown in your local server"
-                                                    : "Model identifier for the selected cloud provider"}
-                                            </p>
-                                        </div>
-
-                                        {/* Ingestion model */}
-                                        <div className="space-y-1.5">
-                                            <label className="text-xs font-medium text-white/50 uppercase tracking-wide">
-                                                Ingestion Model
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={form.ingestion_model}
-                                                onChange={(e) =>
-                                                    setForm((f) => ({ ...f, ingestion_model: e.target.value }))
-                                                }
-                                                placeholder={
-                                                    isLocal
-                                                        ? "e.g. google/gemma-4-e4b"
-                                                        : "e.g. gemini-2.5-pro"
-                                                }
-                                                className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-white/25 outline-none transition focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
-                                            />
-                                            <p className="text-xs text-white/30">
-                                                Used during note ingestion (extraction, entity reasoning). Leave blank to use the chat model.
-                                            </p>
-                                        </div>
-
-                                        {/* Base URL — local providers only */}
-                                        {isLocal && (
-                                            <div className="space-y-1.5">
-                                                <label className="text-xs font-medium text-white/50 uppercase tracking-wide">
-                                                    Server URL
-                                                </label>
-                                                <input
-                                                    type="text"
-                                                    value={form.base_url}
-                                                    onChange={(e) =>
-                                                        setForm((f) => ({ ...f, base_url: e.target.value }))
-                                                    }
-                                                    placeholder="http://127.0.0.1:1234"
-                                                    className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 font-mono text-sm text-white placeholder-white/25 outline-none transition focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
-                                                />
-                                                <p className="text-xs text-white/30">
-                                                    LM Studio: http://127.0.0.1:1234 · Ollama:
-                                                    http://127.0.0.1:11434
+                                        {isLocal ? (
+                                            <div className="space-y-2 rounded-lg border border-teal-500/20 bg-teal-500/5 px-3 py-2 text-xs text-teal-100/80">
+                                                <p>
+                                                    Local loads your GGUF in-process — no server URL. Choose and
+                                                    download the chat model in{" "}
+                                                    <a
+                                                        href="/setup"
+                                                        className="underline underline-offset-2 text-amber-200/90"
+                                                        onClick={onClose}
+                                                    >
+                                                        Setup → Local models
+                                                    </a>
+                                                    .
                                                 </p>
                                             </div>
-                                        )}
+                                        ) : (
+                                            <>
+                                                <div className="space-y-1.5">
+                                                    <label className="text-xs font-medium text-white/50 uppercase tracking-wide">
+                                                        Chat model
+                                                    </label>
+                                                    <input
+                                                        type="text"
+                                                        value={form.model}
+                                                        onChange={(e) =>
+                                                            setForm((f) => ({ ...f, model: e.target.value }))
+                                                        }
+                                                        placeholder={
+                                                            CLOUD_MODEL_HINTS[form.provider]?.examples ||
+                                                            "e.g. gemini-2.5-pro"
+                                                        }
+                                                        className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-white/25 outline-none transition focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
+                                                    />
+                                                    <p className="text-xs text-white/30">
+                                                        {CLOUD_MODEL_HINTS[form.provider]?.chat ||
+                                                            "Model id for the selected cloud provider."}
+                                                    </p>
+                                                </div>
 
-                                        {/* Cloud provider note */}
-                                        {!isLocal && (
-                                            <p className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300/70">
-                                                API keys for cloud providers are configured in{" "}
-                                                <code className="font-mono">backend/.env</code> and cannot be changed here.
-                                            </p>
-                                        )}
+                                                <div className="space-y-1.5">
+                                                    <label className="text-xs font-medium text-white/50 uppercase tracking-wide">
+                                                        Ingestion model
+                                                    </label>
+                                                    <input
+                                                        type="text"
+                                                        value={form.ingestion_model}
+                                                        onChange={(e) =>
+                                                            setForm((f) => ({
+                                                                ...f,
+                                                                ingestion_model: e.target.value,
+                                                            }))
+                                                        }
+                                                        placeholder="Same as chat, or leave blank"
+                                                        className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-white/25 outline-none transition focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
+                                                    />
+                                                    <p className="text-xs text-white/30">
+                                                        Used during note ingestion. Leave blank to reuse the chat
+                                                        model.
+                                                    </p>
+                                                </div>
 
+                                                <p className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300/70">
+                                                    Set the API key in{" "}
+                                                    <code className="font-mono">backend/.env</code> (
+                                                    <code className="font-mono">OPENAI_API_KEY</code>,{" "}
+                                                    <code className="font-mono">GOOGLE_API_KEY</code>, or{" "}
+                                                    <code className="font-mono">ANTHROPIC_API_KEY</code>). Keys
+                                                    cannot be edited here.
+                                                </p>
+                                            </>
+                                        )}
                                         {/* Admin Actions */}
                                         <div className="space-y-2 rounded-lg border border-white/5 bg-white/[0.02] p-4">
                                             <p className="text-xs font-medium uppercase tracking-wide text-white/40">

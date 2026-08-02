@@ -17,12 +17,26 @@ from app.core.log import get_logger, setup_logging
 setup_logging()
 
 from app.core.config import settings  # noqa: E402
-from app.core.database import get_db  # noqa: E402
+from app.core.database import get_db, init_db  # noqa: E402
 from app.models.note import Note  # noqa: E402
 from app.schemas.chat import CreateConversationInput
 from app.services.chat_store import chat_store
-from app.schemas.note import CreateNoteInput  # noqa: E402
+from app.schemas.extraction import NoteInput  # noqa: E402
+from app.schemas.note import (  # noqa: E402
+    CreateNoteInput,
+    DeleteVaultFileInput,
+    MoveNoteInput,
+    MoveVaultFileInput,
+)
 from app.services.kb_registry import KBContext, kb_registry  # noqa: E402
+from app.api_desktop import router as desktop_router  # noqa: E402
+from app.services.firefly_service import firefly_service  # noqa: E402
+from app.services.note_files import note_body, persist_note_body  # noqa: E402
+from app.services.wikilinks import refresh_note_links  # noqa: E402
+from app.services.vault import delete_note_file, clear_vault_contents, ensure_vault  # noqa: E402
+from app.services.ai_gate import require_ai, ai_is_configured  # noqa: E402
+from app.models.wikilink import NoteLink  # noqa: E402
+from pathlib import Path  # noqa: E402
 from fastapi import (  # noqa: E402
     BackgroundTasks,
     Depends,
@@ -36,7 +50,7 @@ from fastapi import (  # noqa: E402
 )
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
-from sqlalchemy import delete, select, update  # noqa: E402
+from sqlalchemy import delete, or_, select, update  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 logger = get_logger("API")  # App logger; avoid uvicorn.access formatter expectations
@@ -107,6 +121,7 @@ request_trace_id: ContextVar[str] = ContextVar("request_trace_id", default="")
 
 
 app = FastAPI(title="LiveOS API", version="0.1.0")
+app.include_router(desktop_router)
 
 cors_origins = [
     origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()
@@ -150,7 +165,7 @@ async def trace_id_middleware(request: Request, call_next):
 async def startup_event():
     """Initialize external services and database tables on application startup."""
     logger.info("Application startup: LiveOS API online")
-    # Apply any runtime overrides that were saved from a previous session
+    await init_db()
     from app.core import runtime_config
 
     overrides = runtime_config.load()
@@ -160,6 +175,46 @@ async def startup_event():
             "Runtime config overrides applied",
             extra={"overrides": list(overrides.keys())},
         )
+    # Align Qdrant collection dims with the selected embed model before any ingest.
+    try:
+        from app.services.local_models import sync_embedding_infrastructure
+
+        sync_embedding_infrastructure()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning(f"Embedding infrastructure sync skipped: {exc}")
+    try:
+        from app.services.vault_watcher import start_vault_watchers
+
+        start_vault_watchers()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning(f"Vault watcher not started: {exc}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    try:
+        from app.services.vault_watcher import stop_vault_watchers
+
+        stop_vault_watchers()
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+
+def _note_response(note: Note, kb: KBContext) -> dict:
+    """Serialize note with vault-backed content."""
+    return {
+        "id": note.id,
+        "content": note_body(note, kb),
+        "title": note.title,
+        "rel_path": note.rel_path,
+        "created_at": note.created_at.isoformat() if note.created_at else None,
+        "updated_at": note.updated_at.isoformat() if note.updated_at else None,
+        "processed": note.processed,
+        "failed": note.failed,
+        "processing_stage": note.processing_stage,
+        "processing_model": note.processing_model,
+        "kb_id": note.kb_id,
+    }
 
 
 _AUDIO_CONTENT_TYPES = {"audio/webm", "audio/ogg", "audio/opus", "audio/x-matroska"}
@@ -224,55 +279,63 @@ async def _transcode_to_m4a(content: bytes, src_ext: str) -> tuple[bytes, str]:
 
 
 @app.post("/api/v1/upload")
-async def upload_file(file: UploadFile = File(...)):
-    """
-    Upload a file to R2 Cloud Storage.
-    Audio files (WebM, OGG, Opus) are transcoded to AAC/M4A so they play in
-    all browsers including Safari, which does not support WebM.
-    """
-    from app.utils.bucket_storage import get_files, send_files
-
+async def upload_file(
+    file: UploadFile = File(...),
+    kb: KBContext = Depends(get_kb),
+):
+    """Upload a file into the current KB vault attachments folder."""
     logger.info(f"Uploading file: {file.filename}")
+
+    if not kb.vault_path:
+        raise HTTPException(status_code=400, detail="No vault configured for this knowledge base")
 
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     content_type = file.content_type or ""
     content = await file.read()
 
-    # Transcode audio to M4A for universal playback compatibility
     if content_type in _AUDIO_CONTENT_TYPES or ext in _AUDIO_EXTENSIONS:
         content, ext = await _transcode_to_m4a(content, ext)
         content_type = "audio/mp4"
+        filename_hint = f"recording.{ext}"
+    else:
+        filename_hint = file.filename or f"file.{ext}"
 
-    filename = f"{uuid.uuid4()}.{ext}"
+    # Always store in the KB vault (no S3 for LifeOS desktop/local).
+    from app.services.local_storage import store_upload
 
-    # Upload to storage
-    await send_files(content, filename, content_type)
+    try:
+        result = await store_upload(Path(kb.vault_path), filename_hint, content, kb.kb_id)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.exception("Vault upload failed")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {exc}") from exc
 
-    # Get Public URL
-    url = get_files(filename)
-
-    logger.info(f"File uploaded successfully: {filename} -> {url}")
-
+    logger.info(f"File uploaded to vault: {result['url']}")
+    # Prefer vault-relative path in markdown for portability; also return href for UI.
     return {
         "filename": file.filename,
-        "url": url,
-        "local_path": url,  # Legacy compatibility
+        "url": result["url"],
+        "href": result["url"],
+        "rel_path": result["key"],
+        "local_path": result["url"],
+        "key": result["key"],
         "status": "success",
     }
 
 
 @app.delete("/api/v1/files/{file_key}")
-async def delete_file(file_key: str):
-    """
-    Delete an uploaded file from R2 Cloud Storage by its key.
-    The key is the UUID filename returned in the upload response (e.g. "abc123.pdf").
-    """
-    from app.utils.bucket_storage import delete_files
-
+async def delete_file(file_key: str, kb: KBContext = Depends(get_kb)):
+    """Delete an uploaded vault attachment (or legacy S3 object)."""
     logger.info(f"Deleting file: {file_key}")
-    result = await delete_files(file_key)
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
+    if settings.STORAGE_BACKEND == "s3":
+        from app.utils.bucket_storage import delete_files
+
+        result = await delete_files(file_key)
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+    else:
+        from app.services.local_storage import remove_upload
+
+        await remove_upload(Path(kb.vault_path), file_key)
     logger.info(f"File deleted successfully: {file_key}")
     return {"status": "deleted", "file_key": file_key}
 
@@ -285,10 +348,9 @@ async def root():
 
 
 @app.get("/health")
-async def health_check(kb: KBContext = Depends(get_kb)):
-    """Health-check endpoint confirming the API is running."""
-    connected = kb.graph.verify_connection()
-    return {"status": "healthy", "graph": "connected" if connected else "unavailable"}
+async def health_check():
+    """Lightweight liveness probe for the desktop supervisor (no KB/graph deps)."""
+    return {"status": "healthy"}
 
 
 class ChatInput(BaseModel):
@@ -419,6 +481,7 @@ async def chat(body: ChatInput, kb: KBContext = Depends(get_kb)):
     """
     Chat with your Brain: Vector Search -> Rerank -> Synthesis.
     """
+    require_ai()
     from app.schemas.chat import ChatTurn
 
     request_id = body.request_id or str(uuid.uuid4())
@@ -436,11 +499,27 @@ async def chat(body: ChatInput, kb: KBContext = Depends(get_kb)):
     try:
         await chat_store.add_message(conversation_id, "user", body.query)
         await chat_store.maybe_set_title_from_first_message(conversation_id, body.query)
-        result = await kb.get_chat_workflow().chat(
-            body.query,
-            history=history_turns,
-            progress_callback=_progress,
-        )
+        if firefly_service.looks_like_finance_query(body.query):
+            _progress("Checking finance data and notes")
+            note_ctx = await kb.get_chat_workflow().retrieve_for_query(
+                body.query,
+                history=history_turns,
+                progress_callback=_progress,
+            )
+            result = await firefly_service.answer_finance_question(
+                body.query,
+                kb,
+                note_docs=note_ctx.get("context") or [],
+                rewritten_query=note_ctx.get("rewritten_query"),
+            )
+            if note_ctx.get("thinking"):
+                result["thinking"] = note_ctx.get("thinking")
+        else:
+            result = await kb.get_chat_workflow().chat(
+                body.query,
+                history=history_turns,
+                progress_callback=_progress,
+            )
         assistant = await chat_store.add_message(
             conversation_id,
             "assistant",
@@ -485,11 +564,27 @@ async def _run_chat_job(
 
     _progress("Starting chat request")
     try:
-        result = await kb.get_chat_workflow().chat(
-            query,
-            history=history_turns,
-            progress_callback=_progress,
-        )
+        if firefly_service.looks_like_finance_query(query):
+            _progress("Checking finance data and notes")
+            note_ctx = await kb.get_chat_workflow().retrieve_for_query(
+                query,
+                history=history_turns,
+                progress_callback=_progress,
+            )
+            result = await firefly_service.answer_finance_question(
+                query,
+                kb,
+                note_docs=note_ctx.get("context") or [],
+                rewritten_query=note_ctx.get("rewritten_query"),
+            )
+            if note_ctx.get("thinking"):
+                result["thinking"] = note_ctx.get("thinking")
+        else:
+            result = await kb.get_chat_workflow().chat(
+                query,
+                history=history_turns,
+                progress_callback=_progress,
+            )
         assistant = await chat_store.add_message(
             conversation_id,
             "assistant",
@@ -554,6 +649,7 @@ async def start_chat(
     kb: KBContext = Depends(get_kb),
 ):
     """Start a chat request and return immediately for polling clients."""
+    require_ai()
     request_id = body.request_id or str(uuid.uuid4())
     conversation = await chat_store.ensure_conversation(
         body.conversation_id, kb.kb_id
@@ -659,6 +755,138 @@ async def graph_3d_node_detail(node_id: str, kb: KBContext = Depends(get_kb)):
     detail = kb.graph.get_node_detail(node_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Node not found")
+
+    # Meili fallback when Qdrant has structural presence but empty content payloads.
+    needs_content = not (detail.get("description") or detail.get("isolated_contexts"))
+    if needs_content:
+        try:
+            doc = kb.typesense.get_node(node_id)
+        except Exception:  # pylint: disable=broad-exception-caught
+            doc = None
+        if doc is not None and not isinstance(doc, dict):
+            # Defensive: older Meili clients return Document objects.
+            try:
+                doc = dict(doc)  # type: ignore[arg-type]
+            except Exception:  # pylint: disable=broad-exception-caught
+                doc = {
+                    k: getattr(doc, k)
+                    for k in (
+                        "node_id",
+                        "name",
+                        "type",
+                        "isolated_contexts",
+                        "relationship_natural_language",
+                        "community_level",
+                    )
+                    if getattr(doc, k, None) is not None
+                }
+        if isinstance(doc, dict):
+            if not detail.get("name") and doc.get("name"):
+                detail["name"] = doc["name"]
+            if not detail.get("node_type") and doc.get("type"):
+                detail["node_type"] = doc["type"]
+            ctx = doc.get("isolated_contexts") or ""
+            if isinstance(ctx, str) and ctx.strip():
+                # Meili stores contexts as a joined string.
+                parts = [p.strip() for p in ctx.split(" | ") if p.strip()]
+                if not parts:
+                    parts = [ctx.strip()]
+                detail["isolated_contexts"] = parts
+                if not detail.get("description"):
+                    detail["description"] = parts[0]
+                    detail["summary"] = parts[0]
+            elif isinstance(ctx, list) and ctx:
+                detail["isolated_contexts"] = [str(x) for x in ctx if x]
+                if not detail.get("description"):
+                    detail["description"] = str(ctx[0])
+                    detail["summary"] = str(ctx[0])
+
+    # Prefer DB/Qdrant titles over empty/placeholder graph node.name values
+    # (legacy rows can show as "Unknown" on REFERENCES connections).
+    related = detail.get("related_notes") or []
+    connections = detail.get("connections") or []
+
+    def _needs_title(name: object) -> bool:
+        n = (str(name) if name is not None else "").strip()
+        return not n or n.lower() in {"unknown", "untitled", "untitled note"}
+
+    resolve_ids: set[str] = set()
+    for n in related:
+        nid = n.get("note_id")
+        if nid and _needs_title(n.get("name")):
+            resolve_ids.add(str(nid))
+    for c in connections:
+        cid = c.get("node_id")
+        if cid and _needs_title(c.get("name")):
+            resolve_ids.add(str(cid))
+
+    resolved: dict[str, str] = {}
+    if resolve_ids:
+        try:
+            from pathlib import Path
+
+            from sqlalchemy import select
+
+            from app.core.database import AsyncSessionLocal
+            from app.models.note import Note
+
+            async with AsyncSessionLocal() as session:
+                rows = (
+                    await session.execute(
+                        select(Note.id, Note.title, Note.rel_path).where(
+                            Note.id.in_(list(resolve_ids))
+                        )
+                    )
+                ).all()
+            for rid, title, rel_path in rows:
+                if not rid:
+                    continue
+                label = (title or "").strip()
+                if not label and rel_path:
+                    label = Path(str(rel_path)).stem.strip()
+                if label:
+                    resolved[str(rid)] = label
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
+        still = [i for i in resolve_ids if i not in resolved]
+        if still:
+            try:
+                content_map = kb.qdrant.get_nodes_content_by_ids(still) or {}
+                for sid in still:
+                    label = (content_map.get(sid) or {}).get("name") or ""
+                    if isinstance(label, str) and label.strip():
+                        resolved[sid] = label.strip()
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
+    for note in related:
+        nid = note.get("note_id")
+        if nid and resolved.get(str(nid)):
+            note["name"] = resolved[str(nid)]
+        elif _needs_title(note.get("name")):
+            note["name"] = "Untitled note"
+
+    for conn in connections:
+        cid = conn.get("node_id")
+        if cid and resolved.get(str(cid)):
+            conn["name"] = resolved[str(cid)]
+        elif _needs_title(conn.get("name")):
+            conn["name"] = (
+                "Untitled note" if conn.get("kind") == "note" else "Untitled"
+            )
+
+    # Backfill Kuzu so the next hop query returns real names.
+    if resolved:
+        try:
+            for nid, name in resolved.items():
+                kb.graph.execute_query(
+                    "MATCH (n:Node {id: $id}) SET n.name = $name",
+                    {"id": nid, "name": name},
+                )
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
     return detail
 
 
@@ -675,6 +903,8 @@ async def search_entities_autocomplete(
     import re as _re
 
     if not q or len(q.strip()) < 2:
+        return []
+    if not ai_is_configured():
         return []
 
     hits = kb.typesense.search_nodes(q.strip(), limit * 2)
@@ -746,6 +976,56 @@ async def scan_entities_in_text(
     return list(found.values())
 
 
+@app.post("/api/v1/graph/entities/note-subgraph")
+async def note_entity_subgraph(
+    body: ScanTextInput,
+    kb: KBContext = Depends(get_kb),
+):
+    """
+    Entities mentioned in note text + knowledge-graph edges between them.
+    Used by the Connected panel "Nodes" mode.
+    """
+    entities = await scan_entities_in_text(body, kb)
+    nodes = [
+        {
+            "id": e["node_id"],
+            "title": e["name"],
+            "type": e.get("node_type") or "entity",
+        }
+        for e in entities
+    ]
+    id_set = {n["id"] for n in nodes}
+    edges: list[dict] = []
+    seen_edges: set[tuple[str, str]] = set()
+
+    if ai_is_configured() and id_set:
+        graph = kb.graph
+        for ent in entities:
+            try:
+                related = graph.get_related_nodes(ent["name"], max_depth=1)
+            except Exception:  # pylint: disable=broad-exception-caught
+                related = []
+            for rel in related:
+                tid = rel.get("node_id")
+                if not tid or tid not in id_set or tid == ent["node_id"]:
+                    continue
+                a, b = sorted((ent["node_id"], tid))
+                if (a, b) in seen_edges:
+                    continue
+                seen_edges.add((a, b))
+                edges.append(
+                    {
+                        "source": ent["node_id"],
+                        "target": tid,
+                        "type": (rel.get("relationship_path") or ["related"])[0]
+                        if isinstance(rel.get("relationship_path"), list)
+                        else "related",
+                    }
+                )
+
+    return {"nodes": nodes, "edges": edges, "center_id": None}
+
+
 # --- Notes API ---
 
 
@@ -755,10 +1035,7 @@ async def create_note(
     db: AsyncSession = Depends(get_db),
     kb: KBContext = Depends(get_kb),
 ):
-    """
-    Create a new note in Postgres WITHOUT ingestion.
-    Note will have processed=False until explicitly ingested via POST /api/v1/notes/{id}/ingest.
-    """
+    """Create a note as a vault .md file + metadata row (no ingest)."""
     note_id = str(uuid.uuid4())
     c_at = (
         _parse_date_str(note_input.created_at)
@@ -768,16 +1045,185 @@ async def create_note(
 
     new_note = Note(
         id=note_id,
-        content=note_input.content,
+        content="",
         created_at=c_at,
         processed=False,
+        processing_stage="Saved",
+        title=(note_input.title or "").strip() or None,
         kb_id=kb.kb_id,
     )
+    persist_note_body(
+        new_note,
+        kb,
+        note_input.content or "",
+        title=(note_input.title or "").strip() or None,
+        folder=(note_input.folder or "").strip() or None,
+    )
     db.add(new_note)
+    await db.flush()
+    await refresh_note_links(db, kb.kb_id, note_id, note_input.content or "")
     await db.commit()
     await db.refresh(new_note)
 
-    return new_note
+    return _note_response(new_note, kb)
+
+
+@app.post("/api/v1/notes/{note_id}/move")
+async def move_note(
+    note_id: str,
+    body: MoveNoteInput,
+    db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
+):
+    """Move a note into a vault folder (empty folder = vault root)."""
+    from app.services.vault_ops import move_note_to_folder
+
+    result = await db.execute(select(Note).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note or note.kb_id != kb.kb_id:
+        raise HTTPException(status_code=404, detail="Note not found")
+    try:
+        moved = await move_note_to_folder(db, kb, note, body.folder or "")
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.refresh(note)
+    return {**moved, "note": _note_response(note, kb)}
+
+
+@app.post("/api/v1/vault/move")
+async def move_vault_path(
+    body: MoveVaultFileInput,
+    db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
+):
+    """Move any vault file (note or attachment) and rewrite markdown links."""
+    from app.services.vault_ops import move_vault_file
+
+    try:
+        return await move_vault_file(db, kb, body.from_rel, body.to_rel)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/vault/delete")
+async def delete_vault_path(
+    body: DeleteVaultFileInput,
+    db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
+):
+    """Delete a vault attachment and strip markdown links that pointed at it."""
+    from app.services.vault_ops import delete_vault_file
+
+    try:
+        return await delete_vault_file(db, kb, body.rel_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class MkdirInput(BaseModel):
+    path: str = ""
+
+
+@app.post("/api/v1/vault/mkdir")
+async def mkdir_vault_folder(
+    body: MkdirInput,
+    kb: KBContext = Depends(get_kb),
+):
+    """Create an empty folder in the vault (for the notes sidebar tree)."""
+    if not kb.vault_path:
+        raise HTTPException(status_code=400, detail="No vault configured")
+    rel = (body.path or "").replace("\\", "/").strip("/")
+    if not rel or ".." in rel.split("/"):
+        raise HTTPException(status_code=400, detail="Invalid folder path")
+    try:
+        vault = Path(kb.vault_path).expanduser().resolve()
+        target = (vault / rel).resolve()
+        target.relative_to(vault)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Path escapes vault") from exc
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        keep = target / ".keep"
+        if not keep.exists():
+            keep.write_text("", encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not create folder: {exc}") from exc
+    return {"path": rel, "status": "ok"}
+
+
+@app.get("/api/v1/vault/folders")
+async def list_folders(kb: KBContext = Depends(get_kb)):
+    from app.services.vault_sync import (
+        list_attachment_files,
+        list_vault_folders,
+        list_vault_media_files,
+    )
+
+    if not kb.vault_path:
+        return {
+            "folders": [],
+            "attachments": [],
+            "media_files": [],
+            "vault_name": "",
+            "vault_path": "",
+        }
+    vault = Path(kb.vault_path).expanduser().resolve()
+    # Ensure attachments exists so it appears in the vault tree
+    (vault / "attachments").mkdir(parents=True, exist_ok=True)
+    media = list_vault_media_files(vault)
+    return {
+        "folders": list_vault_folders(vault, include_attachments=True),
+        "attachments": list_attachment_files(vault),
+        "media_files": media,
+        "vault_name": vault.name,
+        "vault_path": str(vault),
+    }
+
+
+@app.get("/api/v1/vault/local-path")
+async def vault_local_path(
+    rel: str = Query(..., description="Vault-relative path or /vault-files/... URL"),
+    kb: KBContext = Depends(get_kb),
+):
+    """Resolve a vault-relative path (or vault-files URL) to an absolute local path."""
+    if not kb.vault_path:
+        raise HTTPException(status_code=400, detail="No vault configured")
+    raw = (rel or "").strip().replace("\\", "/")
+    # Accept /vault-files/<kb>/attachments/x.png or attachments/x.png
+    marker = f"/vault-files/{kb.kb_id}/"
+    if raw.startswith("/vault-files/"):
+        parts = raw.split("/", 3)  # '', 'vault-files', kb, rest
+        raw = parts[3] if len(parts) > 3 else ""
+    elif marker in raw:
+        raw = raw.split(marker, 1)[1]
+    elif raw.startswith("vault-files/"):
+        parts = raw.split("/", 2)
+        raw = parts[2] if len(parts) > 2 else ""
+    raw = raw.lstrip("/")
+    if not raw or ".." in raw.split("/"):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    vault = Path(kb.vault_path).expanduser().resolve()
+    full = (vault / raw).resolve()
+    try:
+        full.relative_to(vault)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Path escapes vault") from exc
+    if not full.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    return {
+        "rel_path": raw,
+        "local_path": str(full),
+        "vault_path": str(vault),
+        "exists": True,
+    }
 
 
 @app.post("/api/v1/notes/{note_id}/ingest")
@@ -792,6 +1238,7 @@ async def ingest_existing_note(
     Always force-reingests — resets processed/failed flags so the pipeline runs
     regardless of prior ingestion status.
     """
+    require_ai()
     result = await db.execute(select(Note).where(Note.id == note_id))
     note = result.scalar_one_or_none()
 
@@ -806,8 +1253,9 @@ async def ingest_existing_note(
     await db.commit()
 
     note_data = NoteInput(
-        content=note.content,
+        content=note_body(note, kb),
         created_at=note.created_at.isoformat() if note.created_at else None,
+        title=(note.title or "").strip() or None,
     )
 
     background_tasks.add_task(
@@ -832,6 +1280,8 @@ async def ingest_note(
     Create and ingest a new note (legacy combined endpoint for batch scripts).
     For manual note creation, prefer POST /api/v1/notes then POST /api/v1/notes/{id}/ingest.
     """
+    if not note_data.skip_ingestion:
+        require_ai()
     note_id = str(uuid.uuid4())
     c_at = (
         _parse_date_str(note_data.created_at)
@@ -841,14 +1291,18 @@ async def ingest_note(
 
     new_note = Note(
         id=note_id,
-        content=note_data.content,
+        content="",
         created_at=c_at,
         processed=False,
         processing_stage=(
             "Queued for ingestion" if not note_data.skip_ingestion else "Saved"
         ),
+        kb_id=kb.kb_id,
     )
+    persist_note_body(new_note, kb, note_data.content or "")
     db.add(new_note)
+    await db.flush()
+    await refresh_note_links(db, kb.kb_id, note_id, note_data.content or "")
     await db.commit()
 
     if not note_data.skip_ingestion:
@@ -875,6 +1329,7 @@ async def get_notes(
     search: str | None = None,
     processed: bool | None = None,
     failed: bool | None = None,
+    sync_vault: bool = True,
     db: AsyncSession = Depends(get_db),
     kb: KBContext = Depends(get_kb),
 ):
@@ -882,12 +1337,21 @@ async def get_notes(
     Get notes for the active KB, sorted by creation date (newest first).
     Optionally filter by processed/failed status.
     """
+    if sync_vault:
+        from app.services.vault_sync import sync_vault_notes
+
+        try:
+            await sync_vault_notes(db, kb)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(f"[get_notes] vault sync skipped: {exc}")
+
     base_query = select(Note)
 
     filters = [Note.kb_id == kb.kb_id]
     if search:
         term = f"%{search}%"
-        filters.append((Note.title.ilike(term)) | (Note.content.ilike(term)))
+        # Bodies live in vault files — search title + rel_path metadata only
+        filters.append((Note.title.ilike(term)) | (Note.rel_path.ilike(term)))
 
     if processed is not None:
         filters.append(Note.processed == processed)
@@ -899,20 +1363,22 @@ async def get_notes(
     query = base_query.order_by(Note.created_at.desc())
     result = await db.execute(query)
     notes = result.scalars().all()
-    return notes
+    return [_note_response(n, kb) for n in notes]
 
 
 @app.get("/api/v1/notes/{note_id}")
-async def get_note(note_id: str, db: AsyncSession = Depends(get_db)):
-    """
-    Get a specific note by ID from Postgres.
-    """
+async def get_note(
+    note_id: str,
+    db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
+):
+    """Get a specific note by ID with vault-backed content."""
     result = await db.execute(select(Note).where(Note.id == note_id))
     note = result.scalar_one_or_none()
 
     if not note:
         return {"error": "Note not found"}
-    return note
+    return _note_response(note, kb)
 
 
 @app.get("/api/v1/notes/{note_id}/status")
@@ -970,9 +1436,10 @@ async def update_note(
     note_id: str,
     note_input: CreateNoteInput,
     db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
 ):
     """
-    Update an existing note's content.
+    Update an existing note's vault file content.
     Does NOT trigger re-ingestion or change processed status.
     Use POST /api/v1/notes/{id}/ingest to re-ingest after updating.
     """
@@ -982,17 +1449,37 @@ async def update_note(
     if not existing_note:
         return {"error": "Note not found"}
 
-    existing_note.content = note_input.content
+    persist_note_body(
+        existing_note,
+        kb,
+        note_input.content or "",
+        title=(note_input.title or "").strip() or None,
+    )
 
     if note_input.created_at:
         existing_note.created_at = _parse_date_str(note_input.created_at)
 
     existing_note.updated_at = datetime.now(timezone.utc)
+    # Autosave must never start ingestion. Clear watcher false-positives while
+    # leaving a user-queued ingest stage alone.
+    stage = existing_note.processing_stage or ""
+    if not existing_note.processed and not (
+        stage.startswith("Queued") or stage.startswith("Starting")
+    ):
+        if (
+            "pending" in stage.lower()
+            or stage.startswith("External")
+            or stage.startswith("Changed on disk")
+            or not stage
+        ):
+            existing_note.processing_stage = "Saved"
+
+    await refresh_note_links(db, kb.kb_id, note_id, note_input.content or "")
 
     await db.commit()
     await db.refresh(existing_note)
 
-    return existing_note
+    return _note_response(existing_note, kb)
 
 
 @app.delete("/api/v1/notes/{note_id}")
@@ -1000,63 +1487,146 @@ async def delete_note(
     note_id: str, db: AsyncSession = Depends(get_db), kb: KBContext = Depends(get_kb)
 ):
     """
-    Delete a note from Postgres, the graph, Qdrant, and Typesense.
+    Delete a note from SQLite + vault .md, then best-effort graph/vector cleanup.
 
-    Entity nodes that are referenced ONLY by this note are orphaned after the note
-    is removed, so they are deleted from all stores. Shared entities (referenced by
-    other notes) are left intact.
-
-    Attached files (📎 / 🎤 links in the note content) are also deleted from
-    object storage so they do not accumulate indefinitely.
+    Vault file + DB row are removed first so a graph failure cannot leave an
+    orphan markdown file or a broken UI still pointing at a deleted note.
     """
+    return await _delete_note_impl(note_id, db, kb)
+
+
+class BatchDeleteNotesInput(BaseModel):
+    """Body for batch note deletion."""
+
+    ids: list[str]
+
+
+@app.post("/api/v1/notes/batch-delete")
+async def batch_delete_notes(
+    body: BatchDeleteNotesInput,
+    db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
+):
+    """Delete many notes in the current KB (vault + SQLite + graph cleanup)."""
+    ids = [i.strip() for i in (body.ids or []) if i and i.strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="ids must not be empty")
+    if len(ids) > 100:
+        raise HTTPException(status_code=400, detail="At most 100 notes per batch")
+
+    deleted: list[str] = []
+    failed: list[dict] = []
+    for note_id in ids:
+        try:
+            await _delete_note_impl(note_id, db, kb)
+            deleted.append(note_id)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("[batch-delete] Failed for %s: %s", note_id, exc)
+            failed.append({"id": note_id, "error": str(exc)})
+
+    return {
+        "deleted": deleted,
+        "failed": failed,
+        "deleted_count": len(deleted),
+        "failed_count": len(failed),
+    }
+
+
+async def _delete_note_impl(
+    note_id: str, db: AsyncSession, kb: KBContext
+) -> dict:
+    """Shared single-note delete used by DELETE and batch-delete."""
     import re as _re
+    from pathlib import Path as _Path
+
     from app.utils.bucket_storage import delete_files as _delete_files
 
-    # 0. Fetch the note content before deletion to extract attached file keys.
-    note_row = await db.execute(select(Note).where(Note.id == note_id))
+    note_row = await db.execute(
+        select(Note).where(Note.id == note_id, Note.kb_id == kb.kb_id)
+    )
     note_obj = note_row.scalar_one_or_none()
+    if not note_obj:
+        # Idempotent — already gone from DB; still try to clear a matching vault file.
+        return {
+            "status": "deleted",
+            "id": note_id,
+            "orphans_removed": 0,
+            "already_gone": True,
+        }
+
+    body = note_body(note_obj, kb) if note_obj else ""
+    rel_path = note_obj.rel_path
     _file_url_re = _re.compile(
-        r"\[(?:📎|🎤)[^\]]*\]\((https?://[^)]+|/(?:files|uploads)/[^)]+)\)"
+        r"\[(?:📎|🎤)[^\]]*\]\((https?://[^)]+|/(?:files|uploads|vault-files)/[^)]+)\)"
     )
     attached_file_keys: list[str] = []
-    if note_obj and note_obj.content:
-        for _m in _file_url_re.finditer(note_obj.content):
+    if body:
+        for _m in _file_url_re.finditer(body):
             _url = _m.group(1).rstrip("/")
             _key = _url.split("/")[-1]
             if _key:
                 attached_file_keys.append(_key)
 
-    # 1. Find entity node IDs linked exclusively to this note in the graph.
-    rows = kb.graph.execute_query(
-        """
-        MATCH (note:Node {id: $note_id, kind: 'note'})-[:REFERENCES]->(entity:Node)
-        WHERE entity.kind <> 'note'
-          AND NOT EXISTS {
-            MATCH (other:Node {kind: 'note'})-[:REFERENCES]->(entity)
-            WHERE other.id <> $note_id
-          }
-        RETURN entity.id AS entity_id
-        """,
-        {"note_id": note_id},
-    )
-    orphan_ids: list[str] = [r["entity_id"] for r in (rows or []) if r.get("entity_id")]
+    vault = _Path(kb.vault_path) if kb.vault_path else None
+    if vault and rel_path:
+        try:
+            delete_note_file(vault, rel_path)
+            logger.info(f"[delete_note] Removed vault file {vault / rel_path}")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(f"[delete_note] Vault file delete failed ({rel_path}): {exc}")
+            try:
+                target = vault / rel_path
+                if target.exists():
+                    target.unlink(missing_ok=True)
+            except Exception as exc2:  # pylint: disable=broad-exception-caught
+                logger.error(f"[delete_note] Vault file still present: {exc2}")
 
-    # 2. Delete the note row from Postgres.
-    await db.execute(delete(Note).where(Note.id == note_id))
+    await db.execute(
+        delete(NoteLink).where(
+            NoteLink.kb_id == kb.kb_id,
+            or_(
+                NoteLink.source_note_id == note_id,
+                NoteLink.target_note_id == note_id,
+            ),
+        )
+    )
+    await db.execute(delete(Note).where(Note.id == note_id, Note.kb_id == kb.kb_id))
     await db.commit()
 
-    # 3. Remove the note node (and all its edges) from the graph.
-    kb.graph.execute_query(
-        "MATCH (n:Node {id: $id}) WHERE n.kind = 'note' DETACH DELETE n",
-        {"id": note_id},
-    )
-
-    # 4. Delete orphaned entity nodes from graph, Qdrant, and Typesense.
-    for entity_id in orphan_ids:
-        kb.graph.execute_query(
-            "MATCH (n:Node {id: $id}) DETACH DELETE n",
-            {"id": entity_id},
+    orphan_ids: list[str] = []
+    try:
+        rows = kb.graph.execute_query(
+            """
+            MATCH (note:Node {id: $note_id, kind: 'note'})-[:REFERENCES]->(entity:Node)
+            WHERE entity.kind <> 'note'
+              AND NOT EXISTS {
+                MATCH (other:Node {kind: 'note'})-[:REFERENCES]->(entity)
+                WHERE other.id <> $note_id
+              }
+            RETURN entity.id AS entity_id
+            """,
+            {"note_id": note_id},
         )
+        orphan_ids = [r["entity_id"] for r in (rows or []) if r.get("entity_id")]
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning(f"[delete_note] Graph orphan query failed: {exc}")
+
+    try:
+        kb.graph.execute_query(
+            "MATCH (n:Node {id: $id}) WHERE n.kind = 'note' DETACH DELETE n",
+            {"id": note_id},
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning(f"[delete_note] Graph note delete failed: {exc}")
+
+    for entity_id in orphan_ids:
+        try:
+            kb.graph.execute_query(
+                "MATCH (n:Node {id: $id}) DETACH DELETE n",
+                {"id": entity_id},
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
         try:
             kb.qdrant.delete_node(entity_id)
         except Exception:  # pylint: disable=broad-exception-caught
@@ -1070,12 +1640,21 @@ async def delete_note(
         f"[delete_note] Deleted note {note_id}; removed {len(orphan_ids)} orphaned entity nodes."
     )
 
-    # 5. Delete attached files from object storage.
-    for key in attached_file_keys:
-        try:
-            await _delete_files(key)
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
+    if settings.STORAGE_BACKEND == "s3":
+        for key in attached_file_keys:
+            try:
+                await _delete_files(key)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+    else:
+        from app.services.local_storage import remove_upload
+
+        for key in attached_file_keys:
+            try:
+                if vault:
+                    await remove_upload(vault, key)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
     if attached_file_keys:
         logger.info(
             f"[delete_note] Deleted {len(attached_file_keys)} attached file(s) for note {note_id}."
@@ -1188,25 +1767,21 @@ async def reingest_all(
     db: AsyncSession = Depends(get_db),
     kb: KBContext = Depends(get_kb),
 ):
-    """
-    Queue every unprocessed note in the current KB for ingestion.
-
-    Fetches all notes where ``processed=False`` (and not ``failed=True``)
-    and enqueues each one as an independent background task using the same
-    ``process_note`` pipeline as single-note ingestion.
-    """
+    """Queue notes in the current KB for ingestion (reads vault .md bodies)."""
+    require_ai()
     result = await db.execute(
         select(Note)
         .where(Note.kb_id == kb.kb_id)
-        .where(Note.processed == False)  # noqa: E712
-        .where(Note.failed == False)  # noqa: E712
+        .where(
+            (Note.processed == False) | (Note.failed == True)  # noqa: E712
+        )
     )
     notes = result.scalars().all()
 
     wf = kb.get_ingestion_workflow()
     for note in notes:
         note_data = NoteInput(
-            content=note.content,
+            content=note_body(note, kb),
             created_at=note.created_at.isoformat() if note.created_at else None,
             title=note.title,
         )
@@ -1229,12 +1804,20 @@ class CreateKBInput(BaseModel):
     """Request body for creating a new knowledge base."""
 
     name: str
+    vault_path: str | None = None
 
 
 class RenameKBInput(BaseModel):
     """Request body for renaming a knowledge base."""
 
     name: str
+
+
+class DeleteKBInput(BaseModel):
+    """Legacy optional flags — product path always wipes vault + indexes."""
+
+    delete_vault_files: bool = True
+    wipe_indexes: bool = True
 
 
 @app.get("/api/v1/kb")
@@ -1245,35 +1828,181 @@ async def list_knowledge_bases():
 
 @app.post("/api/v1/kb", status_code=201)
 async def create_knowledge_base(body: CreateKBInput):
-    """Create a new knowledge base.
+    """Create a new knowledge base with its own notes vault folder.
 
-    Provision separate Kuzu, Qdrant, and Typesense stores for the new KB.
-    The KB is immediately available for ingestion and retrieval via ``?kb=<name>``.
+    Does not re-run Setup — models / data dirs stay shared. Provision separate
+    Kuzu/Qdrant/Meili stores for the new KB.
     """
     if not body.name or not body.name.strip():
         raise HTTPException(
             status_code=400, detail="Knowledge base name must not be empty"
         )
-    ctx = kb_registry.create_kb(body.name.strip())
+    vault = (body.vault_path or "").strip()
+    if not vault:
+        raise HTTPException(
+            status_code=400,
+            detail="vault_path is required — choose where markdown notes for this KB are saved",
+        )
+    try:
+        ctx = kb_registry.create_kb(body.name.strip(), vault_path=vault)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.exception("Failed to create knowledge base '%s'", body.name)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create knowledge base: {exc}",
+        ) from exc
     return {
         "id": ctx.kb_id,
         "name": ctx.name,
+        "vault_path": ctx.vault_path,
         "message": f"Knowledge base '{ctx.name}' created. Use ?kb={ctx.name} to target it.",
     }
 
 
-@app.delete("/api/v1/kb/{kb_id}", status_code=204)
-async def delete_knowledge_base(kb_id: str):
-    """Delete a knowledge base and all its associated data.
+async def _purge_kb_sql_notes(db: AsyncSession, kb_id: str) -> int:
+    """Delete all SQLite notes and note_links for a KB. Returns note count."""
+    result = await db.execute(select(Note.id).where(Note.kb_id == kb_id))
+    ids = [row[0] for row in result.all()]
+    await db.execute(delete(NoteLink).where(NoteLink.kb_id == kb_id))
+    await db.execute(delete(Note).where(Note.kb_id == kb_id))
+    await db.commit()
+    return len(ids)
 
-    This permanently drops the Kuzu directory, Qdrant collections, and Typesense
-    collection for the specified KB. The default KB cannot be deleted.
+
+@app.post("/api/v1/kb/empty")
+async def empty_knowledge_base(
+    db: AsyncSession = Depends(get_db),
+    kb: KBContext = Depends(get_kb),
+):
+    """
+    Full wipe of the current KB while keeping the KB registry row.
+
+    Always deletes notes, vault contents, graph/search indexes, and Firefly admin.
+    """
+    vault_path = kb.vault_path or ""
+    try:
+        await firefly_service.destroy_kb_administration(kb)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("[empty-kb] Firefly destroy failed: %s", exc)
+
+    notes_removed = await _purge_kb_sql_notes(db, kb.kb_id)
+
+    try:
+        kb.graph.wipe_all_nodes()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("[empty-kb] Graph wipe failed: %s", exc)
+    try:
+        kb.qdrant.reset_all()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("[empty-kb] Qdrant reset failed: %s", exc)
+    try:
+        kb.typesense.reset_all()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("[empty-kb] Meili reset failed: %s", exc)
+
+    if vault_path:
+        try:
+            clear_vault_contents(vault_path)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("[empty-kb] Vault clear failed: %s", exc)
+            try:
+                ensure_vault(vault_path)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
+    return {
+        "status": "emptied",
+        "kb_id": kb.kb_id,
+        "name": kb.name,
+        "notes_removed": notes_removed,
+        "vault_path": vault_path,
+        "message": (
+            f"Emptied knowledge base '{kb.name}': notes, vault files, indexes, "
+            "and Firefly administration removed. The KB itself remains."
+        ),
+    }
+
+
+@app.post("/api/v1/kb/delete-non-default")
+async def delete_all_non_default_knowledge_bases(
+    db: AsyncSession = Depends(get_db),
+):
+    """Fully wipe and unregister every knowledge base except ``default``."""
+    kbs = kb_registry.list_kbs()
+    removed: list[dict] = []
+    errors: list[dict] = []
+    for entry in kbs:
+        kid = entry.get("id")
+        if not kid or kid == "default":
+            continue
+        try:
+            meta = kb_registry.get_metadata(kid)
+            ctx = kb_registry.get_kb(kid)
+            if ctx is not None:
+                try:
+                    await firefly_service.destroy_kb_administration(ctx)
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    logger.warning(
+                        "[delete-non-default] Firefly destroy failed for %s: %s",
+                        kid,
+                        exc,
+                    )
+            await _purge_kb_sql_notes(db, kid)
+            kb_registry.delete_kb(kid, delete_vault_files=True, wipe_indexes=True)
+            removed.append(
+                {
+                    "id": kid,
+                    "name": entry.get("name"),
+                    "vault_path": (meta or {}).get("vault_path"),
+                }
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            errors.append({"id": kid, "error": str(exc)})
+
+    return {
+        "removed": removed,
+        "errors": errors,
+        "removed_count": len(removed),
+        "message": f"Deleted {len(removed)} knowledge base(s). Default KB was kept.",
+    }
+
+
+@app.delete("/api/v1/kb/{kb_id}", status_code=204)
+async def delete_knowledge_base(
+    kb_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Permanently delete a non-default knowledge base.
+
+    Always destroys Firefly admin, SQLite notes, vault folder, and indexes.
     """
     if kb_id == "default":
         raise HTTPException(
             status_code=400, detail="The default knowledge base cannot be deleted"
         )
-    deleted = kb_registry.delete_kb(kb_id)
+    meta = kb_registry.get_metadata(kb_id)
+    if not meta:
+        raise HTTPException(
+            status_code=404, detail=f"Knowledge base '{kb_id}' not found"
+        )
+
+    ctx = kb_registry.get_kb(kb_id)
+    if ctx is not None:
+        try:
+            await firefly_service.destroy_kb_administration(ctx)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("[delete-kb] Firefly destroy failed: %s", exc)
+
+    await _purge_kb_sql_notes(db, kb_id)
+
+    deleted = kb_registry.delete_kb(
+        kb_id,
+        delete_vault_files=True,
+        wipe_indexes=True,
+    )
     if not deleted:
         raise HTTPException(
             status_code=404, detail=f"Knowledge base '{kb_id}' not found"
@@ -1294,4 +2023,8 @@ async def rename_knowledge_base(kb_id: str, body: RenameKBInput):
         raise HTTPException(
             status_code=404, detail=f"Knowledge base '{kb_id}' not found"
         )
+    try:
+        await firefly_service.sync_kb_group_title(kb_id, name)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("Firefly group title sync failed after KB rename: %s", exc)
     return {"id": kb_id, "name": name}

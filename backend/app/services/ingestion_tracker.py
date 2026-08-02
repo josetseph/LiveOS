@@ -48,6 +48,24 @@ class IngestionTrackerService:
         """Thread-safe enough read helper for worker threads."""
         return self._active_ingestion_count > 0
 
+    def get_status_snapshot(self) -> dict:
+        """Lightweight status for the global sidebar indicator."""
+        return {
+            "active_ingestions": self._active_ingestion_count,
+            "pending_community_nodes": len(self._pending_node_ids),
+            "community_recompute_running": self._community_recompute_running,
+            "community_recompute_needed": self._recompute_needed,
+            "community_idle_seconds": COMMUNITY_IDLE_SECONDS,
+            "last_ingestion_at": (
+                self.last_ingestion_time.isoformat()
+                if self.last_ingestion_time
+                else None
+            ),
+            "community_timer_armed": bool(
+                self._debounce_task and not self._debounce_task.done()
+            ),
+        }
+
     async def begin_ingestion(self) -> None:
         """
         Call at the START of every ingestion pipeline.
@@ -80,19 +98,29 @@ class IngestionTrackerService:
     async def end_ingestion(self, callback: Callable) -> None:
         """
         Call at the END of every ingestion pipeline (success or failure).
-        Decrements the active counter; when it reaches 0 starts the
-        {COMMUNITY_IDLE_SECONDS}s idle timer for community recompute.
+        Decrements the active counter; when it reaches 0 and community auto-detect
+        is enabled, starts the idle timer for Leiden recompute.
         """
+        from app.core.config import settings as _settings
+
         async with self._lock:
             self._active_ingestion_count = max(0, self._active_ingestion_count - 1)
             active = self._active_ingestion_count
         logger.info(f"[IngestionTracker] Ingestion ended — active: {active}")
-        if active == 0 and not self._community_recompute_running:
+        if (
+            active == 0
+            and not self._community_recompute_running
+            and _settings.COMMUNITY_DETECTION_ENABLED
+        ):
             logger.info(
                 f"[IngestionTracker] All ingestions complete — starting "
                 f"{COMMUNITY_IDLE_SECONDS}s idle timer for community recompute"
             )
             self.schedule_recompute(callback)
+        elif active == 0 and not _settings.COMMUNITY_DETECTION_ENABLED:
+            logger.debug(
+                "[IngestionTracker] Community auto-detect disabled — idle timer not started"
+            )
 
     async def queue_nodes_for_community_recompute(
         self, node_ids: list[str]

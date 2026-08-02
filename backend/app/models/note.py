@@ -1,6 +1,5 @@
-"""SQLAlchemy ORM model for note records."""
+"""SQLAlchemy ORM model for note metadata (body lives in vault .md files)."""
 
-# pylint: disable=wrong-import-order
 import uuid
 from datetime import datetime, timezone
 
@@ -9,15 +8,16 @@ from sqlalchemy import Boolean, Column, DateTime, String, Text
 
 
 class Note(Base):  # pylint: disable=too-few-public-methods
-    """Persisted note record with content, title, and processing-state flags."""
+    """Note metadata; markdown body is at vault_path/rel_path."""
 
     __tablename__ = "notes"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    content = Column(Text, nullable=False)
+    # Deprecated: kept nullable for migration; prefer vault file via rel_path
+    content = Column(Text, nullable=True, default="")
     title = Column(String, nullable=True)
+    rel_path = Column(String, nullable=True)  # relative to KB vault_path
     created_at = Column(DateTime(timezone=True), default=datetime.now(timezone.utc))
-    # Allow DB to handle updated_at triggers if configured, or app level
     updated_at = Column(
         DateTime(timezone=True),
         onupdate=datetime.now(timezone.utc),
@@ -28,4 +28,3 @@ class Note(Base):  # pylint: disable=too-few-public-methods
     processing_stage = Column(String, nullable=True)
     processing_model = Column(String, nullable=True)
     kb_id = Column(String, nullable=False, default="default", index=True)
-    # Could add user_id later

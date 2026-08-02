@@ -22,5 +22,24 @@ class NoteResponse(BaseModel):
 
 class CreateNoteInput(BaseModel):
     """Input schema for creating a new note."""
+    title: str | None = None
     content: str
     created_at: str | None = None
+    # Vault-relative folder to create the note in (e.g. "Life/Daily Log")
+    folder: str | None = None
+
+
+class MoveNoteInput(BaseModel):
+    """Move a note into a folder (or to vault root if empty)."""
+    folder: str = ""
+
+
+class MoveVaultFileInput(BaseModel):
+    """Move any vault file (note or attachment) to a new relative path."""
+    from_rel: str
+    to_rel: str
+
+
+class DeleteVaultFileInput(BaseModel):
+    """Delete a vault attachment and strip markdown links to it."""
+    rel_path: str

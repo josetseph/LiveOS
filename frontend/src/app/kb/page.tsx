@@ -16,6 +16,7 @@ import { api } from "@/lib/api";
 import { useKB } from "@/lib/kb-context";
 import { cn } from "@/lib/utils";
 import { ShaderBackground } from "@/components/shader-background";
+import { getDesktopBridge, pickDesktopDirectory } from "@/lib/desktop";
 import type { KnowledgeBase } from "@/lib/types";
 
 export default function KBPage() {
@@ -25,11 +26,13 @@ export default function KBPage() {
     const [isCreating, setIsCreating] = useState(false);
     const [showForm, setShowForm] = useState(false);
     const [newName, setNewName] = useState("");
+    const [newVaultPath, setNewVaultPath] = useState("");
     const [deletingId, setDeletingId] = useState<string | null>(null);
     const [renamingId, setRenamingId] = useState<string | null>(null);
     const [renameValue, setRenameValue] = useState("");
     const [isRenaming, setIsRenaming] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const canBrowse = Boolean(getDesktopBridge()?.pickDirectory);
 
     const fetchKBs = useCallback(async () => {
         try {
@@ -46,21 +49,46 @@ export default function KBPage() {
         fetchKBs();
     }, [fetchKBs]);
 
+    async function browseVaultFolder() {
+        const dir = await pickDesktopDirectory({
+            title: "Choose notes vault folder for this knowledge base",
+            defaultPath: newVaultPath || undefined,
+        });
+        if (dir) setNewVaultPath(dir);
+    }
+
     async function handleCreate(e: React.FormEvent) {
         e.preventDefault();
         const name = newName.trim();
+        const vault = newVaultPath.trim();
         if (!name) return;
+        if (!vault) {
+            setError(
+                "Choose a notes vault folder — where markdown files for this KB will be saved.",
+            );
+            return;
+        }
         setIsCreating(true);
         setError(null);
         try {
-            await api.createKB(name);
+            await api.createKB(name, vault);
             setNewName("");
+            setNewVaultPath("");
             setShowForm(false);
             await fetchKBs();
         } catch (err: unknown) {
-            const msg =
-                err instanceof Error ? err.message : "Failed to create knowledge base";
+            let msg = "Failed to create knowledge base";
+            if (err && typeof err === "object" && "response" in err) {
+                const detail = (
+                    err as { response?: { data?: { detail?: string } } }
+                ).response?.data?.detail;
+                if (detail) msg = detail;
+            } else if (err instanceof Error && err.message) {
+                msg = err.message;
+            }
             setError(msg);
+            // Create may have partially succeeded — refresh so the list matches disk/DB
+            await fetchKBs();
         } finally {
             setIsCreating(false);
         }
@@ -94,23 +122,89 @@ export default function KBPage() {
 
     async function handleDelete(kb: KnowledgeBase) {
         if (
-            !confirm(
-                `Delete knowledge base "${kb.name}"?\n\nThis permanently removes all graph data, vector embeddings, and search indexes for this KB. Notes in Postgres are NOT deleted.`
+            !window.confirm(
+                `Permanently delete knowledge base "${kb.name}"?\n\n` +
+                    `This always removes:\n` +
+                    `• All notes and vault files\n` +
+                    `  ${kb.vault_path || "(no path)"}\n` +
+                    `• Graph, vector, and search indexes\n` +
+                    `• Firefly finance administration for this KB\n\n` +
+                    `This cannot be undone.`,
             )
-        )
+        ) {
             return;
+        }
 
         setDeletingId(kb.id);
         setError(null);
         try {
             await api.deleteKB(kb.id);
-            // If we were on this KB, switch back to default.
             if (currentKB === kb.name || currentKB === kb.slug) {
                 setCurrentKB("default");
             }
             await fetchKBs();
         } catch {
             setError(`Failed to delete "${kb.name}".`);
+        } finally {
+            setDeletingId(null);
+        }
+    }
+
+    async function handleEmpty(kb: KnowledgeBase) {
+        if (
+            !window.confirm(
+                `Empty knowledge base "${kb.name}"?\n\n` +
+                    `This always removes all notes, vault files, indexes, and Firefly ` +
+                    `data for this KB. The knowledge base itself stays.\n\n` +
+                    `Vault: ${kb.vault_path || "(no path)"}`,
+            )
+        ) {
+            return;
+        }
+        setDeletingId(kb.id);
+        setError(null);
+        try {
+            const slug =
+                kb.id === "default"
+                    ? "default"
+                    : (kb.slug ?? kb.name.toLowerCase().replace(/\s+/g, "_"));
+            await api.emptyKB(slug);
+            await fetchKBs();
+        } catch {
+            setError(`Failed to empty "${kb.name}".`);
+        } finally {
+            setDeletingId(null);
+        }
+    }
+
+    async function handleDeleteAllNonDefault() {
+        const extras = kbs.filter((k) => k.id !== "default");
+        if (extras.length === 0) {
+            setError("There are no other knowledge bases to delete.");
+            return;
+        }
+        if (
+            !window.confirm(
+                `Delete all ${extras.length} non-default knowledge base(s)?\n\n` +
+                    `Each one will lose notes, vault files, indexes, and Firefly data.\n` +
+                    `The default knowledge base is kept (use Empty on it separately).`,
+            )
+        ) {
+            return;
+        }
+        setDeletingId("__all__");
+        setError(null);
+        try {
+            const result = await api.deleteAllNonDefaultKBs();
+            if (currentKB !== "default") setCurrentKB("default");
+            await fetchKBs();
+            if (result.errors?.length) {
+                setError(
+                    `Deleted ${result.removed_count}; ${result.errors.length} failed.`,
+                );
+            }
+        } catch {
+            setError("Failed to delete non-default knowledge bases.");
         } finally {
             setDeletingId(null);
         }
@@ -145,8 +239,9 @@ export default function KBPage() {
                         </h1>
                     </div>
                     <p className="text-white/50 text-sm">
-                        Each KB has its own isolated graph, vector store, and search index.
-                        Switch between them to scope chat, notes, and graph exploration.
+                        Each knowledge base has its own notes vault folder, graph, and search
+                        index. Models and app data from Setup are shared — you do not re-run
+                        Setup when adding a vault.
                     </p>
                 </motion.div>
 
@@ -175,38 +270,75 @@ export default function KBPage() {
                             animate={{ opacity: 1, y: 0 }}
                             exit={{ opacity: 0, y: -8 }}
                             onSubmit={handleCreate}
-                            className="mb-6 flex gap-3"
+                            className="mb-6 space-y-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4"
                         >
-                            <input
-                                autoFocus
-                                type="text"
-                                placeholder="Knowledge base name (e.g. Work, Research)"
-                                value={newName}
-                                onChange={(e) => setNewName(e.target.value)}
-                                className="flex-1 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white placeholder-white/30 outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
-                            />
-                            <button
-                                type="submit"
-                                disabled={isCreating || !newName.trim()}
-                                className="flex items-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-purple-500 disabled:opacity-50"
-                            >
-                                {isCreating ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : (
-                                    <Check className="h-4 w-4" />
-                                )}
-                                Create
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setShowForm(false);
-                                    setNewName("");
-                                }}
-                                className="rounded-xl border border-white/10 px-3 py-2.5 text-white/50 transition hover:text-white"
-                            >
-                                <X className="h-4 w-4" />
-                            </button>
+                            <div>
+                                <label className="text-xs text-white/45">Name</label>
+                                <input
+                                    autoFocus
+                                    type="text"
+                                    placeholder="e.g. Work, Personal, Research"
+                                    value={newName}
+                                    onChange={(e) => setNewName(e.target.value)}
+                                    className="mt-1.5 w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white placeholder-white/30 outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
+                                />
+                            </div>
+                            <div>
+                                <label className="text-xs text-white/45">
+                                    Notes vault folder
+                                </label>
+                                <p className="mt-1 text-xs text-white/35">
+                                    Where markdown notes for this KB are saved. Use a different
+                                    folder from your other vaults (e.g. a separate OneDrive or
+                                    Documents path).
+                                </p>
+                                <div className="mt-1.5 flex gap-2">
+                                    <input
+                                        type="text"
+                                        required
+                                        placeholder="/path/to/this-vault/notes"
+                                        value={newVaultPath}
+                                        onChange={(e) => setNewVaultPath(e.target.value)}
+                                        className="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 font-mono text-sm text-white placeholder-white/30 outline-none focus:border-purple-500/50"
+                                    />
+                                    {canBrowse && (
+                                        <button
+                                            type="button"
+                                            onClick={() => void browseVaultFolder()}
+                                            className="shrink-0 rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm text-white/70 transition hover:border-white/25 hover:text-white"
+                                        >
+                                            Browse…
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="flex justify-end gap-2 pt-1">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setShowForm(false);
+                                        setNewName("");
+                                        setNewVaultPath("");
+                                    }}
+                                    className="rounded-xl border border-white/10 px-3 py-2.5 text-sm text-white/50 transition hover:text-white"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={
+                                        isCreating || !newName.trim() || !newVaultPath.trim()
+                                    }
+                                    className="flex items-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-purple-500 disabled:opacity-50"
+                                >
+                                    {isCreating ? (
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                        <Check className="h-4 w-4" />
+                                    )}
+                                    Create vault
+                                </button>
+                            </div>
                         </motion.form>
                     )}
                 </AnimatePresence>
@@ -318,6 +450,11 @@ export default function KBPage() {
                                                     })}
                                                 </p>
                                             )}
+                                            {kb.vault_path && (
+                                                <p className="truncate font-mono text-[10px] text-white/25 mt-0.5" title={kb.vault_path}>
+                                                    {kb.vault_path}
+                                                </p>
+                                            )}
                                             {isDefault && (
                                                 <p className="text-xs text-white/30 mt-0.5">
                                                     Original knowledge base — always available
@@ -335,6 +472,18 @@ export default function KBPage() {
                                                     Switch
                                                 </button>
                                             )}
+                                            <button
+                                                onClick={() => void handleEmpty(kb)}
+                                                disabled={isDeleting || deletingId === "__all__"}
+                                                className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-2 py-1.5 text-xs text-amber-300/80 transition hover:border-amber-500/40 hover:bg-amber-500/10 disabled:opacity-40"
+                                                title={`Empty "${kb.name}" (keep KB)`}
+                                            >
+                                                {isDeleting ? (
+                                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                ) : (
+                                                    "Empty"
+                                                )}
+                                            </button>
                                             {!isDefault && renamingId !== kb.id && (
                                                 <button
                                                     onClick={() => startRename(kb)}
@@ -347,7 +496,7 @@ export default function KBPage() {
                                             {!isDefault && (
                                                 <button
                                                     onClick={() => handleDelete(kb)}
-                                                    disabled={isDeleting}
+                                                    disabled={isDeleting || deletingId === "__all__"}
                                                     className="rounded-lg border border-red-500/20 bg-red-500/5 px-2 py-1.5 text-xs text-red-400/70 transition hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-40"
                                                     title={`Delete "${kb.name}"`}
                                                 >
@@ -377,6 +526,22 @@ export default function KBPage() {
                         <Plus className="h-4 w-4" />
                         New knowledge base
                     </motion.button>
+                )}
+
+                {kbs.some((k) => k.id !== "default") && (
+                    <button
+                        type="button"
+                        disabled={deletingId === "__all__"}
+                        onClick={() => void handleDeleteAllNonDefault()}
+                        className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl border border-red-500/20 bg-red-500/5 py-3 text-sm text-red-300/80 transition hover:border-red-500/40 hover:bg-red-500/10 disabled:opacity-50"
+                    >
+                        {deletingId === "__all__" ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                            <Trash2 className="h-4 w-4" />
+                        )}
+                        Delete all non-default knowledge bases
+                    </button>
                 )}
 
                 {/* Usage hint */}
