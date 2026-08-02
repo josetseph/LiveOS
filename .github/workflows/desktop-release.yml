@@ -50,7 +50,8 @@ jobs:
             desktop/dist/*.zip
 
   build-mac-x64:
-    runs-on: macos-13
+    # macos-13 is retired; macos-15-intel is GitHub's remaining x64 macOS runner.
+    runs-on: macos-15-intel
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4

@@ -3,6 +3,7 @@
   "productName": "Orb",
   "version": "0.1.0",
   "private": true,
+  "author": "Joseph Etse <projects@josetseph.com>",
   "description": "Orb desktop — supervisor for vault notes, search engines, and API",
   "main": "main.js",
   "scripts": {
@@ -50,22 +51,30 @@
       {
         "from": "resources/backend",
         "to": "backend",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "resources/frontend",
         "to": "frontend",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "resources/node",
         "to": "node",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "resources/firefly",
         "to": "firefly",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "asar": true,
@@ -82,11 +91,17 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64", "x64"]
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["arm64", "x64"]
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ],
       "hardenedRuntime": true,
@@ -118,7 +133,7 @@
   },
   "devDependencies": {
     "@electron/notarize": "^2.5.0",
-    "electron": "^37.10.3",
+    "electron": "43.2.0",
     "electron-builder": "^26.0.12"
   }
 }
