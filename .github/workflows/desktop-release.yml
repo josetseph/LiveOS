@@ -9,7 +9,7 @@ on:
 env:
   ORB_PYTHON_RELEASE: "20250317"
   ORB_PYTHON_VERSION: "3.12.9"
-  ORB_NODE_VERSION: "22.14.0"
+  ORB_NODE_VERSION: "24.4.1"
 
 jobs:
   build-mac:
@@ -20,7 +20,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
@@ -57,7 +57,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
@@ -94,7 +94,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
