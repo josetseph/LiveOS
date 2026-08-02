@@ -1,8 +1,8 @@
 <div align="center">
 
-  <img src="desktop/assets/logo.png" width="128" alt="LifeOS logo" />
+  <img src="desktop/assets/logo.png" width="128" alt="Orb logo" />
 
-  <h1>LifeOS</h1>
+  <h1>Orb</h1>
 
   <p><b>Your knowledge, on your machine.</b></p>
 
@@ -12,14 +12,14 @@
   </p>
 
 <p>
-  <a href="https://github.com/josetseph/LiveOS/actions/workflows/desktop-release.yml"><img src="https://img.shields.io/github/actions/workflow/status/josetseph/LiveOS/desktop-release.yml?branch=main&label=desktop%20build" alt="Desktop build status" /></a>
-  <a href="https://github.com/josetseph/LiveOS/blob/main/LICENSE"><img src="https://img.shields.io/github/license/josetseph/LiveOS?color=blue" alt="License: MIT" /></a>
-  <a href="https://github.com/josetseph/LiveOS/releases/latest"><img src="https://img.shields.io/github/v/release/josetseph/LiveOS?label=latest&color=red" alt="Latest release" /></a>
-  <a href="https://github.com/josetseph/LiveOS/stargazers"><img src="https://img.shields.io/github/stars/josetseph/LiveOS?color=yellow" alt="GitHub stars" /></a>
+  <a href="https://github.com/josetseph/Orb/actions/workflows/desktop-release.yml"><img src="https://img.shields.io/github/actions/workflow/status/josetseph/Orb/desktop-release.yml?branch=main&label=desktop%20build" alt="Desktop build status" /></a>
+  <a href="https://github.com/josetseph/Orb/blob/main/LICENSE"><img src="https://img.shields.io/github/license/josetseph/Orb?color=blue" alt="License: MIT" /></a>
+  <a href="https://github.com/josetseph/Orb/releases/latest"><img src="https://img.shields.io/github/v/release/josetseph/Orb?label=latest&color=red" alt="Latest release" /></a>
+  <a href="https://github.com/josetseph/Orb/stargazers"><img src="https://img.shields.io/github/stars/josetseph/Orb?color=yellow" alt="GitHub stars" /></a>
 </p>
 
   <p>
-    <a href="https://github.com/josetseph/LiveOS/releases/latest"><b>Download</b></a>
+    <a href="https://github.com/josetseph/Orb/releases/latest"><b>Download</b></a>
     &nbsp;·&nbsp;
     <a href="#installation">Install guide</a>
     &nbsp;·&nbsp;
@@ -28,16 +28,16 @@
     <a href="#privacy">Privacy</a>
   </p>
 
-  <img src="Platform%20Images/home_view.png" width="720" alt="LifeOS home" />
+  <img src="Platform%20Images/home_view.png" width="720" alt="Orb home" />
 
 </div>
 
 ---
 
-Write notes the way you already do — text, voice, photos, PDFs. LifeOS extracts entities and relationships into a knowledge graph, indexes them for search, and answers multi-hop questions in chat. Everything runs locally through the desktop app: your vault, your models, your machine.
+Write notes the way you already do — text, voice, photos, PDFs. Orb extracts entities and relationships into a knowledge graph, indexes them for search, and answers multi-hop questions in chat. Everything runs locally through the desktop app: your vault, your models, your machine.
 
 > [!NOTE]
-> End users install the **LifeOS** desktop app. You do not need Docker, Ollama, or a separate model server. Local chat, embedding, reranking, Florence, Whisper, and Marlin all load **in-process** in the API.
+> End users install the **Orb** desktop app. You do not need Docker, Ollama, or a separate model server. Local chat, embedding, reranking, Florence, Whisper, and Marlin all load **in-process** in the API.
 
 ---
 
@@ -52,7 +52,7 @@ Write notes the way you already do — text, voice, photos, PDFs. LifeOS extract
 
 ### Multimedia ingest
 
-On save, LifeOS enriches the note before graph indexing:
+On save, Orb enriches the note before graph indexing:
 
 - **PDF** — native text plus Florence on embedded images and sparse page renders
 - **Images** — Florence captions / OCR-style descriptions
@@ -117,11 +117,11 @@ On save, LifeOS enriches the note before graph indexing:
 
 <div align="center">
 
-<a href="https://github.com/josetseph/LiveOS/releases/latest"><img src="https://img.shields.io/badge/download-LifeOS-2EA043?style=flat&logo=apple&logoColor=white" alt="Download LifeOS" /></a>
+<a href="https://github.com/josetseph/Orb/releases/latest"><img src="https://img.shields.io/badge/download-Orb-2EA043?style=flat&logo=apple&logoColor=white" alt="Download Orb" /></a>
 
 </div>
 
-Installers ship as macOS `.dmg` and Windows `.exe` from [GitHub Releases](https://github.com/josetseph/LiveOS/releases) (tags `desktop-v*`).
+Installers ship as macOS `.dmg` and Windows `.exe` from [GitHub Releases](https://github.com/josetseph/Orb/releases) (tags `desktop-v*`).
 
 ---
 
@@ -129,17 +129,17 @@ Installers ship as macOS `.dmg` and Windows `.exe` from [GitHub Releases](https:
 
 ### macOS
 
-1. Download the latest `.dmg` from [Releases](https://github.com/josetseph/LiveOS/releases/latest)
-2. Open it and drag **LifeOS** into Applications
-3. Launch LifeOS
+1. Download the latest `.dmg` from [Releases](https://github.com/josetseph/Orb/releases/latest)
+2. Open it and drag **Orb** into Applications
+3. Launch Orb
 4. Complete the first-run wizard — pick a **data directory** and a **models directory**
 
 On first launch the app downloads Qdrant and Meilisearch into your data dir, and you can pull GGUF models from Setup.
 
 ### Windows
 
-1. Download the latest `.exe` installer from [Releases](https://github.com/josetseph/LiveOS/releases/latest)
-2. Run the installer and open LifeOS
+1. Download the latest `.exe` installer from [Releases](https://github.com/josetseph/Orb/releases/latest)
+2. Run the installer and open Orb
 3. Complete the first-run wizard (data dir + models dir)
 
 > [!TIP]
@@ -149,7 +149,7 @@ On first launch the app downloads Qdrant and Meilisearch into your data dir, and
 
 ## Build from source
 
-Prefer to run or package LifeOS yourself? Use the Electron shell under [`desktop/`](desktop/).
+Prefer to run or package Orb yourself? Use the Electron shell under [`desktop/`](desktop/).
 
 ### Prerequisites
 
@@ -161,8 +161,8 @@ Prefer to run or package LifeOS yourself? Use the Electron shell under [`desktop
 ### Develop
 
 ```bash
-git clone https://github.com/josetseph/LiveOS.git
-cd LiveOS/desktop
+git clone https://github.com/josetseph/Orb.git
+cd Orb/desktop
 npm install
 npm start
 ```
@@ -191,13 +191,13 @@ Full packaging notes: [`desktop/PACKAGING.md`](desktop/PACKAGING.md).
 docker compose up -d
 ```
 
-Or from the desktop shell: `LIVEOS_USE_DOCKER=1 npm start`.
+Or from the desktop shell: `ORB_USE_DOCKER=1 npm start`.
 
 ---
 
 ## Privacy
 
-LifeOS is local-first. Notes, vault files, vectors, and models live under the directories you chose (or Application Support / `%APPDATA%\LifeOS`). Nothing is uploaded unless you explicitly configure a cloud LLM provider.
+Orb is local-first. Notes, vault files, vectors, and models live under the directories you chose (or Application Support / `%APPDATA%\Orb`). Nothing is uploaded unless you explicitly configure a cloud LLM provider.
 
 ---
 
@@ -209,4 +209,4 @@ Retrieval and HotPotQA evaluation reports live under [`Results/`](Results/). The
 
 ## License
 
-LifeOS is released under the [MIT License](LICENSE).
+Orb is released under the [MIT License](LICENSE).

@@ -195,7 +195,7 @@ class MultimodalRuntime:
 
     def _patch_florence_remote_code(self, model_path: str) -> None:
         patch_marker = (
-            "# LiveOS compatibility: transformers 5 may omit forced_bos_token_id"
+            "# Orb compatibility: transformers 5 may omit forced_bos_token_id"
         )
         insertion = (
             f"        {patch_marker}\n"
@@ -227,7 +227,7 @@ class MultimodalRuntime:
         # transformers 5 that disables resize (wrong HxW → empty captions). When
         # do_resize=True is passed without size/resample, transformers 5 raises.
         # Patch the image_processor call to always supply size + resample.
-        resize_marker = "# LiveOS compatibility: pass size/resample with do_resize"
+        resize_marker = "# Orb compatibility: pass size/resample with do_resize"
         proc_paths = [Path(model_path) / "processing_florence2.py"]
         if cache_root.exists():
             proc_paths.extend(cache_root.glob("**/processing_florence2.py"))
@@ -311,7 +311,7 @@ class MultimodalRuntime:
         """
         from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-        if getattr(PreTrainedTokenizerBase, "_liveos_addl_special_patched", False):
+        if getattr(PreTrainedTokenizerBase, "_orb_addl_special_patched", False):
             return
 
         def _get(self):  # noqa: ANN001
@@ -321,7 +321,7 @@ class MultimodalRuntime:
             object.__setattr__(self, "_extra_special_tokens", list(value or []))
 
         PreTrainedTokenizerBase.additional_special_tokens = property(_get, _set)
-        PreTrainedTokenizerBase._liveos_addl_special_patched = True
+        PreTrainedTokenizerBase._orb_addl_special_patched = True
 
     def _load_florence(self) -> None:
         if self._florence_model is not None:

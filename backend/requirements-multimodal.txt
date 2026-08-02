@@ -1,6 +1,6 @@
 # In-process Florence / Whisper / Marlin (API process)
 # Marlin requires transformers>=5.7 (Qwen3.5) + qwen-vl-utils.
-# Florence/Whisper share this stack (LiveOS Florence patches cover transformers 5.x).
+# Florence/Whisper share this stack (Orb Florence patches cover transformers 5.x).
 # Installed by Setup/supervisor via ensure_multimodal_services(install_deps=True)
 torch
 transformers>=5.7.0

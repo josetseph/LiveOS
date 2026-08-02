@@ -1,7 +1,7 @@
 """Watch vault folders for external .md changes and refresh note metadata.
 
 Does NOT auto-ingest. Marks previously ingested notes as stale so the user can
-re-ingest manually. Ignores brief self-writes from LifeOS saves.
+re-ingest manually. Ignores brief self-writes from Orb saves.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def _sync_vault_file(kb_id: str, vault: Path, rel: str, event: str) -> None:
                 select(Note).where(Note.kb_id == kb_id, Note.rel_path == rel)
             ).scalar_one_or_none()
             if row:
-                row.processing_stage = "External delete detected — review in LifeOS"
+                row.processing_stage = "External delete detected — review in Orb"
                 session.commit()
             return
 

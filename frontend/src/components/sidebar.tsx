@@ -32,7 +32,7 @@ export function Sidebar() {
         <div className="mb-8 flex h-12 w-12 items-center justify-center rounded-xl overflow-hidden">
           <Image
             src="/logo.png"
-            alt="LifeOS"
+            alt="Orb"
             width={48}
             height={48}
             loading="eager"

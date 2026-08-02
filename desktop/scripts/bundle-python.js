@@ -13,8 +13,8 @@ const backendSrc = path.join(repoRoot, "backend");
 const outBackend = path.join(__dirname, "..", "resources", "backend");
 const tmpDir = path.join(__dirname, "..", "resources", ".tmp");
 
-const PYTHON_RELEASE = process.env.LIVEOS_PYTHON_RELEASE || "20250317";
-const PYTHON_VERSION = process.env.LIVEOS_PYTHON_VERSION || "3.12.9";
+const PYTHON_RELEASE = process.env.ORB_PYTHON_RELEASE || "20250317";
+const PYTHON_VERSION = process.env.ORB_PYTHON_VERSION || "3.12.9";
 
 function pythonAsset() {
   const tag = `${PYTHON_VERSION}+${PYTHON_RELEASE}`;

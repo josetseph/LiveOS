@@ -27,7 +27,7 @@
 
 ## 1. Executive Summary
 
-The full 990-note HotPotQA dataset was ingested into LiveOS across approximately 51.3 hours of wall-clock time, using `gemma3:4b` as the extraction backbone. The run completed with a **98.82% success rate** (1,006 of 1,018 attempts), producing a rich knowledge graph of **9,024 nodes** and **10,499 relationships**. The pipeline extracted **4,941 entities** and **2,282 concepts** total, averaging ~4.88 entities per note.
+The full 990-note HotPotQA dataset was ingested into Orb across approximately 51.3 hours of wall-clock time, using `gemma3:4b` as the extraction backbone. The run completed with a **98.82% success rate** (1,006 of 1,018 attempts), producing a rich knowledge graph of **9,024 nodes** and **10,499 relationships**. The pipeline extracted **4,941 entities** and **2,282 concepts** total, averaging ~4.88 entities per note.
 
 The most significant finding is the dominant cost center: **entity summarization** consumed 65% of total pipeline time per note on average (~109s/note), while LLM extraction itself took only ~39s/note. The alias detection system performed 9,122 entity lookups across the corpus, ultimately creating **65 IS_SAME_AS** coreference links with 607 LLM calls powering the final disambiguation judgments.
 
@@ -572,4 +572,4 @@ Switching extraction backends (Ollama → LM Studio/MLX) affects only the **23% 
 
 ---
 
-*Report generated: 2026-02-27 | LiveOS Research Project | Model: gemma3:4b | Dataset: HotPotQA (990 notes)*
+*Report generated: 2026-02-27 | Orb Research Project | Model: gemma3:4b | Dataset: HotPotQA (990 notes)*

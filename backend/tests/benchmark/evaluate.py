@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Evaluate LiveOS retrieval and answer quality against benchmark datasets.
+Evaluate Orb retrieval and answer quality against benchmark datasets.
 
 Core metrics:
 - Exact Match (EM): strict string match with ground truth
@@ -101,8 +101,8 @@ def compute_answer_f1(predicted: str, ground_truth: str) -> float:
 
 
 def extract_answer_from_response(answer: str) -> str:
-    """Extract the main answer from LiveOS response (first line before reasoning)."""
-    # LiveOS returns: "Answer\n\n**Reasoning:**\n..."
+    """Extract the main answer from Orb response (first line before reasoning)."""
+    # Orb returns: "Answer\n\n**Reasoning:**\n..."
     # We want just the first line(s) before reasoning starts
     lines = answer.split("\n")
     answer_lines = []
@@ -130,7 +130,7 @@ def fuzzy_match(
 
     Args:
         expected: Expected answer
-        actual: Actual answer from LiveOS
+        actual: Actual answer from Orb
         threshold: Jaccard similarity threshold (default 0.6)
         extract_answer: If True (default), extract just first line. If False, use full answer.
 
@@ -240,8 +240,8 @@ async def fetch_note_title_map(base_url: str) -> dict[str, str]:
             return {}
 
 
-async def query_liveos(question: str, base_url: str = "http://localhost:8700") -> dict:
-    """Send a question to LiveOS chat endpoint."""
+async def query_orb(question: str, base_url: str = "http://localhost:8700") -> dict:
+    """Send a question to Orb chat endpoint."""
     async with httpx.AsyncClient(timeout=1800.0) as client:
         try:
             response = await client.post(
@@ -310,9 +310,9 @@ async def evaluate_single(
     expected_answer = test_case["answer"]
     expected_notes = test_case.get("required_notes", test_case.get("notes", []))
 
-    # Query LiveOS
+    # Query Orb
     start_time = time.perf_counter()
-    response = await query_liveos(question, base_url)
+    response = await query_orb(question, base_url)
     total_time = (time.perf_counter() - start_time) * 1000
 
     result = EvaluationResult(
@@ -533,7 +533,7 @@ def print_report(metrics: dict, results: list[EvaluationResult]):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate LiveOS retrieval and answer quality"
+        description="Evaluate Orb retrieval and answer quality"
     )
     parser.add_argument(
         "--dataset",
@@ -548,7 +548,7 @@ def main():
         "--base-url",
         type=str,
         default="http://localhost:8000",
-        help="LiveOS API base URL",
+        help="Orb API base URL",
     )
     parser.add_argument(
         "--verbose",

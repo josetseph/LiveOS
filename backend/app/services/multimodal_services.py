@@ -19,7 +19,7 @@ logger = get_logger("MultimodalServices")
 _MULTIMODAL_PIP = [
     "torch",
     # Marlin requires transformers>=5.7 (Qwen3.5 backbone). Florence/Whisper
-    # also run on 5.x with LiveOS compatibility patches.
+    # also run on 5.x with Orb compatibility patches.
     "transformers>=5.7.0",
     "accelerate>=1.12.0",
     "einops>=0.8.1",

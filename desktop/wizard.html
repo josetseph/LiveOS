@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>LifeOS Setup</title>
+    <title>Orb Setup</title>
     <style>
       * { box-sizing: border-box; }
       body {
@@ -65,13 +65,13 @@
   <body>
     <div class="brand-row">
       <img src="assets/logo.png" alt="" />
-      <h1>Welcome to LifeOS</h1>
+      <h1>Welcome to Orb</h1>
     </div>
     <p class="sub">Choose your notes folder, data/models locations, then pick an AI path (or skip).</p>
 
     <div class="row">
       <label>Notes vault folder (markdown notes — required for Notes)</label>
-      <input id="vaultPath" type="text" placeholder="e.g. OneDrive/KB or Documents/LifeOS Vault" />
+      <input id="vaultPath" type="text" placeholder="e.g. OneDrive/KB or Documents/Orb Vault" />
       <div class="btn-row">
         <button type="button" class="secondary" data-pick="vaultPath" data-pick-title="Choose notes vault folder">Browse…</button>
       </div>
@@ -120,17 +120,17 @@
 
       function defaultData() {
         if (process.platform === "darwin")
-          return path.join(os.homedir(), "Library", "Application Support", "LifeOS", "data");
+          return path.join(os.homedir(), "Library", "Application Support", "Orb", "data");
         if (process.platform === "win32")
-          return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "LifeOS", "data");
-        return path.join(os.homedir(), ".local", "share", "LifeOS", "data");
+          return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Orb", "data");
+        return path.join(os.homedir(), ".local", "share", "Orb", "data");
       }
       function defaultModels() {
         if (process.platform === "darwin")
-          return path.join(os.homedir(), "Library", "Application Support", "LifeOS", "models");
+          return path.join(os.homedir(), "Library", "Application Support", "Orb", "models");
         if (process.platform === "win32")
-          return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "LifeOS", "models");
-        return path.join(os.homedir(), ".local", "share", "LifeOS", "models");
+          return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Orb", "models");
+        return path.join(os.homedir(), ".local", "share", "Orb", "models");
       }
 
       (async () => {

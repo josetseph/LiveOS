@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-prepare_dataset.py — Ingest benchmark notes into LiveOS via the API.
+prepare_dataset.py — Ingest benchmark notes into Orb via the API.
 
 Reads notes from a benchmark manifest's notes_dir and POSTs each one to
-the LiveOS create+ingest endpoints. Tracks progress so runs can be resumed.
+the Orb create+ingest endpoints. Tracks progress so runs can be resumed.
 
 Usage:
     # Ingest all HotpotQA notes (990 notes, ~8h on local hardware)
@@ -445,7 +445,7 @@ async def prepare(
 
 def main() -> None:
     global API_BASE  # must precede any use of API_BASE in this scope
-    parser = argparse.ArgumentParser(description="Ingest benchmark notes into LiveOS")
+    parser = argparse.ArgumentParser(description="Ingest benchmark notes into Orb")
     parser.add_argument(
         "--dataset",
         choices=["hotpotqa", "musique"],

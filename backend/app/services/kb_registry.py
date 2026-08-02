@@ -110,7 +110,7 @@ class KBContext:
 
 
 def _db_path() -> Path:
-    return resolve_data_dir() / "liveos.db"
+    return resolve_data_dir() / "orb.db"
 
 
 def _connect() -> sqlite3.Connection:

@@ -11,7 +11,7 @@ const {
 } = require("../firefly-runtime");
 
 async function main() {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "lifeos-firefly-seed-"));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orb-firefly-seed-"));
   const seedRoot = path.join(__dirname, "..", "resources", "firefly");
   try {
     console.log(`Preparing Firefly seed from ${FIREFLY_VERSION}…`);

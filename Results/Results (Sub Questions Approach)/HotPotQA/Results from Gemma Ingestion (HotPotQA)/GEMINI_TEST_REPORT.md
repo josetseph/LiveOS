@@ -1,5 +1,5 @@
 # Gemini 3 Flash Preview — HotPotQA Benchmark Evaluation Report
-## LiveOS Knowledge Graph System — Retrieval & QA Pipeline
+## Orb Knowledge Graph System — Retrieval & QA Pipeline
 
 **Date:** February 27, 2026  
 **Model:** `gemini-3-flash-preview` via Google Gemini native SDK  
@@ -35,7 +35,7 @@
 
 ## 1. Executive Summary
 
-The LiveOS system was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemini-3-flash-preview` as the reasoning and synthesis model. The system's five-stage pipeline (decompose → retrieve → verify → synthesize → respond) ran entirely locally except for Gemini API calls.
+The Orb system was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemini-3-flash-preview` as the reasoning and synthesis model. The system's five-stage pipeline (decompose → retrieve → verify → synthesize → respond) ran entirely locally except for Gemini API calls.
 
 | Metric | Value |
 |---|---|
@@ -815,7 +815,7 @@ The combination of zero pipeline errors, zero format warnings, and 100% valid te
 | State-of-art large model (no RAG) | ~70–75% |
 | State-of-art with retrieval (large model) | ~75–80% |
 
-The LiveOS system with Gemini 3 Flash surpasses the typical RAG baseline and approaches state-of-art large model performance, which is remarkable given the 990-document corpus size and local embedding pipeline.
+The Orb system with Gemini 3 Flash surpasses the typical RAG baseline and approaches state-of-art large model performance, which is remarkable given the 990-document corpus size and local embedding pipeline.
 
 ---
 

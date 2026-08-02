@@ -8,8 +8,8 @@ const { nativeArch } = require("./download-binaries");
 const { PORTS, localhost } = require("./ports");
 const { getRepoRoot, getResourcesRoot } = require("./paths");
 
-const FIREFLY_VERSION = process.env.LIVEOS_FIREFLY_VERSION || "v6.6.6";
-const PHP_BIN_VERSION = process.env.LIVEOS_PHP_BIN_VERSION || "1.2.0";
+const FIREFLY_VERSION = process.env.ORB_FIREFLY_VERSION || "v6.6.6";
+const PHP_BIN_VERSION = process.env.ORB_PHP_BIN_VERSION || "1.2.0";
 const PHP_RUNTIME_ID = `nativephp:${PHP_BIN_VERSION}:php-8.5`;
 
 function fireflyUrl() {
@@ -38,7 +38,7 @@ function phpBinaryPath(dataDir) {
 }
 
 function phpRuntimeMarker(rootDir) {
-  return path.join(rootDir, ".liveos-php-runtime");
+  return path.join(rootDir, ".orb-php-runtime");
 }
 
 function bundledFireflyRoot() {
@@ -311,7 +311,7 @@ function ensureFireflyEnv(dataDir) {
     APP_DEBUG: "false",
     APP_KEY: runtime.appKey,
     APP_URL: fireflyUrl(),
-    SITE_OWNER: runtime.email || "lifeos@local.invalid",
+    SITE_OWNER: runtime.email || "orb@local.invalid",
     TZ: "UTC",
     DEFAULT_LANGUAGE: "en_US",
     DEFAULT_LOCALE: "equal",
@@ -327,7 +327,7 @@ function ensureFireflyEnv(dataDir) {
     DKR_RUN_MIGRATION: "false",
     STATIC_CRON_TOKEN: runtime.cronToken || randomFixedToken(32),
     AUTHENTICATION_GUARD: "web",
-    APP_NAME: "LifeOS_Finance",
+    APP_NAME: "Orb_Finance",
   };
   fs.writeFileSync(envFile, `${renderEnv(env)}\n`, "utf8");
   runtime.cronToken = String(env.STATIC_CRON_TOKEN);
@@ -411,14 +411,14 @@ async function ensurePhpRuntime(dataDir, onStatus = () => {}) {
 
 async function ensureFireflyApp(dataDir, onStatus = () => {}) {
   const appDir = fireflyAppDir(dataDir);
-  const versionMarker = path.join(appDir, ".liveos-firefly-version");
+  const versionMarker = path.join(appDir, ".orb-firefly-version");
   if (fs.existsSync(versionMarker) && fs.readFileSync(versionMarker, "utf8").trim() === FIREFLY_VERSION) {
     return appDir;
   }
   const bundledRoot = bundledFireflyRoot();
-  if (bundledRoot && fs.existsSync(path.join(bundledRoot, "app", ".liveos-firefly-version"))) {
+  if (bundledRoot && fs.existsSync(path.join(bundledRoot, "app", ".orb-firefly-version"))) {
     const bundledVersion = fs.readFileSync(
-      path.join(bundledRoot, "app", ".liveos-firefly-version"),
+      path.join(bundledRoot, "app", ".orb-firefly-version"),
       "utf8",
     ).trim();
     if (bundledVersion === FIREFLY_VERSION) {
@@ -468,7 +468,7 @@ function ensureBootstrapLayout(dataDir) {
 function ensureRuntimeMetadata(dataDir) {
   const file = fireflyRuntimeFile(dataDir);
   const existing = readJson(file, {}) || {};
-  if (!existing.email) existing.email = "lifeos@local.invalid";
+  if (!existing.email) existing.email = "orb@local.invalid";
   if (!existing.password) existing.password = randomSecret(16);
   if (!existing.instanceId) existing.instanceId = crypto.randomUUID();
   writeJson(file, existing);
@@ -482,7 +482,7 @@ function generateTokenScript(email) {
     "$app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap();",
     `$user = FireflyIII\\User::where('email', '${email.replace(/'/g, "\\'")}')->first();`,
     "if (!$user) { fwrite(STDERR, 'User not found'); exit(1); }",
-    "$token = $user->createToken('LifeOS Desktop')->accessToken;",
+    "$token = $user->createToken('Orb Desktop')->accessToken;",
     "echo $token;",
   ].join(" ");
 }
@@ -497,7 +497,7 @@ function bootstrapUserScript(email, password, groupTitle) {
     `$password = '${esc(password)}';`,
     `$groupTitle = '${esc(groupTitle)}';`,
     "$group = \\FireflyIII\\Models\\UserGroup::firstOrCreate(['title' => $groupTitle]);",
-    "$role = \\FireflyIII\\Models\\Role::firstOrCreate(['name' => 'owner'], ['display_name' => 'Owner', 'description' => 'LifeOS desktop owner']);",
+    "$role = \\FireflyIII\\Models\\Role::firstOrCreate(['name' => 'owner'], ['display_name' => 'Owner', 'description' => 'Orb desktop owner']);",
     "$userRole = \\FireflyIII\\Models\\UserRole::firstOrCreate(['title' => 'owner']);",
     "$currency = \\FireflyIII\\Models\\TransactionCurrency::where('code', 'EUR')->first();",
     "if (!$currency) { fwrite(STDERR, 'Missing EUR currency seed'); exit(1); }",
@@ -514,7 +514,7 @@ function bootstrapUserScript(email, password, groupTitle) {
     "\\FireflyIII\\Models\\GroupMembership::firstOrCreate(['user_id' => $user->id, 'user_group_id' => $group->id, 'user_role_id' => $userRole->id]);",
     "$group->currencies()->syncWithoutDetaching([$currency->id => ['group_default' => true]]);",
     "$user->currencies()->syncWithoutDetaching([$currency->id => ['user_default' => true]]);",
-    "$token = $user->createToken('LifeOS Desktop')->accessToken;",
+    "$token = $user->createToken('Orb Desktop')->accessToken;",
     "echo json_encode(['user_id' => $user->id, 'group_id' => $group->id, 'token' => $token], JSON_UNESCAPED_SLASHES);",
   ].join(" ");
 }
@@ -550,7 +550,7 @@ async function ensureFireflyRuntime(dataDir, onStatus = () => {}) {
     onStatus("Creating Firefly desktop user…");
     const raw = runPhp(
       dataDir,
-      ["-r", bootstrapUserScript(runtime.email, runtime.password, "LifeOS")],
+      ["-r", bootstrapUserScript(runtime.email, runtime.password, "Orb")],
       { capture: true },
     ).trim();
     const jsonStart = raw.lastIndexOf("{");

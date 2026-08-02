@@ -1,5 +1,5 @@
 /** Desktop Electron bridge (preload). Absent in browser/dev. */
-export type LiveosDesktopBridge = {
+export type OrbDesktopBridge = {
   isDesktop?: boolean;
   pickDirectory?: (opts?: {
     title?: string;
@@ -13,9 +13,14 @@ export type LiveosDesktopBridge = {
   onStatus?: (cb: (message: string) => void) => void;
 };
 
-export function getDesktopBridge(): LiveosDesktopBridge | null {
+export function getDesktopBridge(): OrbDesktopBridge | null {
   if (typeof window === "undefined") return null;
-  return (window as Window & { liveosDesktop?: LiveosDesktopBridge }).liveosDesktop || null;
+  const w = window as Window & {
+    orbDesktop?: OrbDesktopBridge;
+    /** @deprecated former LifeOS / LiveOS bridge name */
+    liveosDesktop?: OrbDesktopBridge;
+  };
+  return w.orbDesktop || w.liveosDesktop || null;
 }
 
 export function isDesktopApp(): boolean {

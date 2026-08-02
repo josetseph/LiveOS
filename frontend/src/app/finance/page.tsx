@@ -584,13 +584,13 @@ export default function FinancePage() {
                 </h2>
                 <p className="mt-1 text-sm text-white/60">
                   {workspace?.detail ||
-                    "LifeOS is still preparing the embedded Firefly III runtime and API access."}
+                    "Orb is still preparing the embedded Firefly III runtime and API access."}
                 </p>
               </div>
             </div>
             <p className="text-sm text-white/60">
               Set the primary currency to finish setup. You can manage accounts, transactions,
-              budgets, and reports entirely inside LifeOS.
+              budgets, and reports entirely inside Orb.
             </p>
             <div className="flex gap-3">
               <input

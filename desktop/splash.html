@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LifeOS</title>
+    <title>Orb</title>
     <style>
       * {
         box-sizing: border-box;
@@ -84,8 +84,8 @@
   </head>
   <body>
     <div class="card">
-      <div class="mark"><img src="assets/logo.png" alt="LifeOS" /></div>
-      <div class="brand">LifeOS</div>
+      <div class="mark"><img src="assets/logo.png" alt="Orb" /></div>
+      <div class="brand">Orb</div>
       <p class="status" id="status">Starting local services…</p>
       <div class="spinner"></div>
       <p class="hint" id="hint">
@@ -101,7 +101,7 @@
       });
       ipcRenderer.invoke("get-app-info").then((info) => {
         if (hint && info?.version) {
-          hint.textContent = `LifeOS v${info.version} · First launch may download search binaries.`;
+          hint.textContent = `Orb v${info.version} · First launch may download search binaries.`;
         }
       }).catch(() => {});
     </script>

@@ -36,12 +36,20 @@ function platformKey() {
   return platformTriple().key;
 }
 
+function envFirst(...names) {
+  for (const name of names) {
+    const v = process.env[name];
+    if (v != null && String(v).trim() !== "") return v;
+  }
+  return undefined;
+}
+
 function defaultPathsFile() {
   return path.join(appSupportRoot(), "paths.json");
 }
 
 function loadPaths(appRoot) {
-  const loc = process.env.LIVEOS_PATHS_FILE || defaultPathsFile();
+  const loc = envFirst("ORB_PATHS_FILE", "LIVEOS_PATHS_FILE") || defaultPathsFile();
   const repoRoot = getRepoRoot();
   let dataDir = isPackagedLayout()
     ? defaultDataDir()
@@ -224,7 +232,7 @@ function killPid(pid) {
 }
 
 /**
- * Clear leftover listeners from a previous LifeOS run (orphaned after force-quit).
+ * Clear leftover listeners from a previous Orb run (orphaned after force-quit).
  * Children are spawned detached so they can outlive Electron if stopAll never runs.
  */
 function freeDesktopPorts(onStatus) {
@@ -341,7 +349,7 @@ class Supervisor {
       const masterKey =
         process.env.MEILI_MASTER_KEY ||
         process.env.TYPESENSE_API_KEY ||
-        "liveos-dev-key";
+        "orb-dev-key";
       this._spawn("Meilisearch", meili, [
         "--db-path",
         path.join(dataDir, "meilisearch"),
@@ -370,7 +378,7 @@ class Supervisor {
     const masterKey =
       process.env.MEILI_MASTER_KEY ||
       process.env.TYPESENSE_API_KEY ||
-      "liveos-dev-key";
+      "orb-dev-key";
     const child = this._spawn(
       "Backend",
       python,
@@ -387,9 +395,9 @@ class Supervisor {
         cwd: backendDir,
         logFile,
         env: {
-          LIVEOS_DATA_DIR: dataDir,
-          LIVEOS_MODELS_DIR: modelsDir,
-          LIVEOS_PATHS_FILE: this.paths.pathsFile,
+          ORB_DATA_DIR: dataDir,
+          ORB_MODELS_DIR: modelsDir,
+          ORB_PATHS_FILE: this.paths.pathsFile,
           PYTHONPATH: backendDir,
           DATABASE_BACKEND: "sqlite",
           STORAGE_BACKEND: "local",
@@ -409,13 +417,16 @@ class Supervisor {
           EMBEDDING_PROVIDER: process.env.EMBEDDING_PROVIDER || "local",
           CORS_ORIGINS: process.env.CORS_ORIGINS || corsOrigins(),
           // GGUF context / generation (one model loaded at a time).
-          LIVEOS_LLAMA_N_CTX: process.env.LIVEOS_LLAMA_N_CTX || "16384",
-          LIVEOS_LLAMA_MAX_TOKENS: process.env.LIVEOS_LLAMA_MAX_TOKENS || "10240",
-          LIVEOS_LLAMA_SWA_FULL: process.env.LIVEOS_LLAMA_SWA_FULL || "true",
-          LIVEOS_LLAMA_REPEAT_PENALTY: process.env.LIVEOS_LLAMA_REPEAT_PENALTY || "1.12",
-          LIVEOS_LLAMA_PROMPT_RESERVE: process.env.LIVEOS_LLAMA_PROMPT_RESERVE || "4096",
-          LIVEOS_EMBED_N_CTX: process.env.LIVEOS_EMBED_N_CTX || "8192",
-          LIVEOS_RERANK_N_CTX: process.env.LIVEOS_RERANK_N_CTX || "8192",
+          ORB_LLAMA_N_CTX: envFirst("ORB_LLAMA_N_CTX", "LIVEOS_LLAMA_N_CTX") || "16384",
+          ORB_LLAMA_MAX_TOKENS:
+            envFirst("ORB_LLAMA_MAX_TOKENS", "LIVEOS_LLAMA_MAX_TOKENS") || "10240",
+          ORB_LLAMA_SWA_FULL: envFirst("ORB_LLAMA_SWA_FULL", "LIVEOS_LLAMA_SWA_FULL") || "true",
+          ORB_LLAMA_REPEAT_PENALTY:
+            envFirst("ORB_LLAMA_REPEAT_PENALTY", "LIVEOS_LLAMA_REPEAT_PENALTY") || "1.12",
+          ORB_LLAMA_PROMPT_RESERVE:
+            envFirst("ORB_LLAMA_PROMPT_RESERVE", "LIVEOS_LLAMA_PROMPT_RESERVE") || "4096",
+          ORB_EMBED_N_CTX: envFirst("ORB_EMBED_N_CTX", "LIVEOS_EMBED_N_CTX") || "8192",
+          ORB_RERANK_N_CTX: envFirst("ORB_RERANK_N_CTX", "LIVEOS_RERANK_N_CTX") || "8192",
         },
       },
     );
@@ -468,7 +479,7 @@ class Supervisor {
             cwd: backendDir,
             env: {
               ...process.env,
-              LIVEOS_MODELS_DIR: modelsDir,
+              ORB_MODELS_DIR: modelsDir,
               PYTHONPATH: backendDir,
             },
             stdio: ["ignore", "pipe", "pipe"],

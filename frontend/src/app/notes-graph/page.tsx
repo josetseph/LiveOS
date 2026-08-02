@@ -102,7 +102,7 @@ const GROUP_COLORS = [
 ];
 
 function controlsKey(kb: string) {
-  return `lifeos:notes-graph-controls:${kb || "default"}`;
+  return `orb:notes-graph-controls:${kb || "default"}`;
 }
 
 function loadControls(kb: string): Controls {
@@ -982,7 +982,7 @@ export default function NotesGraphPage() {
                 onClick={() => {
                   if (selectedNode.uuid) {
                     sessionStorage.setItem(
-                      "liveos:last-note-id",
+                      "orb:last-note-id",
                       selectedNode.uuid,
                     );
                   }

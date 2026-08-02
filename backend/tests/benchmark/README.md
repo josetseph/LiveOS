@@ -1,6 +1,6 @@
-# LiveOS Benchmark Testing
+# Orb Benchmark Testing
 
-This directory contains tools for evaluating LiveOS retrieval and answer quality against standardized multi-hop reasoning datasets.
+This directory contains tools for evaluating Orb retrieval and answer quality against standardized multi-hop reasoning datasets.
 
 ## Datasets
 
@@ -89,7 +89,7 @@ The evaluation script (`evaluate.py`) uses only `httpx` and `tqdm` — no additi
 
 ```
 tests/benchmark/
-├── prepare_dataset.py           # Ingest notes from a manifest into LiveOS
+├── prepare_dataset.py           # Ingest notes from a manifest into Orb
 ├── evaluate.py                  # Run evaluation against a manifest
 ├── hotpotqa_manifest.json       # HotpotQA test cases + note index (100 questions)
 ├── musique_manifest.json        # MuSiQue test cases + note index (50 questions)

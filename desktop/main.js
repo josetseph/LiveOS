@@ -15,13 +15,21 @@ const {
 } = require("./paths");
 const { uiUrl, apiV1Url } = require("./ports");
 
-// Keep macOS menu / "Quit …" label as LifeOS (not package.json "liveos-desktop").
-app.setName("LifeOS");
+// Keep macOS menu / "Quit …" label as Orb (not package.json "orb-desktop").
+app.setName("Orb");
 if (process.platform === "win32") {
-  app.setAppUserModelId("com.liveos.app");
+  app.setAppUserModelId("com.orb.app");
 }
 
-const APP_URL = process.env.LIVEOS_URL || uiUrl();
+function envFirst(...names) {
+  for (const name of names) {
+    const v = process.env[name];
+    if (v != null && String(v).trim() !== "") return v;
+  }
+  return undefined;
+}
+
+const APP_URL = envFirst("ORB_URL", "LIVEOS_URL") || uiUrl();
 let mainWindow = null;
 let splashWindow = null;
 let supervisor = null;
@@ -49,7 +57,7 @@ function createSplash() {
     width: 480,
     height: 360,
     resizable: false,
-    title: "LifeOS",
+    title: "Orb",
     backgroundColor: "#0a0a0f",
     show: false,
     ...(icon ? { icon } : {}),
@@ -70,7 +78,7 @@ function createWizard() {
     height: 820,
     minWidth: 560,
     minHeight: 640,
-    title: "LifeOS Setup",
+    title: "Orb Setup",
     backgroundColor: "#0a0a0f",
     ...(icon ? { icon } : {}),
     webPreferences: {
@@ -87,7 +95,7 @@ function createMainWindow(initialPath = "/") {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
-    title: "LifeOS",
+    title: "Orb",
     backgroundColor: "#0a0a0f",
     ...(icon ? { icon } : {}),
     webPreferences: {
@@ -128,7 +136,7 @@ function dirHasGguf(dir, depth = 0) {
 function resolveBootPath() {
   // Full local without GGUFs yet → open Setup so download can auto-start.
   try {
-    const pathsFile = process.env.LIVEOS_PATHS_FILE || defaultPathsFile();
+    const pathsFile = envFirst("ORB_PATHS_FILE", "LIVEOS_PATHS_FILE") || defaultPathsFile();
     if (!fs.existsSync(pathsFile)) return "/";
     const j = JSON.parse(fs.readFileSync(pathsFile, "utf8"));
     const mode = String(j.ai_setup_mode || process.env.AI_SETUP_MODE || "none").toLowerCase();
@@ -144,7 +152,7 @@ function resolveBootPath() {
 function setupAutoUpdater() {
   // Opt-in only — unsigned builds must not hit GitHub Releases until Stage 6
   if (!isPackaged()) return;
-  if (process.env.LIVEOS_ENABLE_UPDATER !== "1") return;
+  if (envFirst("ORB_ENABLE_UPDATER", "LIVEOS_ENABLE_UPDATER") !== "1") return;
   try {
     const { autoUpdater } = require("electron-updater");
     autoUpdater.autoDownload = false;
@@ -235,7 +243,7 @@ ipcMain.handle("save-wizard", async (_e, payload) => {
 
 async function bootStack(appRoot) {
   supervisor = new Supervisor(appRoot, sendStatus);
-  if (process.env.LIVEOS_USE_DOCKER === "1") {
+  if (envFirst("ORB_USE_DOCKER", "LIVEOS_USE_DOCKER") === "1") {
     sendStatus("Starting Docker services…");
     const { spawn } = require("child_process");
     const repoRoot = getRepoRoot();
@@ -254,9 +262,9 @@ async function bootStack(appRoot) {
 
 app.whenReady().then(async () => {
   const appRoot = getAppRoot();
-  const pathsFile = process.env.LIVEOS_PATHS_FILE || defaultPathsFile();
+  const pathsFile = envFirst("ORB_PATHS_FILE", "LIVEOS_PATHS_FILE") || defaultPathsFile();
 
-  if (needsWizard(pathsFile) && !process.env.LIVEOS_SKIP_WIZARD) {
+  if (needsWizard(pathsFile) && !envFirst("ORB_SKIP_WIZARD", "LIVEOS_SKIP_WIZARD")) {
     const wizard = createWizard();
     await new Promise((resolve) => {
       ipcMain.once("wizard-done", () => {
@@ -278,9 +286,9 @@ app.whenReady().then(async () => {
     console.error(err);
     await dialog.showMessageBox({
       type: "error",
-      title: "LifeOS failed to start",
+      title: "Orb failed to start",
       message: "Could not start local services.",
-      detail: `${message}\n\nLogs: ~/Library/Application Support/LifeOS/data/logs/`,
+      detail: `${message}\n\nLogs: ~/Library/Application Support/Orb/data/logs/`,
       buttons: ["Quit"],
       defaultId: 0,
     });

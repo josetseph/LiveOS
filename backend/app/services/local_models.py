@@ -26,6 +26,15 @@ from app.core.paths import (
 
 logger = get_logger("LocalModels")
 
+def _env_first(*names: str, default: str | None = None) -> str | None:
+    for name in names:
+        val = os.environ.get(name)
+        if val is not None and str(val).strip() != "":
+            return val
+    return default
+
+
+
 # Gemma 4 degeneration under compact SWA — same signature as content-machine.
 _ORDINAL_LOOP_RE = re.compile(
     r"(?:\bor the\b[\s\S]{0,40}?){12,}",
@@ -46,15 +55,15 @@ def _raise_if_degeneration(text: str) -> None:
 
 
 def _default_chat_n_ctx() -> int:
-    return int(os.environ.get("LIVEOS_LLAMA_N_CTX", "16384"))
+    return int(_env_first("ORB_LLAMA_N_CTX", "LIVEOS_LLAMA_N_CTX", default="16384"))
 
 
 def _default_chat_max_tokens() -> int:
-    return int(os.environ.get("LIVEOS_LLAMA_MAX_TOKENS", "10240"))
+    return int(_env_first("ORB_LLAMA_MAX_TOKENS", "LIVEOS_LLAMA_MAX_TOKENS", default="10240"))
 
 
 def _default_repeat_penalty() -> float:
-    raw = os.environ.get("LIVEOS_LLAMA_REPEAT_PENALTY", "1.12")
+    raw = _env_first("ORB_LLAMA_REPEAT_PENALTY", "LIVEOS_LLAMA_REPEAT_PENALTY", default="1.12")
     try:
         return float(raw)
     except ValueError:
@@ -64,10 +73,10 @@ def _default_repeat_penalty() -> float:
 def model_idle_seconds() -> float:
     """Seconds of inactivity before unloading in-process GGUFs.
 
-    Override with LIVEOS_MODEL_IDLE_SECONDS (default 300 = 5 minutes).
+    Override with ORB_MODEL_IDLE_SECONDS (default 300 = 5 minutes).
     Set to 0 to keep models loaded for the whole app session.
     """
-    raw = os.environ.get("LIVEOS_MODEL_IDLE_SECONDS", "300")
+    raw = _env_first("ORB_MODEL_IDLE_SECONDS", "LIVEOS_MODEL_IDLE_SECONDS", default="300")
     try:
         return max(0.0, float(raw))
     except ValueError:
@@ -122,13 +131,13 @@ def _llama_metal_safe_kwargs(base: dict) -> dict:
     Flash attention stays off unless explicitly opted in.
     """
     kwargs = dict(base)
-    raw_swa = os.environ.get("LIVEOS_LLAMA_SWA_FULL", "").strip().lower()
+    raw_swa = (_env_first("ORB_LLAMA_SWA_FULL", "LIVEOS_LLAMA_SWA_FULL", default="") or "").strip().lower()
     if raw_swa in {"0", "false", "no"}:
         kwargs["swa_full"] = False
     else:
         # Default true (content-machine): stable text over max context.
         kwargs["swa_full"] = True
-    if os.environ.get("LIVEOS_LLAMA_FLASH_ATTN", "").strip().lower() in {
+    if (_env_first("ORB_LLAMA_FLASH_ATTN", "LIVEOS_LLAMA_FLASH_ATTN", default="") or "").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -163,15 +172,15 @@ def _unload_multimodal_families() -> None:
         logger.debug("Multimodal unload before GGUF skipped: %s", exc)
 # Pinned defaults (overridden by Setup selection / manifest)
 CHAT_MODEL_ID = os.environ.get(
-    "LIVEOS_CHAT_GGUF",
+    "ORB_CHAT_GGUF",
     "bartowski/google_gemma-4-E4B-it-GGUF/google_gemma-4-E4B-it-Q4_K_M.gguf",
 )
 EMBED_MODEL_ID = os.environ.get(
-    "LIVEOS_EMBED_GGUF",
+    "ORB_EMBED_GGUF",
     "Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
 )
 RERANK_MODEL_ID = os.environ.get(
-    "LIVEOS_RERANK_GGUF",
+    "ORB_RERANK_GGUF",
     "mradermacher/Qwen3-Reranker-0.6B-GGUF/Qwen3-Reranker-0.6B.Q4_K_M.gguf",
 )
 
@@ -271,7 +280,7 @@ def download_file(url: str, dest: Path, on_progress=None) -> Path:
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     stage_local = looks_like_network_volume(dest) or os.environ.get(
-        "LIVEOS_FORCE_DOWNLOAD_STAGING"
+        "ORB_FORCE_DOWNLOAD_STAGING"
     )
     if stage_local:
         staging = local_download_staging_dir() / dest.name
@@ -289,7 +298,7 @@ def download_file(url: str, dest: Path, on_progress=None) -> Path:
         except OSError:
             pass
 
-    req = Request(url, headers={"User-Agent": "LifeOS/1.0"})
+    req = Request(url, headers={"User-Agent": "Orb/1.0"})
     with urlopen(req, timeout=120) as resp, open(partial, "wb") as out:
         total = int(resp.headers.get("Content-Length") or 0)
         received = 0
@@ -674,11 +683,11 @@ def detect_llama_backend() -> dict:
     Pick the best acceleration path for this machine.
 
     Override with:
-      LIVEOS_LLAMA_BACKEND=metal|cuda|vulkan|cpu|auto
-      LIVEOS_LLAMA_N_GPU_LAYERS=<int>   (-1 = all layers on GPU)
+      ORB_LLAMA_BACKEND=metal|cuda|vulkan|cpu|auto
+      ORB_LLAMA_N_GPU_LAYERS=<int>   (-1 = all layers on GPU)
     """
-    forced = (os.environ.get("LIVEOS_LLAMA_BACKEND") or "auto").lower().strip()
-    n_gpu_env = os.environ.get("LIVEOS_LLAMA_N_GPU_LAYERS")
+    forced = (_env_first("ORB_LLAMA_BACKEND", "LIVEOS_LLAMA_BACKEND", default="auto") or "auto").lower().strip()
+    n_gpu_env = _env_first("ORB_LLAMA_N_GPU_LAYERS", "LIVEOS_LLAMA_N_GPU_LAYERS")
 
     def _result(backend: str, n_gpu_layers: int, reason: str) -> dict:
         if n_gpu_env is not None and n_gpu_env != "":
@@ -695,7 +704,7 @@ def detect_llama_backend() -> dict:
 
     if forced in ("cpu", "metal", "cuda", "vulkan"):
         layers = 0 if forced == "cpu" else -1
-        return _result(forced, layers, f"forced via LIVEOS_LLAMA_BACKEND={forced}")
+        return _result(forced, layers, f"forced via ORB_LLAMA_BACKEND={forced}")
 
     system = sys.platform
     machine = platform.machine().lower()
@@ -878,7 +887,7 @@ class LocalLlamaRuntime:
                     logger.warning(f"Reranker idle unload check failed: {exc}")
 
         threading.Thread(
-            target=_loop, name="lifeos-model-idle", daemon=True
+            target=_loop, name="orb-model-idle", daemon=True
         ).start()
 
     def _import_llama(self):
@@ -897,7 +906,7 @@ class LocalLlamaRuntime:
         # content-machine: 16k + swa_full fits Metal; 32k + swa_full OOMs.
         n_ctx = _default_chat_n_ctx()
         max_tokens = _default_chat_max_tokens()
-        prompt_reserve = int(os.environ.get("LIVEOS_LLAMA_PROMPT_RESERVE", "4096"))
+        prompt_reserve = int(_env_first("ORB_LLAMA_PROMPT_RESERVE", "LIVEOS_LLAMA_PROMPT_RESERVE", default="4096"))
         min_ctx = max_tokens + prompt_reserve
         if n_ctx < min_ctx:
             logger.info(
@@ -908,7 +917,7 @@ class LocalLlamaRuntime:
                 prompt_reserve,
             )
             n_ctx = min_ctx
-        n_threads = os.environ.get("LIVEOS_LLAMA_N_THREADS")
+        n_threads = _env_first("ORB_LLAMA_N_THREADS", "LIVEOS_LLAMA_N_THREADS")
         kwargs: dict = {
             "n_ctx": n_ctx,
             "n_gpu_layers": int(self.accel["n_gpu_layers"]),
@@ -1023,7 +1032,7 @@ class LocalLlamaRuntime:
         chat_kwargs = self._chat_kwargs()
         embed_kwargs = {
             **{k: v for k, v in chat_kwargs.items() if k != "n_ctx"},
-            "n_ctx": int(os.environ.get("LIVEOS_EMBED_N_CTX", "8192")),
+            "n_ctx": int(_env_first("ORB_EMBED_N_CTX", "LIVEOS_EMBED_N_CTX", default="8192")),
         }
         logger.info(
             "Loading embed GGUF in-process (exclusive, n_ctx=%s): %s",
@@ -1319,7 +1328,7 @@ class LocalGgufReranker:
             self._model = _construct_llama(
                 Llama,
                 model_path=str(path),
-                n_ctx=int(os.environ.get("LIVEOS_RERANK_N_CTX", default_ctx)),
+                n_ctx=int(_env_first("ORB_RERANK_N_CTX", "LIVEOS_RERANK_N_CTX", default=str(default_ctx))),
                 n_gpu_layers=int(accel.get("n_gpu_layers", 0)),
                 logits_all=True,
                 verbose=False,

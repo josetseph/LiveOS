@@ -36,7 +36,7 @@ class Settings(BaseSettings):
         env_file=str(BACKEND_DIR / ".env"), env_file_encoding="utf-8", extra="ignore"
     )
 
-    PROJECT_NAME: str = "LiveOS"
+    PROJECT_NAME: str = "Orb"
     API_V1_STR: str = "/api/v1"
     # Include 127.0.0.1 — Electron desktop loads that origin (≠ localhost for CORS)
     CORS_ORIGINS: str = (
@@ -108,14 +108,14 @@ class Settings(BaseSettings):
 
     TYPESENSE_HOST: str = "127.0.0.1"  # deprecated alias → MEILI_HOST
     TYPESENSE_PORT: int = 7700  # deprecated; Meilisearch default port
-    TYPESENSE_API_KEY: str = "liveos-dev-key"
-    TYPESENSE_COLLECTION_NAME: str = "liveos_nodes"
+    TYPESENSE_API_KEY: str = "orb-dev-key"
+    TYPESENSE_COLLECTION_NAME: str = "orb_nodes"
 
     # Meilisearch (replaces Typesense — has native Windows binary)
     MEILI_HOST: str = "127.0.0.1"
     MEILI_PORT: int = 7700
-    MEILI_MASTER_KEY: str = "liveos-dev-key"
-    MEILI_INDEX_NAME: str = "liveos_nodes"
+    MEILI_MASTER_KEY: str = "orb-dev-key"
+    MEILI_INDEX_NAME: str = "orb_nodes"
 
     MODEL_FLORENCE_HF: str = "microsoft/Florence-2-large"
     MODEL_FLORENCE_LOCAL: str = "florence-2-large"
@@ -147,7 +147,7 @@ class Settings(BaseSettings):
     HUGGINGFACE_API_KEY: str | None = None
     HUGGINGFACE_MODEL: str | None = None
 
-    BUCKET_NAME: str = "liveos-assets"
+    BUCKET_NAME: str = "orb-assets"
     BUCKET_ACCESS_KEY_ID: str = "rustfsadmin"
     BUCKET_SECRET_ACCESS_KEY: str = "rustfsadmin"
     R2_ENDPOINT_URL: str = "http://127.0.0.1:9000"

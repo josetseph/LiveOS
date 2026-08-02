@@ -1,5 +1,5 @@
 """
-reset_index.py — Drop and recreate the Typesense liveos_nodes collection.
+reset_index.py — Drop and recreate the Typesense orb_nodes collection.
 
 Clears all indexed documents then recreates the collection with the correct
 schema for the current architecture.  Covers the default KB and all registered

@@ -22,7 +22,7 @@
 
 ## 1. Executive Summary
 
-The LiveOS Final Implementation pipeline was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemini-3.1-flash-lite-preview` (Google AI SDK) as the reasoning and answer model, against the knowledge graph ingested with `gemma3:4b` (local, Ollama). This is the first end-to-end evaluation of the fully rebuilt infrastructure: **Kuzu** (embedded graph DB replacing Neo4j), **Typesense** (full-text search replacing Elasticsearch), a **node_id-based entity deduplication** pipeline, and the new **iterative retrieval loop** with graph neighbour expansion and cross-iteration context accumulation.
+The Orb Final Implementation pipeline was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemini-3.1-flash-lite-preview` (Google AI SDK) as the reasoning and answer model, against the knowledge graph ingested with `gemma3:4b` (local, Ollama). This is the first end-to-end evaluation of the fully rebuilt infrastructure: **Kuzu** (embedded graph DB replacing Neo4j), **Typesense** (full-text search replacing Elasticsearch), a **node_id-based entity deduplication** pipeline, and the new **iterative retrieval loop** with graph neighbour expansion and cross-iteration context accumulation.
 
 | Metric | Value |
 |---|---|

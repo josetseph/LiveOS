@@ -13,7 +13,7 @@ exports.default = async function notarizing(context) {
   const appName = context.packager.appInfo.productFilename;
   const { notarize } = require("@electron/notarize");
   await notarize({
-    appBundleId: "com.liveos.app",
+    appBundleId: "com.orb.app",
     appPath: `${appOutDir}/${appName}.app`,
     appleId: process.env.APPLE_ID,
     appleIdPassword: process.env.APPLE_APP_SPECIFIC_PASSWORD,

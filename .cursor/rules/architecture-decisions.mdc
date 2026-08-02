@@ -1,15 +1,15 @@
 ---
-description: Locked LiveOS product/architecture decisions — follow on every change
+description: Locked Orb product/architecture decisions — follow on every change
 alwaysApply: true
 ---
 
-# LiveOS locked decisions
+# Orb locked decisions
 
 These are product decisions, not suggestions. Do not reintroduce rejected approaches.
 
 ## Desktop product
 
-- **Shell:** Electron desktop app (LifeOS). End users do not run Docker or browser-only setup.
+- **Shell:** Electron desktop app (Orb). End users do not run Docker or browser-only setup.
 - **Setup:** Graphical first-run wizard. User chooses **data dir** and **models dir** (e.g. NAS / OneDrive). Bootstrap only: `paths.json` with those paths.
 - **No Docker for the consumer path.** Supervisor starts local binaries/processes (Qdrant, Meili, Firefly, API, UI).
 

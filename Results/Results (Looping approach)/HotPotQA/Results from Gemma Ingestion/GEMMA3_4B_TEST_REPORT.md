@@ -1,5 +1,5 @@
 # GEMMA3:4B HotPotQA Benchmark Evaluation Report — Looping Approach
-## LiveOS Knowledge Graph System — Retrieval & QA Pipeline
+## Orb Knowledge Graph System — Retrieval & QA Pipeline
 
 **Date:** March 11, 2026  
 **Model:** `gemma3:4b` via Ollama (local)  
@@ -27,7 +27,7 @@
 
 ## 1. Executive Summary
 
-The LiveOS system was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemma3:4b` (Ollama) against the Looping Approach knowledge graph (990 notes, 11,216 nodes, 15,386 relationships).
+The Orb system was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemma3:4b` (Ollama) against the Looping Approach knowledge graph (990 notes, 11,216 nodes, 15,386 relationships).
 
 | Metric | Value |
 |---|---|
@@ -81,7 +81,7 @@ The recall structure is sharply bimodal: **49 questions achieved full recall (1.
 
 ### Pipeline Architecture
 
-The LiveOS retrieval pipeline for this run uses the **`retrieve_with_self_correction` agentic loop** — a departure from the previous sub-question decomposition approach:
+The Orb retrieval pipeline for this run uses the **`retrieve_with_self_correction` agentic loop** — a departure from the previous sub-question decomposition approach:
 
 ```
 Query Input

@@ -22,7 +22,7 @@
 
 ## 1. Executive Summary
 
-The LiveOS Final Implementation pipeline was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemma3:4b` (local, Ollama) as the reasoning and answer model, against the same knowledge graph used in the Gemini Flash Lite companion run. This evaluation directly isolates the contribution of the LLM — all infrastructure (Kuzu, Typesense, Qdrant, reranker, embedding) is identical between this run and the Gemini Flash Lite run.
+The Orb Final Implementation pipeline was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemma3:4b` (local, Ollama) as the reasoning and answer model, against the same knowledge graph used in the Gemini Flash Lite companion run. This evaluation directly isolates the contribution of the LLM — all infrastructure (Kuzu, Typesense, Qdrant, reranker, embedding) is identical between this run and the Gemini Flash Lite run.
 
 | Metric | Value |
 |---|---|

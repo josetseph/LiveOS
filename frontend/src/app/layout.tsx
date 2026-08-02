@@ -13,7 +13,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "LifeOS",
+  title: "Orb",
   description: "Your multimodal, graph-based personal memory system",
   icons: {
     icon: [

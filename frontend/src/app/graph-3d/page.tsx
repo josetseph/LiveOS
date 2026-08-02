@@ -626,7 +626,7 @@ export default function Graph3DPage() {
     const loadTextFade = (): number => {
       try {
         const raw = localStorage.getItem(
-          `lifeos:notes-graph-controls:${currentKB || "default"}`,
+          `orb:notes-graph-controls:${currentKB || "default"}`,
         );
         if (!raw) return DEFAULT_TEXT_FADE;
         const parsed = JSON.parse(raw) as { textFade?: number };

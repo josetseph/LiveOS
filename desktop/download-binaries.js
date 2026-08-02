@@ -9,8 +9,8 @@ const https = require("https");
 const http = require("http");
 const { execFileSync } = require("child_process");
 
-const QDRANT_VERSION = process.env.LIVEOS_QDRANT_VERSION || "v1.18.2";
-const MEILI_VERSION = process.env.LIVEOS_MEILI_VERSION || "v1.49.0";
+const QDRANT_VERSION = process.env.ORB_QDRANT_VERSION || "v1.18.2";
+const MEILI_VERSION = process.env.ORB_MEILI_VERSION || "v1.49.0";
 
 function nativeArch() {
   if (process.platform === "darwin") {

@@ -1,4 +1,4 @@
-# LiveOS Desktop Packaging
+# Orb Desktop Packaging
 
 Build unsigned macOS (`.dmg`) and Windows (`.exe`) installers that bundle Electron, embedded Python, portable Node, a Next.js standalone UI, and a seeded Firefly III + PHP runtime.
 
@@ -19,10 +19,10 @@ Artifacts land in `desktop/dist/`.
 | Mode | How |
 |------|-----|
 | **Dev** | `npm start` — uses repo `backend/` + `frontend/` (`next dev`) |
-| **Packaged test** | Run `prepare-dist`, then `LIVEOS_RESOURCES=./resources npm start` |
+| **Packaged test** | Run `prepare-dist`, then `ORB_RESOURCES=./resources npm start` |
 | **Installer** | `prepare-dist` + `electron-builder` |
 
-User data (SQLite, vault, Qdrant/Meili binaries, GGUF models) always lives outside the app bundle under Application Support / `%APPDATA%\LiveOS\`.
+User data (SQLite, vault, Qdrant/Meili binaries, GGUF models) always lives outside the app bundle under Application Support / `%APPDATA%\Orb\`.
 Firefly's writable state also lives outside the bundle under the same app-data root.
 
 ## Networking (important)
@@ -42,7 +42,7 @@ Florence / Whisper / Marlin / chat / embed / rerank all load **in-process** in t
 
 - Electron loads `http://127.0.0.1:17400`.
 - Desktop frontend build uses **same-origin** `NEXT_PUBLIC_API_URL=/api/v1` with Next rewrites to `http://127.0.0.1:17401`.
-- Override any port with `LIVEOS_UI_PORT`, `LIVEOS_API_PORT`, `LIVEOS_FIREFLY_PORT`, `LIVEOS_QDRANT_PORT`, `LIVEOS_MEILI_PORT`.
+- Override any port with `ORB_UI_PORT`, `ORB_API_PORT`, `ORB_FIREFLY_PORT`, `ORB_QDRANT_PORT`, `ORB_MEILI_PORT`.
 - Docker / contributor compose keeps its own mapped ports (e.g. host `8700` → backend).
 
 ## What gets bundled
@@ -89,6 +89,6 @@ Set `CSC_LINK` (certificate file) and `CSC_KEY_PASSWORD` for electron-builder.
 ### Auto-update
 
 1. Publish signed builds to GitHub Releases (`publish.owner` = `josetseph`).
-2. Set `LIVEOS_ENABLE_UPDATER=1` so `electron-updater` in [`main.js`](main.js) checks releases.
+2. Set `ORB_ENABLE_UPDATER=1` so `electron-updater` in [`main.js`](main.js) checks releases.
 
 Unsigned builds **never** check for updates unless that env is set.

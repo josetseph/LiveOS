@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Hotfix LifeOS.app so note image+audio ingest works again.
+# Hotfix Orb.app so note image+audio ingest works again.
 # 1) Restores numpy/_core/tests (stripped by an old pruneBackendTree bug)
 # 2) Syncs multimodal_runtime.py + multimodal_services.py from this repo
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-APP_BE="/Applications/LifeOS.app/Contents/Resources/backend"
+APP_BE="/Applications/Orb.app/Contents/Resources/backend"
 APP_PY="$APP_BE/python/bin/python3"
 SITE="$APP_BE/python/lib/python3.12/site-packages"
 WHEEL_DIR="$ROOT/.tmp/numpy-fix"
 EXTRACT="$WHEEL_DIR/extract"
 
 if [[ ! -x "$APP_PY" ]]; then
-  echo "LifeOS.app python not found at $APP_PY" >&2
+  echo "Orb.app python not found at $APP_PY" >&2
   exit 1
 fi
 
@@ -41,4 +41,4 @@ from transformers import AutoModelForCausalLM, AutoModelForSpeechSeq2Seq
 print('ok: numpy tests + transformers AutoModel')
 "
 
-echo "Done. Quit and reopen LifeOS, then Retry the failed note."
+echo "Done. Quit and reopen Orb, then Retry the failed note."

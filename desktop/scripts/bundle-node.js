@@ -7,7 +7,7 @@ const path = require("path");
 const https = require("https");
 const { execFileSync } = require("child_process");
 
-const NODE_VERSION = process.env.LIVEOS_NODE_VERSION || "22.14.0";
+const NODE_VERSION = process.env.ORB_NODE_VERSION || "22.14.0";
 const outRoot = path.join(__dirname, "..", "resources", "node");
 const tmpDir = path.join(__dirname, "..", "resources", ".tmp");
 

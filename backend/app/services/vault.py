@@ -10,7 +10,7 @@ from pathlib import Path
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:\|([^\]]+))?\]\]")
 
-# Paths LifeOS just wrote — vault watcher should ignore briefly so in-app saves
+# Paths Orb just wrote — vault watcher should ignore briefly so in-app saves
 # are not treated as external edits.
 _recent_self_writes: dict[str, float] = {}
 _SELF_WRITE_TTL_SEC = 12.0

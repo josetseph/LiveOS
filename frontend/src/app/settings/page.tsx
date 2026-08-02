@@ -344,7 +344,7 @@ export default function SettingsPage() {
                             {isLocal ? (
                                 <div className="space-y-2 rounded-xl border border-teal-500/20 bg-teal-500/5 px-4 py-3 text-xs text-teal-100/80">
                                     <p>
-                                        <span className="font-medium text-teal-100">Local mode:</span> LifeOS
+                                        <span className="font-medium text-teal-100">Local mode:</span> Orb
                                         loads your downloaded GGUF in-process (no Ollama / LM Studio / server
                                         URL). Embed + rerank models for search are chosen automatically.
                                     </p>
@@ -655,13 +655,13 @@ export default function SettingsPage() {
                                 )}
                                 <p>
                                     <span className="text-white/70 font-medium">How to delete models</span> —
-                                    quit LifeOS, delete files inside <code className="text-white/55">models_dir</code>{" "}
+                                    quit Orb, delete files inside <code className="text-white/55">models_dir</code>{" "}
                                     (or the whole folder), relaunch, then use Setup to re-download what you need.
                                     Do not delete models while the app is running — they may be memory-mapped.
                                 </p>
                                 <p>
                                     <span className="text-white/70 font-medium">Wipe all app data</span> —
-                                    quit LifeOS, delete the entire <code className="text-white/55">data_dir</code>, relaunch
+                                    quit Orb, delete the entire <code className="text-white/55">data_dir</code>, relaunch
                                     (wizard if needed). The app binary stays. Models are untouched unless you also clear{" "}
                                     <code className="text-white/55">models_dir</code>.
                                 </p>

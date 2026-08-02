@@ -38,7 +38,7 @@ export default function Home() {
           >
             <Image
               src="/logo.png"
-              alt="LifeOS"
+              alt="Orb"
               width={96}
               height={96}
               loading="eager"
@@ -53,7 +53,7 @@ export default function Home() {
             transition={{ duration: 0.8, delay: 0.2 }}
             className="mb-6 bg-linear-to-r from-purple-400 via-pink-400 to-purple-400 bg-clip-text text-6xl font-bold tracking-tight text-transparent md:text-8xl"
           >
-            LifeOS
+            Orb
           </motion.h1>
 
           {/* Subtitle */}

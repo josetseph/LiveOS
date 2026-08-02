@@ -1,5 +1,5 @@
 # Gemini 3 Flash Preview HotPotQA Benchmark Report — Looping Approach
-## LiveOS Knowledge Graph System — Retrieval & QA Pipeline
+## Orb Knowledge Graph System — Retrieval & QA Pipeline
 
 **Date:** March 13, 2026  
 **Model:** `gemini-3-flash-preview` via Google Gemini SDK  
@@ -27,7 +27,7 @@
 
 ## 1. Executive Summary
 
-The LiveOS system was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemini-3-flash-preview` (Google AI SDK) against the Looping Approach knowledge graph (990 notes, Gemma ingestion). This run tests whether a stronger reasoning model — when hot-swapped into the same Looping Approach pipeline used by `gemma3:4b` — can improve answer quality.
+The Orb system was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemini-3-flash-preview` (Google AI SDK) against the Looping Approach knowledge graph (990 notes, Gemma ingestion). This run tests whether a stronger reasoning model — when hot-swapped into the same Looping Approach pipeline used by `gemma3:4b` — can improve answer quality.
 
 | Metric | Value |
 |---|---|

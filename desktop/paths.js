@@ -1,5 +1,5 @@
 /**
- * Packaged vs dev path contract for LiveOS desktop.
+ * Packaged vs dev path contract for Orb desktop.
  * Packaged layout (under process.resourcesPath):
  *   backend/{python,app,...}  frontend/{server.js,...}  node/{bin/node,...}
  */
@@ -7,12 +7,20 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 
+function envFirst(...names) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value) return value;
+  }
+  return undefined;
+}
+
 function isPackaged() {
   try {
     const { app } = require("electron");
     return app.isPackaged;
   } catch (_) {
-    return process.env.LIVEOS_PACKAGED === "1";
+    return envFirst("ORB_PACKAGED", "LIVEOS_PACKAGED") === "1";
   }
 }
 
@@ -20,8 +28,9 @@ function getResourcesRoot() {
   if (isPackaged()) {
     return process.resourcesPath;
   }
-  if (process.env.LIVEOS_RESOURCES) {
-    return path.resolve(process.env.LIVEOS_RESOURCES);
+  const override = envFirst("ORB_RESOURCES", "LIVEOS_RESOURCES");
+  if (override) {
+    return path.resolve(override);
   }
   const devResources = path.join(__dirname, "resources");
   if (fs.existsSync(path.join(devResources, "backend", "python"))) {
@@ -31,7 +40,8 @@ function getResourcesRoot() {
 }
 
 function getRepoRoot() {
-  if (process.env.LIVEOS_ROOT) return path.resolve(process.env.LIVEOS_ROOT);
+  const override = envFirst("ORB_ROOT", "LIVEOS_ROOT");
+  if (override) return path.resolve(override);
   const candidates = [
     path.resolve(__dirname, ".."),
     path.resolve(process.cwd(), ".."),
@@ -94,7 +104,8 @@ function firstExisting(candidates) {
 }
 
 function getPythonBinary() {
-  if (process.env.LIVEOS_PYTHON) return process.env.LIVEOS_PYTHON;
+  const override = envFirst("ORB_PYTHON", "LIVEOS_PYTHON");
+  if (override) return override;
 
   const backendDir = getBackendDir();
   const pyRoot = path.join(backendDir, "python");
@@ -117,7 +128,8 @@ function getPythonBinary() {
 }
 
 function getNodeBinary() {
-  if (process.env.LIVEOS_NODE) return process.env.LIVEOS_NODE;
+  const override = envFirst("ORB_NODE", "LIVEOS_NODE");
+  if (override) return override;
 
   const resources = getResourcesRoot();
   const win = process.platform === "win32";
@@ -133,23 +145,34 @@ function getNodeBinary() {
 }
 
 function appSupportRoot() {
-  let primary;
-  let legacy;
+  let candidates;
   if (process.platform === "darwin") {
-    primary = path.join(os.homedir(), "Library", "Application Support", "LifeOS");
-    legacy = path.join(os.homedir(), "Library", "Application Support", "LiveOS");
+    const base = path.join(os.homedir(), "Library", "Application Support");
+    candidates = [
+      path.join(base, "Orb"),
+      path.join(base, "LifeOS"),
+      path.join(base, "LiveOS"),
+    ];
   } else if (process.platform === "win32") {
     const base =
       process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
-    primary = path.join(base, "LifeOS");
-    legacy = path.join(base, "LiveOS");
+    candidates = [
+      path.join(base, "Orb"),
+      path.join(base, "LifeOS"),
+      path.join(base, "LiveOS"),
+    ];
   } else {
-    primary = path.join(os.homedir(), ".config", "LifeOS");
-    legacy = path.join(os.homedir(), ".config", "LiveOS");
+    const base = path.join(os.homedir(), ".config");
+    candidates = [
+      path.join(base, "Orb"),
+      path.join(base, "LifeOS"),
+      path.join(base, "LiveOS"),
+    ];
   }
-  if (fs.existsSync(path.join(primary, "paths.json"))) return primary;
-  if (fs.existsSync(path.join(legacy, "paths.json"))) return legacy;
-  return primary;
+  for (const candidate of candidates) {
+    if (fs.existsSync(path.join(candidate, "paths.json"))) return candidate;
+  }
+  return candidates[0];
 }
 
 function defaultDataDir() {
@@ -161,7 +184,7 @@ function defaultModelsDir() {
 }
 
 function useProductionFrontend() {
-  if (process.env.LIVEOS_FRONTEND_DEV === "1") return false;
+  if (envFirst("ORB_FRONTEND_DEV", "LIVEOS_FRONTEND_DEV") === "1") return false;
   if (isPackagedLayout()) return true;
   return fs.existsSync(path.join(getFrontendDir(), "server.js"));
 }

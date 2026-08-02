@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("liveosDesktop", {
+contextBridge.exposeInMainWorld("orbDesktop", {
   onStatus: (cb) => {
     ipcRenderer.on("status", (_event, message) => cb(message));
   },

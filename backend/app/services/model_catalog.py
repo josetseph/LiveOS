@@ -253,7 +253,7 @@ def get_option(model_id: str) -> ModelOption | None:
 
 
 def total_ram_gb() -> float:
-    forced = os.environ.get("LIVEOS_RAM_GB")
+    forced = os.environ.get("ORB_RAM_GB")
     if forced:
         try:
             return float(forced)
@@ -285,9 +285,9 @@ def total_ram_gb() -> float:
 
 def detect_accel_backend() -> dict:
     """Lightweight accel detect (avoids importing local_models/settings)."""
-    forced = (os.environ.get("LIVEOS_LLAMA_BACKEND") or "auto").lower().strip()
+    forced = (os.environ.get("ORB_LLAMA_BACKEND") or "auto").lower().strip()
     n_gpu = -1
-    env_layers = os.environ.get("LIVEOS_LLAMA_N_GPU_LAYERS")
+    env_layers = os.environ.get("ORB_LLAMA_N_GPU_LAYERS")
     if env_layers not in (None, ""):
         try:
             n_gpu = int(env_layers)
@@ -297,7 +297,7 @@ def detect_accel_backend() -> dict:
         return {
             "backend": forced,
             "n_gpu_layers": 0 if forced == "cpu" else n_gpu if n_gpu != -1 else -1,
-            "reason": f"forced via LIVEOS_LLAMA_BACKEND={forced}",
+            "reason": f"forced via ORB_LLAMA_BACKEND={forced}",
         }
     if sys.platform == "darwin":
         return {
@@ -373,7 +373,7 @@ def chat_options_for_budget(
 def recommend_chat(fits: list[ModelOption]) -> ModelOption | None:
     if not fits:
         return None
-    # Prefer Gemma 4 E4B when it fits (historical LiveOS quality default);
+    # Prefer Gemma 4 E4B when it fits (historical Orb quality default);
     # then 12B when the machine clearly has room.
     for preferred in (
         "gemma4-e4b-q4",

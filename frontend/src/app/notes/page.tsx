@@ -326,7 +326,7 @@ export default function NotesPage() {
       try {
         const fresh = await api.getNote(noteId, currentKB);
         if (!fresh) return;
-        sessionStorage.setItem("liveos:last-note-id", fresh.id);
+        sessionStorage.setItem("orb:last-note-id", fresh.id);
         contentBeforeEditRef.current = fresh.content;
         titleBeforeEditRef.current = fresh.title || "";
         setNotes((prev) =>
@@ -380,7 +380,7 @@ export default function NotesPage() {
     const params = new URLSearchParams(window.location.search);
     const noteParam = params.get("note");
     if (noteParam) {
-      sessionStorage.setItem("liveos:last-note-id", noteParam);
+      sessionStorage.setItem("orb:last-note-id", noteParam);
       void openNoteById(noteParam);
       // Drop the query so refresh doesn't fight with in-page selection changes
       window.history.replaceState({}, "", "/notes");
@@ -390,7 +390,7 @@ export default function NotesPage() {
     const restoreSelection = () => {
       const noteId =
         selectedNoteRef.current?.id ??
-        sessionStorage.getItem("liveos:last-note-id");
+        sessionStorage.getItem("orb:last-note-id");
       if (!noteId) return;
       if (selectedNoteRef.current?.id === noteId) {
         void refreshSelectedNote(noteId);
@@ -603,13 +603,13 @@ export default function NotesPage() {
     try {
       const fresh = await api.getNote(note.id, currentKB);
       const nextNote = fresh ?? note;
-      sessionStorage.setItem("liveos:last-note-id", nextNote.id);
+      sessionStorage.setItem("orb:last-note-id", nextNote.id);
       setSelectedNote(nextNote);
       contentBeforeEditRef.current = nextNote.content;
       titleBeforeEditRef.current = nextNote.title || "";
     } catch (error) {
       console.error("Error loading note:", error);
-      sessionStorage.setItem("liveos:last-note-id", note.id);
+      sessionStorage.setItem("orb:last-note-id", note.id);
       setSelectedNote(note);
       contentBeforeEditRef.current = note.content;
       titleBeforeEditRef.current = note.title || "";
@@ -964,7 +964,7 @@ export default function NotesPage() {
     if (!selectedNote) return;
 
     const confirmDelete = window.confirm(
-      `Delete "${selectedNote.title || "Untitled"}"?\n\nThis removes it from LifeOS and deletes the markdown file in your vault folder.`,
+      `Delete "${selectedNote.title || "Untitled"}"?\n\nThis removes it from Orb and deletes the markdown file in your vault folder.`,
     );
     if (!confirmDelete) return;
 
@@ -1015,7 +1015,7 @@ export default function NotesPage() {
     if (
       !window.confirm(
         `Delete ${ids.length} selected note${ids.length === 1 ? "" : "s"}?\n\n` +
-          `This removes them from LifeOS and deletes the markdown files in your vault.`,
+          `This removes them from Orb and deletes the markdown files in your vault.`,
       )
     ) {
       return;

@@ -1,5 +1,5 @@
 # GEMMA3:4B HotPotQA Benchmark Evaluation Report
-## LiveOS Knowledge Graph System — Retrieval & QA Pipeline
+## Orb Knowledge Graph System — Retrieval & QA Pipeline
 
 **Date:** February 27, 2026  
 **Model:** `google/gemma-3-4b` via LM Studio (MLX, Apple Silicon)  
@@ -32,7 +32,7 @@
 
 ## 1. Executive Summary
 
-The LiveOS system was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemma3:4b` as the language model. The system employs a multi-stage pipeline: query decomposition → iterative sub-query retrieval against a Neo4j knowledge graph → document verification → answer synthesis.
+The Orb system was evaluated on **100 HotPotQA multi-hop reasoning questions** using `gemma3:4b` as the language model. The system employs a multi-stage pipeline: query decomposition → iterative sub-query retrieval against a Neo4j knowledge graph → document verification → answer synthesis.
 
 | Metric | Value |
 |---|---|
@@ -79,7 +79,7 @@ The LiveOS system was evaluated on **100 HotPotQA multi-hop reasoning questions*
 
 ### Pipeline Architecture
 
-The LiveOS chat pipeline for each query follows five sequential stages:
+The Orb chat pipeline for each query follows five sequential stages:
 
 ```
 Query Input

@@ -1,4 +1,4 @@
-"""Resolve LiveOS data / models / vault paths from env and paths.json."""
+"""Resolve Orb data / models / vault paths from env and paths.json."""
 
 from __future__ import annotations
 
@@ -15,30 +15,37 @@ _PATHS_CACHE: dict | None = None
 
 
 def _default_app_support() -> Path:
-    """OS-specific Application Support / AppData directory for LifeOS.
+    """OS-specific Application Support / AppData directory for Orb.
 
-    Prefers LifeOS; falls back to legacy LiveOS if that already has paths.json.
+    Prefers Orb; falls back to LifeOS / LiveOS if those already have paths.json.
     """
     if sys.platform == "darwin":
-        primary = Path.home() / "Library" / "Application Support" / "LifeOS"
-        legacy = Path.home() / "Library" / "Application Support" / "LiveOS"
+        base = Path.home() / "Library" / "Application Support"
+        candidates = [base / "Orb", base / "LifeOS", base / "LiveOS"]
     elif sys.platform == "win32":
-        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        primary = Path(base) / "LifeOS"
-        legacy = Path(base) / "LiveOS"
+        root = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        base = Path(root)
+        candidates = [base / "Orb", base / "LifeOS", base / "LiveOS"]
     else:
-        primary = Path.home() / ".config" / "LifeOS"
-        legacy = Path.home() / ".config" / "LiveOS"
-    if (primary / "paths.json").exists():
-        return primary
-    if (legacy / "paths.json").exists():
-        return legacy
-    return primary
+        base = Path.home() / ".config"
+        candidates = [base / "Orb", base / "LifeOS", base / "LiveOS"]
+    for candidate in candidates:
+        if (candidate / "paths.json").exists():
+            return candidate
+    return candidates[0]
+
+
+def _env_first(*names: str) -> str | None:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
 
 
 def paths_json_location() -> Path:
     """Bootstrap file that only stores data_dir / models_dir / default_vault_path."""
-    override = os.environ.get("LIVEOS_PATHS_FILE")
+    override = _env_first("ORB_PATHS_FILE", "LIVEOS_PATHS_FILE")
     if override:
         return Path(override)
     return _default_app_support() / "paths.json"
@@ -99,7 +106,7 @@ def save_paths_file(
 
 def resolve_data_dir() -> Path:
     """DATA_DIR: env > paths.json > repo data/ (dev fallback)."""
-    env = os.environ.get("LIVEOS_DATA_DIR") or os.environ.get("DATA_DIR")
+    env = _env_first("ORB_DATA_DIR", "LIVEOS_DATA_DIR", "DATA_DIR")
     if env:
         return Path(env).expanduser().resolve()
     file_paths = load_paths_file()
@@ -110,7 +117,7 @@ def resolve_data_dir() -> Path:
 
 def resolve_models_dir() -> Path:
     """MODELS_DIR: env > paths.json > backend/models (dev fallback)."""
-    env = os.environ.get("LIVEOS_MODELS_DIR") or os.environ.get("MODELS_DIR")
+    env = _env_first("ORB_MODELS_DIR", "LIVEOS_MODELS_DIR", "MODELS_DIR")
     if env:
         return Path(env).expanduser().resolve()
     file_paths = load_paths_file()
@@ -123,7 +130,7 @@ def resolve_default_vault_path() -> Path | None:
     file_paths = load_paths_file()
     if file_paths.get("default_vault_path"):
         return Path(file_paths["default_vault_path"]).expanduser().resolve()
-    env = os.environ.get("LIVEOS_DEFAULT_VAULT")
+    env = _env_first("ORB_DEFAULT_VAULT", "LIVEOS_DEFAULT_VAULT")
     if env:
         return Path(env).expanduser().resolve()
     return None
@@ -150,20 +157,23 @@ def local_download_staging_dir() -> Path:
     Hugging Face + large GGUF downloads are unreliable directly onto SMB/NAS;
     we stage here then copy/move to the user's chosen models directory.
     """
-    override = os.environ.get("LIVEOS_HF_STAGING") or os.environ.get(
-        "LIVEOS_DOWNLOAD_STAGING"
+    override = _env_first(
+        "ORB_HF_STAGING",
+        "ORB_DOWNLOAD_STAGING",
+        "LIVEOS_HF_STAGING",
+        "LIVEOS_DOWNLOAD_STAGING",
     )
     if override:
         p = Path(override).expanduser().resolve()
         p.mkdir(parents=True, exist_ok=True)
         return p
     if sys.platform == "darwin":
-        p = Path.home() / "Library" / "Caches" / "LifeOS" / "model-downloads"
+        p = Path.home() / "Library" / "Caches" / "Orb" / "model-downloads"
     elif sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        p = Path(base) / "LifeOS" / "model-downloads"
+        p = Path(base) / "Orb" / "model-downloads"
     else:
-        p = Path.home() / ".cache" / "lifeos" / "model-downloads"
+        p = Path.home() / ".cache" / "orb" / "model-downloads"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -185,5 +195,5 @@ def ensure_data_layout(data_dir: Path | None = None) -> Path:
 def sqlite_url(data_dir: Path | None = None) -> str:
     root = data_dir or resolve_data_dir()
     root.mkdir(parents=True, exist_ok=True)
-    db_path = (root / "liveos.db").resolve()
+    db_path = (root / "orb.db").resolve()
     return f"sqlite+aiosqlite:///{db_path}"

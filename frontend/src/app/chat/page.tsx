@@ -416,7 +416,7 @@ export default function ChatPage() {
               <div className="h-10 w-10 overflow-hidden rounded-xl ring-1 ring-white/15">
                 <Image
                   src="/logo-icon.png"
-                  alt="LifeOS"
+                  alt="Orb"
                   width={40}
                   height={40}
                   loading="eager"
@@ -424,7 +424,7 @@ export default function ChatPage() {
                 />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-white">LifeOS</h1>
+                <h1 className="text-xl font-bold text-white">Orb</h1>
                 <p className="text-xs text-white/60">Your Personal Brain</p>
               </div>
             </div>

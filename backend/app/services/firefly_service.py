@@ -1,4 +1,4 @@
-"""Read-only/backend-owned Firefly III integration for LifeOS."""
+"""Read-only/backend-owned Firefly III integration for Orb."""
 
 from __future__ import annotations
 
@@ -262,7 +262,7 @@ class FireflyService:
         )
 
     def _group_title_for_kb(self, kb: KBContext) -> str:
-        return f"LifeOS: {kb.name}"
+        return f"Orb: {kb.name}"
 
     async def ensure_kb_scope(self, kb: KBContext) -> int:
         """Resolve or create the Firefly administration for this KB and activate it."""
@@ -274,7 +274,7 @@ class FireflyService:
         group_id = meta.get("firefly_group_id")
         if not isinstance(group_id, int) or group_id <= 0:
             return
-        title = f"LifeOS: {new_name}"
+        title = f"Orb: {new_name}"
         await asyncio.to_thread(
             self._run_php,
             self._php_update_group_title_script(group_id, title),
@@ -2270,7 +2270,7 @@ class FireflyService:
         note_passages = self._format_note_passages(note_docs or [])
         finance_payload = {"workspace": workspace, "summary": summary}
         system = (
-            "You answer finance questions for LifeOS using two sources:\n"
+            "You answer finance questions for Orb using two sources:\n"
             "1. Firefly III ledger data (balances, transactions, reports) — treat as authoritative for numbers.\n"
             "2. Relevant knowledge-base notes — use for budgets, plans, context, and explanations.\n"
             "Blend both when helpful. Be concise and explicit about date ranges. "

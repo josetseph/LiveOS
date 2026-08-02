@@ -9,7 +9,8 @@ import {
     type ReactNode,
 } from "react";
 
-const STORAGE_KEY = "liveos_current_kb";
+const STORAGE_KEY = "orb_current_kb";
+const LEGACY_STORAGE_KEYS = ["lifeos_current_kb", "liveos_current_kb"];
 
 interface StoredKB {
     slug: string;
@@ -39,7 +40,17 @@ const KBContext = createContext<KBContextValue>({
 
 function readStorage(): StoredKB {
     try {
-        const raw = localStorage.getItem(STORAGE_KEY);
+        let raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) {
+            for (const key of LEGACY_STORAGE_KEYS) {
+                raw = localStorage.getItem(key);
+                if (raw) {
+                    localStorage.setItem(STORAGE_KEY, raw);
+                    localStorage.removeItem(key);
+                    break;
+                }
+            }
+        }
         if (!raw) return { slug: "default", name: "default" };
         // Handle old format (plain string slug).
         if (!raw.startsWith("{")) return { slug: raw, name: raw };

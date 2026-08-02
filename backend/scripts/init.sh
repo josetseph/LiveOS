@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Initializing LiveOS..."
+echo "🚀 Initializing Orb..."
 
 # Wait for services to be ready
 echo "⏳ Waiting for PostgreSQL..."
-until PGPASSWORD=password psql -h postgres -U user -d liveos -c '\q'; do
+until PGPASSWORD=password psql -h postgres -U user -d orb -c '\q'; do
   sleep 1
 done
 
@@ -25,4 +25,4 @@ echo "✅ All services ready!"
 cd /app
 python scripts/init_local.py
 
-echo "🎉 LiveOS is ready!"
+echo "🎉 Orb is ready!"

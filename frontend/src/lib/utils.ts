@@ -23,7 +23,7 @@ export function resolveFileUrl(url: string, kbId = "default"): string {
     return `/vault-files/${encodeURIComponent(kbId)}/${cleaned}`;
   }
   const publicBase =
-    process.env.NEXT_PUBLIC_FILES_URL ?? "/files/liveos-assets";
+    process.env.NEXT_PUBLIC_FILES_URL ?? "/files/orb-assets";
   return cleaned.replace(/https?:\/\/rustfs:\d+\/[^/]+/, publicBase);
 }
 

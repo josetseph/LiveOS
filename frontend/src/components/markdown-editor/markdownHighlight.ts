@@ -3,7 +3,7 @@ import { EditorView } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 
 /**
- * LiveOS-dark live-markdown highlighting.
+ * Orb-dark live-markdown highlighting.
  * Syntax markers stay visible; content is color-styled (Alexandrie-style).
  */
 const markdownHighlightStyle = HighlightStyle.define([

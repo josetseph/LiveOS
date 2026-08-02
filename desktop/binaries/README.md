@@ -13,8 +13,8 @@ npm run prefetch-binaries
 
 | Engine | Default | Env |
 |--------|---------|-----|
-| Qdrant | `v1.18.2` | `LIVEOS_QDRANT_VERSION` |
-| Meilisearch | `v1.49.0` | `LIVEOS_MEILI_VERSION` |
+| Qdrant | `v1.18.2` | `ORB_QDRANT_VERSION` |
+| Meilisearch | `v1.49.0` | `ORB_MEILI_VERSION` |
 
 ## Local LLM (no Ollama / llama-server)
 
@@ -22,14 +22,14 @@ Local chat + embeddings use **in-process** [`llama-cpp-python`](https://github.c
 
 Acceleration is auto-detected (Metal on macOS, CUDA when `nvidia-smi` is present, else CPU). Overrides:
 
-- `LIVEOS_LLAMA_BACKEND=metal|cuda|vulkan|cpu`
-- `LIVEOS_LLAMA_N_GPU_LAYERS=-1` (all layers on GPU)
-- `LIVEOS_LLAMA_N_CTX=16384` (chat KV; 32k + `swa_full` OOMs on ~24GB Metal)
-- `LIVEOS_LLAMA_MAX_TOKENS=10240`
-- `LIVEOS_LLAMA_SWA_FULL=true` (required for stable Gemma 4 — compact SWA → ordinal loops)
-- `LIVEOS_LLAMA_REPEAT_PENALTY=1.12`
-- `LIVEOS_EMBED_N_CTX=8192`
-- `LIVEOS_RERANK_N_CTX=8192`
+- `ORB_LLAMA_BACKEND=metal|cuda|vulkan|cpu`
+- `ORB_LLAMA_N_GPU_LAYERS=-1` (all layers on GPU)
+- `ORB_LLAMA_N_CTX=16384` (chat KV; 32k + `swa_full` OOMs on ~24GB Metal)
+- `ORB_LLAMA_MAX_TOKENS=10240`
+- `ORB_LLAMA_SWA_FULL=true` (required for stable Gemma 4 — compact SWA → ordinal loops)
+- `ORB_LLAMA_REPEAT_PENALTY=1.12`
+- `ORB_EMBED_N_CTX=8192`
+- `ORB_RERANK_N_CTX=8192`
 
 Only one heavy model is resident at a time (chat ↔ embed ↔ rerank ↔ Florence/Whisper/Marlin). Chat aborts + retries on Gemma 4 ordinal/"or the" repetition cascades.
 
@@ -41,4 +41,4 @@ CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --force-reinstall --no
 
 ## Contributor Docker
 
-`docker compose` remains available (`LIVEOS_USE_DOCKER=1`).
+`docker compose` remains available (`ORB_USE_DOCKER=1`).

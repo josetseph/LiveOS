@@ -250,7 +250,7 @@ export default function SetupPage() {
               <FolderOpen className="h-5 w-5" /> Paths
             </h2>
             <p className="text-xs text-white/40">
-              Notes vault is the folder of markdown files LifeOS reads and writes. You can
+              Notes vault is the folder of markdown files Orb reads and writes. You can
               change it anytime — click Save setup after browsing.
             </p>
             <label className="block text-sm">
@@ -260,7 +260,7 @@ export default function SetupPage() {
                   value={vaultPath}
                   onChange={(e) => setVaultPath(e.target.value)}
                   className="w-full rounded-lg border border-white/15 bg-black/50 px-3 py-2 font-mono text-sm"
-                  placeholder="~/Documents/LifeOS Vault"
+                  placeholder="~/Documents/Orb Vault"
                   disabled={downloading}
                 />
                 {canBrowse && (
@@ -330,7 +330,7 @@ export default function SetupPage() {
           <section className="rounded-2xl border border-white/10 bg-black/40 p-6 space-y-3">
             <h2 className="text-lg font-medium">AI setup</h2>
             <p className="text-sm text-white/50">
-              You can skip AI and use LifeOS like Obsidian (notes, wikilinks, finance). Chat,
+              You can skip AI and use Orb like Obsidian (notes, wikilinks, finance). Chat,
               ingest, and entity graph stay unavailable until AI is configured.
             </p>
             {(
@@ -384,7 +384,7 @@ export default function SetupPage() {
               <h2 className="text-lg font-medium">Local models</h2>
               <p className="text-xs text-white/45">{catalog.budget_note}</p>
               <p className="text-xs text-white/40">
-                After you click Download, LifeOS fetches your selected chat model plus the
+                After you click Download, Orb fetches your selected chat model plus the
                 auto-sized Qwen3 embed/reranker (required for search — not extra chat LLMs).
                 Florence-2, Whisper, and Marlin download in the background for images/audio/video.
               </p>
@@ -412,7 +412,7 @@ export default function SetupPage() {
                 {catalog.chat_options.length === 0 && (
                   <p className="text-sm text-amber-200/80">
                     No chat models fit the detected RAM budget. Free memory or set{" "}
-                    <code className="font-mono">LIVEOS_RAM_GB</code>.
+                    <code className="font-mono">ORB_RAM_GB</code>.
                   </p>
                 )}
                 {catalog.chat_options.map((opt) => {

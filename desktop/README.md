@@ -1,4 +1,4 @@
-# LiveOS Desktop
+# Orb Desktop
 
 Electron shell that supervises a **Docker-free** local stack:
 
@@ -19,7 +19,7 @@ cd desktop && npm install && npm start
 
 Uses repo `backend/.venv` (or system Python) and `frontend` via `next dev`.
 
-Optional: `LIVEOS_FRONTEND_DEV=1` forces dev server even when a standalone build exists.
+Optional: `ORB_FRONTEND_DEV=1` forces dev server even when a standalone build exists.
 
 ## Installers (.dmg / .exe)
 
@@ -36,9 +36,9 @@ Test packaged layout without building an installer:
 
 ```bash
 npm run prepare-dist
-LIVEOS_RESOURCES=./resources npm start
+ORB_RESOURCES=./resources npm start
 ```
 
 ## Contributors only
 
-`LIVEOS_USE_DOCKER=1` uses root `docker-compose.yml` for infra instead of local Qdrant/Meili binaries. Compose does not run model HTTP sidecars — Florence / Whisper / Marlin / GGUF stay in-process in the API.
+`ORB_USE_DOCKER=1` uses root `docker-compose.yml` for infra instead of local Qdrant/Meili binaries. Compose does not run model HTTP sidecars — Florence / Whisper / Marlin / GGUF stay in-process in the API.

@@ -120,7 +120,7 @@ def _parse_date_str(s: str) -> datetime:
 request_trace_id: ContextVar[str] = ContextVar("request_trace_id", default="")
 
 
-app = FastAPI(title="LiveOS API", version="0.1.0")
+app = FastAPI(title="Orb API", version="0.1.0")
 app.include_router(desktop_router)
 
 cors_origins = [
@@ -164,7 +164,7 @@ async def trace_id_middleware(request: Request, call_next):
 @app.on_event("startup")
 async def startup_event():
     """Initialize external services and database tables on application startup."""
-    logger.info("Application startup: LiveOS API online")
+    logger.info("Application startup: Orb API online")
     await init_db()
     from app.core import runtime_config
 
@@ -300,7 +300,7 @@ async def upload_file(
     else:
         filename_hint = file.filename or f"file.{ext}"
 
-    # Always store in the KB vault (no S3 for LifeOS desktop/local).
+    # Always store in the KB vault (no S3 for Orb desktop/local).
     from app.services.local_storage import store_upload
 
     try:
@@ -344,7 +344,7 @@ async def delete_file(file_key: str, kb: KBContext = Depends(get_kb)):
 async def root():
     """Root endpoint returning a simple service-status greeting."""
     logger.debug("Health check hit")
-    return {"message": "LiveOS is online", "status": "active"}
+    return {"message": "Orb is online", "status": "active"}
 
 
 @app.get("/health")

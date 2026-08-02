@@ -1,5 +1,5 @@
 """
-Central Logging Module for LiveOS
+Central Logging Module for Orb
 
 Handles configuration and retrieval of loggers.
 Routes logs to specific files based on component name.

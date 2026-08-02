@@ -1,9 +1,9 @@
 {
-  "name": "lifeos",
-  "productName": "LifeOS",
+  "name": "orb",
+  "productName": "Orb",
   "version": "0.1.0",
   "private": true,
-  "description": "LifeOS desktop — supervisor for vault notes, search engines, and API",
+  "description": "Orb desktop — supervisor for vault notes, search engines, and API",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -24,9 +24,9 @@
     "dist:linux": "electron-builder --linux"
   },
   "build": {
-    "appId": "com.liveos.app",
-    "productName": "LifeOS",
-    "executableName": "LifeOS",
+    "appId": "com.orb.app",
+    "productName": "Orb",
+    "executableName": "Orb",
     "directories": {
       "output": "dist"
     },
@@ -73,7 +73,7 @@
       {
         "provider": "github",
         "owner": "josetseph",
-        "repo": "LiveOS"
+        "repo": "Orb"
       }
     ],
     "mac": {
