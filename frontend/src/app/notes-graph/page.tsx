@@ -227,6 +227,7 @@ export default function NotesGraphPage() {
   const [groupDraft, setGroupDraft] = useState("");
   const graphRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const loadGenRef = useRef(0);
   const [dims, setDims] = useState({ w: 0, h: 0 });
   const controlsRef = useRef(controls);
   controlsRef.current = controls;
@@ -248,15 +249,18 @@ export default function NotesGraphPage() {
   }, []);
 
   const loadGraph = useCallback(async () => {
+    const gen = ++loadGenRef.current;
     setLoading(true);
     try {
       const payload = await api.getNotesGraph(currentKB);
+      if (gen !== loadGenRef.current) return;
       setRaw(toForceGraphData(payload));
     } catch (error) {
+      if (gen !== loadGenRef.current) return;
       console.error("Failed to fetch notes graph", error);
       setRaw({ nodes: [], links: [] });
     } finally {
-      setLoading(false);
+      if (gen === loadGenRef.current) setLoading(false);
     }
   }, [currentKB]);
 

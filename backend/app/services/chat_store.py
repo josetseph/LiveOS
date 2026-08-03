@@ -78,29 +78,48 @@ class ChatStore:
             await session.refresh(conv)
             return _conversation_to_dict(conv)
 
-    async def get_conversation(self, conversation_id: str) -> dict | None:
+    async def get_conversation(
+        self, conversation_id: str, kb_id: str | None = None
+    ) -> dict | None:
         async with AsyncSessionLocal() as session:
-            row = await session.execute(
-                select(ChatConversation).where(
-                    ChatConversation.id == conversation_id,
-                    ChatConversation.deleted_at.is_(None),
-                )
-            )
+            clauses = [
+                ChatConversation.id == conversation_id,
+                ChatConversation.deleted_at.is_(None),
+            ]
+            if kb_id is not None:
+                clauses.append(ChatConversation.kb_id == kb_id)
+            row = await session.execute(select(ChatConversation).where(*clauses))
             conv = row.scalar_one_or_none()
             return _conversation_to_dict(conv) if conv else None
 
-    async def delete_conversation(self, conversation_id: str) -> bool:
+    async def delete_conversation(
+        self, conversation_id: str, kb_id: str | None = None
+    ) -> bool:
         async with AsyncSessionLocal() as session:
+            clauses = [ChatConversation.id == conversation_id]
+            if kb_id is not None:
+                clauses.append(ChatConversation.kb_id == kb_id)
             result = await session.execute(
                 update(ChatConversation)
-                .where(ChatConversation.id == conversation_id)
+                .where(*clauses)
                 .values(deleted_at=datetime.now(timezone.utc))
             )
             await session.commit()
             return result.rowcount > 0
 
-    async def hard_delete_conversation(self, conversation_id: str) -> bool:
+    async def hard_delete_conversation(
+        self, conversation_id: str, kb_id: str | None = None
+    ) -> bool:
         async with AsyncSessionLocal() as session:
+            if kb_id is not None:
+                owned = await session.execute(
+                    select(ChatConversation.id).where(
+                        ChatConversation.id == conversation_id,
+                        ChatConversation.kb_id == kb_id,
+                    )
+                )
+                if owned.scalar_one_or_none() is None:
+                    return False
             await session.execute(
                 delete(ChatMessage).where(
                     ChatMessage.conversation_id == conversation_id
@@ -114,8 +133,20 @@ class ChatStore:
             await session.commit()
             return result.rowcount > 0
 
-    async def list_messages(self, conversation_id: str) -> list[dict]:
+    async def list_messages(
+        self, conversation_id: str, kb_id: str | None = None
+    ) -> list[dict]:
         async with AsyncSessionLocal() as session:
+            if kb_id is not None:
+                owned = await session.execute(
+                    select(ChatConversation.id).where(
+                        ChatConversation.id == conversation_id,
+                        ChatConversation.kb_id == kb_id,
+                        ChatConversation.deleted_at.is_(None),
+                    )
+                )
+                if owned.scalar_one_or_none() is None:
+                    return []
             rows = await session.execute(
                 select(ChatMessage)
                 .where(ChatMessage.conversation_id == conversation_id)
@@ -175,8 +206,8 @@ class ChatStore:
         self, conversation_id: str | None, kb_id: str
     ) -> dict:
         if conversation_id:
-            existing = await self.get_conversation(conversation_id)
-            if existing and existing["kb_id"] == kb_id:
+            existing = await self.get_conversation(conversation_id, kb_id=kb_id)
+            if existing:
                 return existing
         return await self.create_conversation(kb_id)
 

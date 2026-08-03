@@ -1,23 +1,73 @@
-"""Pydantic schemas for LLM-extracted knowledge graph nodes, relationships, and notes."""
+"""Pydantic schemas for LLM-extracted knowledge graph nodes and relationships."""
 
-# pylint: disable=import-outside-toplevel
-from typing import Any, List, Optional
+from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+_SCORE_LABELS = {
+    "very high": 9.0,
+    "high": 8.0,
+    "medium": 6.0,
+    "moderate": 6.0,
+    "low": 4.0,
+    "very low": 2.0,
+}
+
+
+def _normalize_score(value: Any, default: float) -> float:
+    """Coerce LLM score noise (None, labels, 0–1 floats) onto the 1–10 scale."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in _SCORE_LABELS:
+            return _SCORE_LABELS[key]
+        try:
+            value = float(key)
+        except ValueError:
+            return default
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return default
+    if 0.0 <= score <= 1.0:
+        score *= 10.0
+    return max(1.0, min(10.0, score))
 
 
 class Node(BaseModel):
-    """Single uniform node type — LLM sets `type` freely (e.g. 'person', 'song', 'event')."""
+    """Single uniform node — LLM sets ``type`` freely (e.g. person, song, event)."""
 
     name: str = ""
     type: str = "thing"
     type_reasoning: str = ""
     isolated_context: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_keys(cls, data: Any) -> Any:
+        """Map common LLM key aliases onto canonical fields."""
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        if not out.get("name"):
+            if out.get("trait"):
+                out["name"] = out["trait"]
+            elif out.get("title"):
+                out["name"] = out["title"]
+        if not out.get("isolated_context"):
+            if out.get("evidence_quote"):
+                out["isolated_context"] = out["evidence_quote"]
+            elif out.get("context"):
+                out["isolated_context"] = out["context"]
+        return out
+
     @field_validator("*", mode="before")
     @classmethod
     def handle_none(cls, v: Any, info) -> Any:
-        """Coerce None or empty strings to safe defaults for each field."""
+        """Coerce None to safe defaults for each field."""
         if v is None:
             if info.field_name == "type":
                 return "thing"
@@ -32,7 +82,7 @@ class ExtractedRelationship(BaseModel):
     target_name: str = ""
     relationship_type: str = "relates_to"
     reasoning: str = ""
-    # All three scores on the 1–10 scale (plan-aligned).
+    # All three scores on the 1–10 scale.
     # edge_weight = (strength × 0.5) + (confidence × 0.3) + (relevance × 0.2)
     strength: float = 5.0
     confidence: float = 7.0
@@ -40,19 +90,42 @@ class ExtractedRelationship(BaseModel):
     natural_language: str = ""
     context: str = ""
 
-    @field_validator("*", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def handle_none(cls, v: Any, info) -> Any:
-        """Coerce None, strings, and out-of-range floats to valid field values."""
+    def normalize_keys(cls, data: Any) -> Any:
+        """Map common LLM key aliases onto canonical fields."""
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        if not out.get("source_name") and out.get("entity1"):
+            out["source_name"] = out["entity1"]
+        if not out.get("target_name") and out.get("entity2"):
+            out["target_name"] = out["entity2"]
+        if not out.get("natural_language") and out.get("description"):
+            out["natural_language"] = out["description"]
+        return out
+
+    @field_validator("strength", "confidence", "relevance", mode="before")
+    @classmethod
+    def normalize_scores(cls, v: Any, info) -> float:
+        defaults = {"confidence": 7.0, "strength": 5.0, "relevance": 5.0}
+        return _normalize_score(v, defaults.get(info.field_name, 5.0))
+
+    @field_validator(
+        "source_name",
+        "target_name",
+        "relationship_type",
+        "reasoning",
+        "natural_language",
+        "context",
+        mode="before",
+    )
+    @classmethod
+    def handle_none_strings(cls, v: Any, info) -> Any:
         if v is None:
-            _none_defaults = {
-                "confidence": 7.0,
-                "strength": 5.0,
-                "relevance": 5.0,
-                "relationship_type": "relates_to",
-            }
-            return _none_defaults.get(info.field_name, "")
-        # Empty relationship_type → default
+            if info.field_name == "relationship_type":
+                return "relates_to"
+            return ""
         if (
             info.field_name == "relationship_type"
             and isinstance(v, str)
@@ -63,21 +136,67 @@ class ExtractedRelationship(BaseModel):
 
 
 class Extraction(BaseModel):
-    """Root extraction result containing all nodes and relationships found in a note."""
+    """Root extraction result — nodes and relationships found in a note."""
 
-    nodes: List[Node] = Field(default_factory=list)
-    relationships: List[ExtractedRelationship] = Field(default_factory=list)
+    nodes: list[Node] = Field(default_factory=list)
+    relationships: list[ExtractedRelationship] = Field(default_factory=list)
     sentiment: str = "Neutral"
-    title: Optional[str] = None
+    title: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_keys(cls, data: Any) -> Any:
+        """Accept messy LLM shapes (bare lists, wrappers, embedded rels)."""
+        if data is None:
+            return {"nodes": [], "relationships": []}
+
+        # Unwrap common outer wrappers
+        if isinstance(data, dict):
+            for key in ("extraction", "data", "result"):
+                inner = data.get(key)
+                if isinstance(inner, dict) and (
+                    "nodes" in inner or "relationships" in inner
+                ):
+                    data = inner
+                    break
+
+        # Gemma-style: [nodes_list, relationships_list]
+        if (
+            isinstance(data, list)
+            and len(data) == 2
+            and isinstance(data[0], list)
+            and isinstance(data[1], list)
+        ):
+            data = {"nodes": data[0], "relationships": data[1]}
+
+        # Bare list of nodes (dicts or strings), optionally with embedded rels
+        if isinstance(data, list):
+            nodes: list[Any] = []
+            relationships: list[Any] = []
+            for item in data:
+                if isinstance(item, str) and item.strip():
+                    nodes.append({"name": item.strip()})
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                node = dict(item)
+                embedded = node.pop("relationships", None)
+                if isinstance(embedded, list):
+                    relationships.extend(embedded)
+                nodes.append(node)
+            data = {"nodes": nodes, "relationships": relationships}
+
+        if not isinstance(data, dict):
+            return {"nodes": [], "relationships": []}
+        return data
 
     @field_validator("nodes", "relationships", mode="before")
     @classmethod
-    def ensure_list(cls, v, info):
-        """Coerce None or scalar values to an empty list for nodes/relationships fields."""
+    def ensure_list(cls, v: Any, info) -> list:
+        """Coerce None or scalars to a list; string items → minimal nodes."""
         if v is None or not isinstance(v, list):
             return []
         if info.field_name == "nodes":
-            # Coerce plain strings → minimal node dicts so Node validation doesn't crash
             return [
                 (
                     {"name": item.strip()}
@@ -91,14 +210,13 @@ class Extraction(BaseModel):
     @field_validator("sentiment", mode="before")
     @classmethod
     def handle_sentiment_none(cls, v: Any) -> Any:
-        """Replace None or empty sentiment with the default value 'Neutral'."""
         return v if v else "Neutral"
 
 
 class NoteInput(BaseModel):
-    """Input schema for creating or re-ingesting a note."""
+    """Create or re-ingest a note (legacy ``POST /ingest`` + pipeline)."""
 
     content: str
-    created_at: Optional[str] = None
-    title: Optional[str] = None  # If provided, use instead of auto-generating
-    skip_ingestion: bool = False  # If True, save to DB but don't process in brain
+    created_at: str | None = None
+    title: str | None = None  # If provided, use instead of auto-generating
+    skip_ingestion: bool = False  # Save metadata/vault only; skip graph ingest

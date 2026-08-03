@@ -2,7 +2,7 @@
 
 Electron shell that supervises a **Docker-free** local stack:
 
-1. Wizard → `paths.json` + AI mode (data under Application Support / `%APPDATA%`)
+1. Wizard → `paths.json` (data dir, models dir, optional vault + AI mode)
 2. Auto-downloads **Qdrant** + **Meilisearch** into `DATA_DIR/bin`
 3. Bundled **Python API** + **Next.js UI** (when built with `prepare-dist`)
 4. Local LLM: in-process `llama-cpp-python` + GGUF download via Setup
@@ -38,7 +38,3 @@ Test packaged layout without building an installer:
 npm run prepare-dist
 ORB_RESOURCES=./resources npm start
 ```
-
-## Contributors only
-
-`ORB_USE_DOCKER=1` uses root `docker-compose.yml` for infra instead of local Qdrant/Meili binaries. Compose does not run model HTTP sidecars — Florence / Whisper / Marlin / GGUF stay in-process in the API.

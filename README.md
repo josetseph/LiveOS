@@ -192,14 +192,12 @@ Full packaging notes: [`desktop/PACKAGING.md`](desktop/PACKAGING.md).
 
 ### Contributors — optional Docker infra
 
-`docker-compose.yml` can still bring up Postgres, Qdrant, Meilisearch, API, and UI for contributor stacks. It is **not** the product install path and does **not** run model HTTP sidecars — multimodal and GGUF inference stay in-process in the API.
+`docker-compose.yml` can still bring up Postgres, Qdrant, Meilisearch, API, and UI for contributor stacks. It is **not** the product install path and does **not** run model HTTP sidecars — multimodal and GGUF inference stay in-process in the API. The Electron app always supervises local binaries (`npm start` in `desktop/`); do not wire Docker through the desktop shell.
 
 ```bash
 # Optional contributor path only
 docker compose up -d
 ```
-
-Or from the desktop shell: `ORB_USE_DOCKER=1 npm start`.
 
 ---
 

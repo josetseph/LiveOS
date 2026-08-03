@@ -116,120 +116,51 @@ export interface FinanceBudget {
 }
 
 export interface FinanceCategory {
-    id: string;
-    name: string;
-    notes?: string | null;
-}
-
-export interface FinanceBill {
-    id: string;
-    name: string;
-    amount_min: number;
-    amount_max: number;
-    currency?: string | null;
-    repeat_freq?: string | null;
-    next_expected_match?: string | null;
-    active: boolean;
-    paid?: boolean;
-    notes?: string | null;
-}
-
-export interface FinancePiggyBank {
-    id: string;
-    name: string;
-    current_amount: number;
-    target_amount: number;
-    percentage?: number;
-    currency?: string | null;
-    start_date?: string | null;
-    target_date?: string | null;
-    notes?: string | null;
-    active?: boolean;
-}
-
-export interface FinanceTag {
-    id: string;
-    tag: string;
-    date?: string | null;
-    description?: string | null;
+  id: string;
+  name: string;
+  notes?: string | null;
 }
 
 export interface FinanceRecurrence {
-    id: string;
-    title: string;
-    type?: string | null;
-    description?: string | null;
-    amount: number;
-    currency?: string | null;
-    first_date?: string | null;
-    repeat_until?: string | null;
-    active: boolean;
-    repetition_type?: string | null;
-    repetition_moment?: string | null;
-    source_name?: string | null;
-    destination_name?: string | null;
+  id: string;
+  title: string;
+  type?: string | null;
+  description?: string | null;
+  amount: number;
+  currency?: string | null;
+  first_date?: string | null;
+  repeat_until?: string | null;
+  active: boolean;
+  repetition_type?: string | null;
+  repetition_moment?: string | null;
+  source_name?: string | null;
+  destination_name?: string | null;
 }
 
 export interface FinanceRuleGroup {
-    id: string;
-    title: string;
-    description?: string | null;
-    order?: number | null;
-    active: boolean;
+  id: string;
+  title: string;
+  description?: string | null;
+  order?: number | null;
+  active: boolean;
 }
 
 export interface FinanceRule {
-    id: string;
-    title: string;
-    description?: string | null;
-    rule_group_id: string;
-    trigger?: string | null;
-    active: boolean;
-    strict?: boolean;
-    triggers: Array<{ type?: string | null; value?: string | null }>;
-    actions: Array<{ type?: string | null; value?: string | null }>;
-}
-
-export interface FinanceWebhook {
-    id: string;
-    title: string;
-    url?: string | null;
-    active: boolean;
-    triggers: string[];
-    responses: string[];
-    deliveries: string[];
-}
-
-export interface FinanceObjectGroup {
-    id: string;
-    title: string;
-    order?: number | null;
-}
-
-export interface FinanceExchangeRate {
-    id: string;
-    date?: string | null;
-    rate: number;
-    from?: string | null;
-    to?: string | null;
-}
-
-export interface FinanceAttachment {
-    id: string;
-    filename: string;
-    title?: string | null;
-    notes?: string | null;
-    attachable_type?: string | null;
-    attachable_id?: string;
-    size?: number | null;
-    mime?: string | null;
-    download_url?: string | null;
+  id: string;
+  title: string;
+  description?: string | null;
+  rule_group_id: string;
+  trigger?: string | null;
+  active: boolean;
+  strict?: boolean;
+  triggers: Array<{ type?: string | null; value?: string | null }>;
+  actions: Array<{ type?: string | null; value?: string | null }>;
 }
 
 export interface FinanceSearchResult {
-    kind: "transactions" | "accounts" | string;
-    query: string;
-    results: Array<FinanceTransaction | FinanceAccount>;
+  kind: "transactions" | "accounts" | string;
+  query: string;
+  results: Array<FinanceTransaction | FinanceAccount>;
 }
 
 export interface FinanceWorkspace {

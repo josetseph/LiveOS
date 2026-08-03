@@ -8,6 +8,8 @@ import time
 import uuid
 from collections import defaultdict
 
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from app.core.config import settings
 from app.core.log import get_logger
 from app.schemas.extraction import Extraction, NoteInput
@@ -19,29 +21,10 @@ from app.services.ingestion_tracker import (
 )
 from app.services.llm import llm_service
 from app.services.qdrant_service import QdrantService, qdrant_service
-from app.services.typesense_service import TypesenseService, typesense_service
+from app.services.meilisearch_service import MeilisearchService, meilisearch_service
 from app.workflows.agents.ingestion_agent import ingestion_agent
 
-# Full-note FIFO ingestion lane. The default is one note at a time so local
-# model services, Gemma extraction, graph writes, and indexing never overlap.
-_PROCESS_CONCURRENCY = settings.INGESTION_PIPELINE_CONCURRENCY
-_process_semaphore = asyncio.Semaphore(_PROCESS_CONCURRENCY)
-
 logger = get_logger("IngestionPipeline")
-
-# Single-flight guard for full community recompute.
-# Any newer recompute request supersedes older requests/runs.
-_community_run_state_lock = threading.Lock()
-_community_run_seq = 0  # pylint: disable=invalid-name
-_community_run_active_seq = 0  # pylint: disable=invalid-name
-_community_run_running = False  # pylint: disable=invalid-name
-
-# Debounce timer for post-ingestion temporal digest rebuild.
-# Uses the same idle window as community detection (COMMUNITY_IDLE_SECONDS).
-_temporal_digest_timer: threading.Timer | None = None  # pylint: disable=invalid-name
-_temporal_digest_timer_lock = threading.Lock()  # pylint: disable=invalid-name
-_temporal_digest_running: bool = False  # pylint: disable=invalid-name
-# pylint: disable=invalid-name
 
 
 def clean_rel_type(rel_type: str, source_name: str, target_name: str) -> str:
@@ -94,9 +77,6 @@ class EntityLockManager:  # pylint: disable=too-few-public-methods
         return self._locks[(label, name.lower().strip())]
 
 
-entity_lock_manager = EntityLockManager()
-
-
 class IngestionWorkflow:
     """Orchestrates full ingestion: multimedia → LLM extraction → graph → embeddings → communities."""
 
@@ -104,11 +84,25 @@ class IngestionWorkflow:
         self,
         graph: GraphService | None = None,
         qdrant: QdrantService | None = None,
-        typesense: TypesenseService | None = None,
+        meili: MeilisearchService | None = None,
     ):
         self._graph = graph or graph_service
         self._qdrant = qdrant or qdrant_service
-        self._typesense = typesense or typesense_service
+        self._meili = meili or meilisearch_service
+        # Per-KB concurrency / maintenance state (not process-global).
+        # Default concurrency is 1 so in-process GGUF/HF models, Gemma extraction,
+        # graph writes, and indexing do not overlap within a vault.
+        self._process_semaphore = asyncio.Semaphore(
+            settings.INGESTION_PIPELINE_CONCURRENCY
+        )
+        self._entity_locks = EntityLockManager()
+        self._community_run_state_lock = threading.Lock()
+        self._community_run_seq = 0
+        self._community_run_active_seq = 0
+        self._community_run_running = False
+        self._temporal_digest_timer: threading.Timer | None = None
+        self._temporal_digest_timer_lock = threading.Lock()
+        self._temporal_digest_running = False
 
     async def process_note(self, note_input: NoteInput, note_id: str = None):
         """Run the full ingestion pipeline for a single note."""
@@ -124,7 +118,7 @@ class IngestionWorkflow:
 
         # Wait for a pipeline slot.  Without this cap, sending 990 notes at once
         # spawns 990 concurrent coroutines that all hit the DB pool simultaneously.
-        async with _process_semaphore:
+        async with self._process_semaphore:
             await self._update_note_processing_status(
                 note_id, "Starting ingestion", None
             )
@@ -176,7 +170,7 @@ class IngestionWorkflow:
                             f"(strength={r.strength}, confidence={r.confidence}, relevance={r.relevance})"
                         )
 
-                # Mark as processed in Postgres
+                # Mark as processed in SQLite metadata
                 await self._mark_note_processed(note_id)
                 await self._queue_leiden_recompute_if_due(note_id)
 
@@ -219,9 +213,6 @@ class IngestionWorkflow:
                     logger.debug("Post-ingestion model unload skipped: %s", unload_exc)
                 await _tracker.end_ingestion(self.rebuild_leiden_communities)
 
-    # Internal helpers reused by the Agent
-    from tenacity import retry, stop_after_attempt, wait_exponential
-
     async def _update_note_processing_status(
         self, note_id: str, stage: str | None, model: str | None = None
     ) -> None:
@@ -242,8 +233,8 @@ class IngestionWorkflow:
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
-    async def _update_note_content_postgres(self, note_id: str, content: str):
-        """Persist enriched note body to the vault .md (and clear deprecated DB body)."""
+    async def _persist_note_body(self, note_id: str, content: str):
+        """Persist enriched note body to the vault ``.md`` (source of truth)."""
         from sqlalchemy import select
 
         from app.core.database import AsyncSessionLocal
@@ -259,17 +250,16 @@ class IngestionWorkflow:
                     raise ValueError(f"Note {note_id} not found")
 
                 kb = kb_registry.get_kb(note.kb_id) if note.kb_id else None
-                if kb and kb.vault_path:
-                    persist_note_body(note, kb, content)
-                    logger.info(
-                        f"[Ingestion] Updated vault content for Note {note_id} "
-                        f"({note.rel_path})"
+                if not kb or not kb.vault_path:
+                    raise RuntimeError(
+                        f"Note {note_id} has no vault — cannot persist body "
+                        "(note bodies live in vault .md, not SQLite)"
                     )
-                else:
-                    note.content = content
-                    logger.warning(
-                        f"[Ingestion] No vault for Note {note_id}; wrote deprecated content column"
-                    )
+                persist_note_body(note, kb, content)
+                logger.info(
+                    f"[Ingestion] Updated vault content for Note {note_id} "
+                    f"({note.rel_path})"
+                )
                 await session.commit()
             except Exception as e:
                 logger.error(f"Error updating note content: {e}")
@@ -278,10 +268,8 @@ class IngestionWorkflow:
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
-    async def _update_note_title_postgres(self, note_id: str, title: str):
-        """
-        Updates the Note title in Postgres.
-        """
+    async def _update_note_title(self, note_id: str, title: str):
+        """Update the note title in SQLite metadata."""
         from sqlalchemy import update
 
         from app.core.database import AsyncSessionLocal
@@ -294,19 +282,17 @@ class IngestionWorkflow:
                 )
                 await session.commit()
                 logger.info(
-                    f"[Ingestion] Updated Postgres Title for Note {note_id}: '{title}'"
+                    f"[Ingestion] Updated title for Note {note_id}: '{title}'"
                 )
             except Exception as e:
-                logger.error(f"Error updating Postgres title: {repr(e)}")
+                logger.error(f"Error updating note title: {repr(e)}")
                 raise e
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
     async def _mark_note_processed(self, note_id: str):
-        """
-        Sets processed = True in Postgres to prevent re-runs.
-        """
+        """Set processed=True in SQLite metadata to prevent re-runs."""
         from sqlalchemy import update
 
         from app.core.database import AsyncSessionLocal
@@ -334,10 +320,7 @@ class IngestionWorkflow:
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
     async def _mark_note_failed(self, note_id: str):
-        """
-        Sets failed = True in Postgres so callers can distinguish a permanent
-        failure from a note that is still being processed.
-        """
+        """Set failed=True in SQLite so callers can distinguish permanent failure."""
         from sqlalchemy import update
 
         from app.core.database import AsyncSessionLocal
@@ -554,13 +537,12 @@ class IngestionWorkflow:
                 logger.info(
                     f"[Ontology] Seeded Qdrant stubs: ok={stub_ok} fail={stub_fail}"
                 )
-                if stub_fail and not stub_ok and any(
-                    d["is_new"] and d["embedding"] for d in node_data
-                ):
+                if stub_fail:
                     raise RuntimeError(
-                        "Failed to seed Qdrant node_cores stubs — aborting ingest "
-                        "so we do not create Kuzu/Qdrant ID split-brain. "
-                        "Check Qdrant is up and embedding dimensions match collections."
+                        f"Failed to seed {stub_fail} Qdrant node_cores stub(s) "
+                        f"(ok={stub_ok}) — aborting ingest to avoid Kuzu/Qdrant "
+                        "ID split-brain. Check Qdrant is up and embedding "
+                        "dimensions match collections."
                     )
 
         # 6. RELATIONSHIPS (New - Inter-node connections)
@@ -595,9 +577,8 @@ class IngestionWorkflow:
             )
 
             # Collect all graph results first; batch-embed the new/evolved NL texts afterwards.
-            _qdrant_rel_pending: list[tuple[dict, str, str, str]] = (
-                []
-            )  # (result, nl_text, src_id, tgt_id)
+            _qdrant_rel_pending: list[tuple[dict, str, str, str]] = []
+            _rel_errors: list[str] = []
 
             # Diagnostics counters for end-of-note summary log.
             _rel_total = len(extraction.relationships)
@@ -724,11 +705,21 @@ class IngestionWorkflow:
                     _rel_written += 1
 
                 except Exception as e:  # pylint: disable=broad-exception-caught
-                    logger.error(
-                        f"[Relationship] Failed to create relationship "
+                    err = (
                         f"{rel.source_name}->{rel.target_name}: {e}"
                     )
-                    continue
+                    logger.error(f"[Relationship] Failed to create relationship {err}")
+                    _rel_errors.append(err)
+
+            if _rel_errors:
+                preview = "; ".join(_rel_errors[:5])
+                more = (
+                    f" (+{len(_rel_errors) - 5} more)" if len(_rel_errors) > 5 else ""
+                )
+                raise RuntimeError(
+                    f"Failed to write {len(_rel_errors)} relationship(s): "
+                    f"{preview}{more}"
+                )
 
             # Batch-embed all new/evolved relationship NL texts in one round-trip.
             if _qdrant_rel_pending:
@@ -793,17 +784,15 @@ class IngestionWorkflow:
         # fires after _TEMPORAL_DIGEST_IDLE_SECONDS of inactivity, so a burst
         # of notes produces exactly one rebuild once the system goes quiet.
         if _settings.TEMPORAL_DIGESTS_ENABLED:
-            global _temporal_digest_timer  # pylint: disable=global-statement
-            _wf = self
-            with _temporal_digest_timer_lock:
-                if _temporal_digest_timer is not None:
-                    _temporal_digest_timer.cancel()
-                _temporal_digest_timer = threading.Timer(
+            with self._temporal_digest_timer_lock:
+                if self._temporal_digest_timer is not None:
+                    self._temporal_digest_timer.cancel()
+                self._temporal_digest_timer = threading.Timer(
                     COMMUNITY_IDLE_SECONDS,
-                    _wf.build_temporal_digests,
+                    self.build_temporal_digests,
                 )
-                _temporal_digest_timer.daemon = True
-                _temporal_digest_timer.start()
+                self._temporal_digest_timer.daemon = True
+                self._temporal_digest_timer.start()
             logger.info(
                 f"[TemporalDigest] Digest rebuild scheduled "
                 f"({COMMUNITY_IDLE_SECONDS} s idle window)."
@@ -889,16 +878,14 @@ class IngestionWorkflow:
             name: Node identifier
             new_contexts: Contexts extracted for this node in the current ingestion run
         """
-        async with entity_lock_manager.get_lock(label, name):
-            loop = asyncio.get_running_loop()
-
+        async with self._entity_locks.get_lock(label, name):
             # 1. Resolve node_id. Qdrant is the primary lookup, but if it misses
             # while Kuzu already has a structural node with this name, reuse that
             # existing graph ID to avoid minting duplicate same-name nodes.
             def _get_existing():
                 return self._qdrant.find_node_id_by_name(name)
 
-            node_id: str | None = await loop.run_in_executor(None, _get_existing)
+            node_id: str | None = await asyncio.to_thread(_get_existing)
             existing_contexts: list[str] = []
 
             if node_id:
@@ -907,9 +894,7 @@ class IngestionWorkflow:
                     _content = self._qdrant.get_node_content_by_id(node_id)
                     return _content or {}
 
-                _existing_content = await loop.run_in_executor(
-                    None, _get_qdrant_contexts
-                )
+                _existing_content = await asyncio.to_thread(_get_qdrant_contexts)
                 existing_contexts = _existing_content.get("isolated_contexts", [])
                 logger.info(
                     f"  [NodeSummary] '{name}' EXISTING id={node_id} "
@@ -931,9 +916,7 @@ class IngestionWorkflow:
                         return None
                     return sorted(_candidates)[0]
 
-                _graph_existing_id = await loop.run_in_executor(
-                    None, _find_existing_graph_id
-                )
+                _graph_existing_id = await asyncio.to_thread(_find_existing_graph_id)
                 if _graph_existing_id:
                     node_id = _graph_existing_id
                     logger.warning(
@@ -944,14 +927,12 @@ class IngestionWorkflow:
                     # Fetch any existing isolated_contexts from Qdrant (the node may
                     # have contexts in node_isolated_contexts even without a node_cores
                     # entry). Without this, existing_contexts stays [] and the
-                    # subsequent Typesense upsert would silently wipe stored contexts.
+                    # subsequent Meilisearch upsert would silently wipe stored contexts.
                     def _get_kuzu_node_contexts():
                         content = self._qdrant.get_node_content_by_id(node_id)
                         return (content or {}).get("isolated_contexts", [])
 
-                    existing_contexts = await loop.run_in_executor(
-                        None, _get_kuzu_node_contexts
-                    )
+                    existing_contexts = await asyncio.to_thread(_get_kuzu_node_contexts)
                     if existing_contexts:
                         logger.info(
                             f"  [NodeSummary] '{name}' fetched {len(existing_contexts)} "
@@ -975,7 +956,7 @@ class IngestionWorkflow:
                             },
                         )
 
-                    await loop.run_in_executor(None, _merge_node)
+                    await asyncio.to_thread(_merge_node)
 
             # 2. Append all new contexts that aren't already stored (dedup against existing).
             # Collecting all of them before the LLM call means one summary generation
@@ -1000,8 +981,7 @@ class IngestionWorkflow:
                     return _content["type"]
                 return (node_type or "thing").lower().strip() or "thing"
 
-            _node_type_val = await loop.run_in_executor(None, _get_node_type)
-            node_type = _node_type_val
+            node_type = await asyncio.to_thread(_get_node_type)
 
             logger.info(
                 f"  [NodeSummary] '{name}' generating embeddings for "
@@ -1024,7 +1004,7 @@ class IngestionWorkflow:
 
                 return new_ctx_pairs
 
-            new_ctx_pairs = await loop.run_in_executor(None, _generate_embeddings)
+            new_ctx_pairs = await asyncio.to_thread(_generate_embeddings)
             logger.debug(
                 f"  [NodeSummary] '{name}' embeddings generated: "
                 f"new_ctx={len(new_ctx_pairs)}"
@@ -1039,7 +1019,7 @@ class IngestionWorkflow:
                     {"node_id": node_id, "name": name, "type": node_type or "unknown"},
                 )
 
-            await loop.run_in_executor(None, _save_update)
+            await asyncio.to_thread(_save_update)
             logger.debug(f"  [NodeSummary] '{name}' Kuzu structural MERGE done")
 
             # 6. Write to Qdrant (append new contexts).
@@ -1057,7 +1037,7 @@ class IngestionWorkflow:
                         wrote += 1
                 return wrote
 
-            wrote_count = await loop.run_in_executor(None, _write_qdrant)
+            wrote_count = await asyncio.to_thread(_write_qdrant)
             expected = len(new_ctx_pairs)
             if expected:
                 if wrote_count == expected:
@@ -1095,7 +1075,7 @@ class IngestionWorkflow:
                         description=merged_ctx_text,
                     )
 
-                core_ok = await loop.run_in_executor(None, _write_node_core)
+                core_ok = await asyncio.to_thread(_write_node_core)
                 if not core_ok:
                     raise RuntimeError(
                         f"Failed to upsert Qdrant node_cores for '{name}' "
@@ -1106,8 +1086,8 @@ class IngestionWorkflow:
                     f"({len(existing_contexts)} context(s) merged)"
                 )
 
-            # 7. Write to Typesense only after Qdrant succeeded (Qdrant is SoT).
-            def _write_es():
+            # 7. Write to Meilisearch only after Qdrant succeeded (Qdrant is SoT).
+            def _write_meili():
                 # Fetch relationship NL sentences from Qdrant (not Kuzu)
                 rel_qdrant = self._qdrant.get_relationships_for_node_ids([node_id])
                 rel_nl = " ".join(
@@ -1119,14 +1099,14 @@ class IngestionWorkflow:
                     ctx for ctx in existing_contexts if ctx and ctx.strip()
                 )
                 # Defense-in-depth: if we somehow ended up with no contexts, fetch
-                # what Typesense already has so we don't wipe it with a blank upsert.
+                # what Meilisearch already has so we don't wipe it with a blank upsert.
                 if not contexts_text:
                     try:
-                        existing_ts = self._typesense.get_node(node_id) or {}
-                        contexts_text = existing_ts.get("isolated_contexts", "")
+                        existing_meili = self._meili.get_node(node_id) or {}
+                        contexts_text = existing_meili.get("isolated_contexts", "")
                     except Exception:  # pylint: disable=broad-exception-caught
                         pass
-                self._typesense.index_node(
+                self._meili.index_node(
                     node_id=node_id,
                     name=name,
                     node_type=node_type,
@@ -1134,8 +1114,8 @@ class IngestionWorkflow:
                     relationship_natural_language=rel_nl,
                 )
 
-            await loop.run_in_executor(None, _write_es)
-            logger.info(f"  [NodeSummary] '{name}' Typesense index complete")
+            await asyncio.to_thread(_write_meili)
+            logger.info(f"  [NodeSummary] '{name}' Meilisearch index complete")
 
             logger.info(
                 f"  [NodeSummary] ✓ COMPLETE: '{name}' (type='{node_type}', id={node_id})"
@@ -1391,15 +1371,13 @@ class IngestionWorkflow:
         after the next idle window.
         """
 
-        global _community_run_seq, _community_run_active_seq, _community_run_running  # pylint: disable=global-statement
-
         # Register this as the newest requested run. If another run is active, request
         # cancellation and wait for handoff. Only the newest request is allowed to start.
-        with _community_run_state_lock:
-            _community_run_seq += 1
-            requested_seq = _community_run_seq
-            had_active_run = _community_run_running
-            active_seq = _community_run_active_seq
+        with self._community_run_state_lock:
+            self._community_run_seq += 1
+            requested_seq = self._community_run_seq
+            had_active_run = self._community_run_running
+            active_seq = self._community_run_active_seq
             if had_active_run:
                 _tracker.cancel_recompute.set()
 
@@ -1410,16 +1388,16 @@ class IngestionWorkflow:
             )
 
         while True:
-            with _community_run_state_lock:
-                if requested_seq != _community_run_seq:
+            with self._community_run_state_lock:
+                if requested_seq != self._community_run_seq:
                     logger.info(
                         "[Community] Recompute request superseded by a newer request "
                         f"(request #{requested_seq}) — skipping."
                     )
                     return 0
-                if not _community_run_running:
-                    _community_run_running = True
-                    _community_run_active_seq = requested_seq
+                if not self._community_run_running:
+                    self._community_run_running = True
+                    self._community_run_active_seq = requested_seq
                     break
             time.sleep(0.25)
 
@@ -1465,11 +1443,11 @@ class IngestionWorkflow:
             old_community_ids = self._graph.clear_all_communities()
             logger.info(
                 f"[Community] Cleared {len(old_community_ids)} old community nodes "
-                f"(Kuzu + Qdrant + Typesense)"
+                f"(Kuzu + Qdrant + Meilisearch)"
             )
             for old_community_id in old_community_ids:
                 self._qdrant.delete_node(old_community_id)
-                self._typesense.delete_node(old_community_id)
+                self._meili.delete_node(old_community_id)
 
             node_ids = [node["node_id"] for node in nodes]
             node_lookup = {node["node_id"]: node for node in nodes}
@@ -1640,7 +1618,7 @@ class IngestionWorkflow:
                     f"  [Community] Kuzu community node created: '{name}' id={community_id}"
                 )
 
-                self._typesense.index_node(
+                self._meili.index_node(
                     node_id=community_id,
                     name=name,
                     node_type="community",
@@ -1892,7 +1870,7 @@ class IngestionWorkflow:
                 if not payload:
                     continue
                 relationship_nl = payload.get("relationship_natural_language") or []
-                self._typesense.update_node_community(
+                self._meili.update_node_community(
                     node_id=node_id,
                     relationship_natural_language=" ".join(
                         sentence for sentence in relationship_nl if sentence
@@ -1928,10 +1906,10 @@ class IngestionWorkflow:
             return created
         finally:
             # Always release single-flight ownership so a newer queued request can proceed.
-            with _community_run_state_lock:
-                if _community_run_active_seq == requested_seq:
-                    _community_run_running = False
-                    _community_run_active_seq = 0
+            with self._community_run_state_lock:
+                if self._community_run_active_seq == requested_seq:
+                    self._community_run_running = False
+                    self._community_run_active_seq = 0
 
     def build_temporal_digests(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self, period: str | None = None
@@ -1942,7 +1920,7 @@ class IngestionWorkflow:
         ``note_created_at`` payload field, buckets the contexts by the requested
         *period* granularity ("month" | "week" | "year"), generates an LLM summary
         for each non-empty bucket, then stores the result as a ``kind='temporal_digest'``
-        node in Kuzu, Qdrant (node_cores), and Typesense.
+        node in Kuzu, Qdrant (node_cores), and Meilisearch.
 
         Existing digest nodes are cleared before each run so the set stays current.
         Returns the number of digest nodes created.
@@ -1965,9 +1943,8 @@ class IngestionWorkflow:
             )
             return 0
 
-        global _temporal_digest_running, _temporal_digest_timer  # pylint: disable=global-statement
         _tracker.cancel_temporal.clear()
-        _temporal_digest_running = True
+        self._temporal_digest_running = True
 
         _period = period or _settings.TEMPORAL_DIGEST_PERIOD
         logger.info(
@@ -1982,7 +1959,7 @@ class IngestionWorkflow:
             logger.warning(
                 "[TemporalDigest] No dated contexts found — ingest some notes first."
             )
-            _temporal_digest_running = False
+            self._temporal_digest_running = False
             return 0
         logger.info(f"[TemporalDigest] Found {len(all_points)} dated context chunk(s).")
 
@@ -2010,7 +1987,7 @@ class IngestionWorkflow:
             logger.warning(
                 "[TemporalDigest] No valid period buckets — nothing to build."
             )
-            _temporal_digest_running = False
+            self._temporal_digest_running = False
             return 0
 
         logger.info(
@@ -2022,7 +1999,7 @@ class IngestionWorkflow:
         logger.info(f"[TemporalDigest] Cleared {len(old_ids)} old digest node(s).")
         for old_id in old_ids:
             self._qdrant.delete_node(old_id)
-            self._typesense.delete_node(old_id)
+            self._meili.delete_node(old_id)
 
         # ── 4. Build one digest node per bucket ───────────────────────────────
         built = 0
@@ -2033,17 +2010,17 @@ class IngestionWorkflow:
                     f"[TemporalDigest] Cancelled by ingestion after {built} bucket(s) — "
                     "rescheduling."
                 )
-                _temporal_digest_running = False
+                self._temporal_digest_running = False
                 if not _tracker.has_active_ingestions():
-                    with _temporal_digest_timer_lock:
-                        if _temporal_digest_timer is not None:
-                            _temporal_digest_timer.cancel()
-                        _temporal_digest_timer = threading.Timer(
+                    with self._temporal_digest_timer_lock:
+                        if self._temporal_digest_timer is not None:
+                            self._temporal_digest_timer.cancel()
+                        self._temporal_digest_timer = threading.Timer(
                             COMMUNITY_IDLE_SECONDS,
                             self.build_temporal_digests,
                         )
-                        _temporal_digest_timer.daemon = True
-                        _temporal_digest_timer.start()
+                        self._temporal_digest_timer.daemon = True
+                        self._temporal_digest_timer.start()
                     logger.info(
                         f"[TemporalDigest] Rescheduled in {COMMUNITY_IDLE_SECONDS}s."
                     )
@@ -2108,8 +2085,8 @@ class IngestionWorkflow:
                 summary=summary,
                 period_key=period_key,
             )
-            # Index in Typesense for full-text search
-            self._typesense.index_node(
+            # Index in Meilisearch for full-text search
+            self._meili.index_node(
                 node_id=node_id,
                 name=node_name,
                 node_type="temporal_digest",
@@ -2119,22 +2096,22 @@ class IngestionWorkflow:
             built += 1
 
         logger.info(f"[TemporalDigest] Done — {built} digest node(s) created.")
-        _temporal_digest_running = False
+        self._temporal_digest_running = False
         return built
 
     def get_maintenance_status(self) -> dict:
-        """Return the running state of background maintenance jobs."""
+        """Return the running state of background maintenance jobs for this KB."""
         tracker = _tracker.get_status_snapshot()
         return {
             "community_detection": {
-                "running": _community_run_running
+                "running": self._community_run_running
                 or bool(tracker.get("community_recompute_running")),
                 "pending_nodes": tracker.get("pending_community_nodes", 0),
                 "needed": bool(tracker.get("community_recompute_needed")),
                 "timer_armed": bool(tracker.get("community_timer_armed")),
                 "idle_seconds": tracker.get("community_idle_seconds"),
             },
-            "temporal_digests": {"running": _temporal_digest_running},
+            "temporal_digests": {"running": self._temporal_digest_running},
             "ingestion": {
                 "active": int(tracker.get("active_ingestions") or 0),
                 "last_completed_at": tracker.get("last_ingestion_at"),

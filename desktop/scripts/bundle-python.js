@@ -93,15 +93,6 @@ function run(python, args, opts = {}) {
 
 function copyBackendSources() {
   copyDir(path.join(backendSrc, "app"), path.join(outBackend, "app"));
-  if (fs.existsSync(path.join(backendSrc, "alembic"))) {
-    copyDir(path.join(backendSrc, "alembic"), path.join(outBackend, "alembic"));
-  }
-  for (const f of ["alembic.ini"]) {
-    const src = path.join(backendSrc, f);
-    if (fs.existsSync(src)) {
-      fs.copyFileSync(src, path.join(outBackend, f));
-    }
-  }
 }
 
 function llamaInstallEnv() {

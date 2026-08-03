@@ -17,7 +17,7 @@ from app.core.paths import ensure_data_layout, resolve_data_dir, resolve_default
 from app.services.graph import GraphService, graph_service
 from app.services.qdrant_service import QdrantService, qdrant_service
 from app.services.retrieval import RetrievalService
-from app.services.typesense_service import TypesenseService, typesense_service
+from app.services.meilisearch_service import MeilisearchService, meilisearch_service
 from app.services.vault import ensure_vault
 from app.workflows.chat import ChatWorkflow
 from app.workflows.ingestion import IngestionWorkflow
@@ -60,7 +60,7 @@ class KBContext:
     kb_id: str
     name: str
     qdrant: QdrantService
-    typesense: TypesenseService
+    meili: MeilisearchService
     vault_path: str = ""
     # Graph is opened lazily — notes/finance must work even if Kuzu path was misconfigured.
     _graph: GraphService | None = field(default=None, repr=False)
@@ -85,13 +85,13 @@ class KBContext:
             self.retrieval_service = RetrievalService(
                 graph=self.graph,
                 qdrant=self.qdrant,
-                typesense=self.typesense,
+                meili=self.meili,
             )
         if self.ingestion_workflow is None:
             self.ingestion_workflow = IngestionWorkflow(
                 graph=self.graph,
                 qdrant=self.qdrant,
-                typesense=self.typesense,
+                meili=self.meili,
             )
         if self.chat_workflow is None:
             self.chat_workflow = ChatWorkflow(retrieval=self.retrieval_service)
@@ -159,7 +159,7 @@ def _default_kb() -> KBContext:
         kb_id=DEFAULT_KB_ID,
         name="default",
         qdrant=qdrant_service,
-        typesense=typesense_service,
+        meili=meilisearch_service,
         vault_path=vault_str,
         _graph=graph_service,
         _kuzu_path=str(settings.KUZU_DB_PATH),
@@ -188,7 +188,6 @@ class KBRegistry:
                     "SELECT id FROM knowledge_bases WHERE id = ?", (DEFAULT_KB_ID,)
                 ).fetchone()
                 if row is None:
-                    data = resolve_data_dir()
                     meta = {
                         "id": DEFAULT_KB_ID,
                         "name": "default",
@@ -198,7 +197,8 @@ class KBRegistry:
                         "qdrant_col_cores": settings.QDRANT_COLLECTION_NODE_CORES,
                         "qdrant_col_rels": settings.QDRANT_COLLECTION_NODE_RELATIONSHIPS,
                         "qdrant_col_contexts": settings.QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS,
-                        "typesense_collection": settings.TYPESENSE_COLLECTION_NAME,
+                        "typesense_collection": settings.MEILI_INDEX_NAME
+                        or settings.TYPESENSE_COLLECTION_NAME,
                         "created_at": datetime.utcnow().isoformat(),
                     }
                     conn.execute(
@@ -318,7 +318,7 @@ class KBRegistry:
                         kb_id=DEFAULT_KB_ID,
                         name="default",
                         qdrant=qdrant_service,
-                        typesense=typesense_service,
+                        meili=meilisearch_service,
                         vault_path=meta["vault_path"],
                         _graph=graph_service,
                         _kuzu_path=normalize_kuzu_path(
@@ -559,7 +559,7 @@ class KBRegistry:
             col_relationships=meta["qdrant_col_rels"],
             col_contexts=meta["qdrant_col_contexts"],
         )
-        ts = TypesenseService(collection_name=meta["typesense_collection"])
+        ms = MeilisearchService(collection_name=meta["typesense_collection"])
         # Do not open Kuzu here — notes/finance only need vault_path + kb_id.
         if kuzu_path:
             Path(kuzu_path).parent.mkdir(parents=True, exist_ok=True)
@@ -567,7 +567,7 @@ class KBRegistry:
             kb_id=kb_id,
             name=meta["name"],
             qdrant=qdrant,
-            typesense=ts,
+            meili=ms,
             vault_path=meta.get("vault_path", ""),
             _kuzu_path=kuzu_path or meta.get("kuzu_path", ""),
         )
@@ -593,14 +593,20 @@ class KBRegistry:
             logger.warning(f"[KBRegistry] Qdrant cleanup failed: {exc}")
 
         try:
-            ts = TypesenseService(collection_name=meta["typesense_collection"])
-            if ts.is_available() and ts.client:
+            from app.services.meilisearch_service import MeilisearchService
+
+            index_name = meta.get("typesense_collection")
+            ms = MeilisearchService(collection_name=index_name)
+            if ms.is_available() and ms.client:
                 try:
-                    ts.client.collections[meta["typesense_collection"]].delete()
-                except Exception:  # pylint: disable=broad-exception-caught
-                    pass
+                    task = ms.client.delete_index(index_name)
+                    ms.client.wait_for_task(task.task_uid, timeout_in_ms=10000)
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    logger.warning(
+                        f"[KBRegistry] Meili index delete failed for '{index_name}': {exc}"
+                    )
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.warning(f"[KBRegistry] Typesense cleanup failed: {exc}")
+            logger.warning(f"[KBRegistry] Meilisearch cleanup failed: {exc}")
 
         try:
             kuzu_path = Path(normalize_kuzu_path(meta["kuzu_path"]))

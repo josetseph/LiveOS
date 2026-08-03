@@ -185,8 +185,9 @@ def ensure_data_layout(data_dir: Path | None = None) -> Path:
         "kuzu",
         "qdrant",
         "meilisearch",
-        "typesense",  # legacy path kept for migration
         "logs",
+        "vaults",
+        "bin",
     ):
         (root / sub).mkdir(parents=True, exist_ok=True)
     return root
@@ -197,3 +198,28 @@ def sqlite_url(data_dir: Path | None = None) -> str:
     root.mkdir(parents=True, exist_ok=True)
     db_path = (root / "orb.db").resolve()
     return f"sqlite+aiosqlite:///{db_path}"
+
+
+def clear_paths_cache() -> None:
+    """Drop the in-memory paths.json cache (tests / after external edits)."""
+    global _PATHS_CACHE  # noqa: PLW0603
+    _PATHS_CACHE = None
+
+
+def sync_settings_paths(settings_obj=None) -> None:
+    """Push resolved data/models paths onto the live ``settings`` object.
+
+    Call after ``save_paths_file`` so in-process code sees the wizard choice
+    without waiting for a process restart. SQLite/Qdrant engines created at
+    import still need a restart to retarget storage roots.
+    """
+    if settings_obj is None:
+        from app.core.config import settings as settings_obj
+
+    data = resolve_data_dir()
+    models = resolve_models_dir()
+    settings_obj.DATA_DIR = str(data)
+    settings_obj.MODELS_DIR = str(models)
+    settings_obj.MODELS_PATH = str(models)
+    settings_obj.KUZU_DB_PATH = str(data / "kuzu" / "kuzu_graph")
+    ensure_data_layout(data)

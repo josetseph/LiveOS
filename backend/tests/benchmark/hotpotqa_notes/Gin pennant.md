@@ -1,3 +1,0 @@
-# Gin pennant
-
-The gin pennant (sometimes gin flag or drinking pennant) is a maritime flag.  When flown aboard ship, it indicates an open invitation to other ships' officers to come aboard for drinks.

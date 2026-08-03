@@ -10,10 +10,10 @@ Core metrics:
 
 Usage:
     # Basic evaluation (results saved automatically)
-    python tests/benchmark/evaluate_ragas.py --dataset musique
+    python tests/benchmark/evaluate.py --dataset hotpotqa --verbose
 
     # Verbose output with limit
-    python tests/benchmark/evaluate_ragas.py --dataset musique --verbose --limit 10
+    python tests/benchmark/evaluate.py --dataset musique --verbose --limit 10
 """
 
 import argparse

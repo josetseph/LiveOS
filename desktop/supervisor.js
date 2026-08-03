@@ -30,18 +30,11 @@ const {
   defaultModelsDir,
   useProductionFrontend,
   isPackagedLayout,
+  envFirst,
 } = require("./paths");
 
 function platformKey() {
   return platformTriple().key;
-}
-
-function envFirst(...names) {
-  for (const name of names) {
-    const v = process.env[name];
-    if (v != null && String(v).trim() !== "") return v;
-  }
-  return undefined;
 }
 
 function defaultPathsFile() {
@@ -242,8 +235,6 @@ function freeDesktopPorts(onStatus) {
     PORTS.firefly,
     PORTS.qdrant,
     PORTS.meilisearch,
-    PORTS.marlin,
-    PORTS.localModels,
   ];
   const mine = process.pid;
   const killed = [];
@@ -257,6 +248,34 @@ function freeDesktopPorts(onStatus) {
   if (killed.length && onStatus) {
     onStatus(`Cleared stale processes on ports: ${killed.join(", ")}`);
   }
+}
+
+/**
+ * Persist a Meili master key under DATA_DIR. Existing installs that already have
+ * Meili data keep ``orb-dev-key`` for compatibility; fresh installs get a random key.
+ */
+function resolveMeiliMasterKey(dataDir) {
+  const fromEnv = process.env.MEILI_MASTER_KEY;
+  if (fromEnv && String(fromEnv).trim()) return String(fromEnv).trim();
+
+  const keyFile = path.join(dataDir, "meili_master_key");
+  if (fs.existsSync(keyFile)) {
+    const existing = fs.readFileSync(keyFile, "utf8").trim();
+    if (existing) return existing;
+  }
+
+  const meiliDb = path.join(dataDir, "meilisearch");
+  let key = "orb-dev-key";
+  try {
+    if (!fs.existsSync(meiliDb) || fs.readdirSync(meiliDb).length === 0) {
+      key = require("crypto").randomBytes(32).toString("base64url");
+    }
+  } catch (_) {
+    key = "orb-dev-key";
+  }
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(keyFile, `${key}\n`, "utf8");
+  return key;
 }
 
 class Supervisor {
@@ -311,7 +330,7 @@ class Supervisor {
     fs.mkdirSync(path.join(dataDir, "meilisearch"), { recursive: true });
 
     try {
-      const ensured = await ensureBinaries(dataDir, this.onStatus, this.paths.modelsDir);
+      const ensured = await ensureBinaries(dataDir, this.onStatus);
       this.ensuredBinaries = ensured;
     } catch (err) {
       this.onStatus(`Binary download failed: ${err.message}. Retrying from cache…`);
@@ -346,10 +365,8 @@ class Supervisor {
     }
 
     if (meili) {
-      const masterKey =
-        process.env.MEILI_MASTER_KEY ||
-        process.env.TYPESENSE_API_KEY ||
-        "orb-dev-key";
+      const masterKey = resolveMeiliMasterKey(dataDir);
+      this.meiliMasterKey = masterKey;
       this._spawn("Meilisearch", meili, [
         "--db-path",
         path.join(dataDir, "meilisearch"),
@@ -375,10 +392,7 @@ class Supervisor {
     const backendDir = getBackendDir();
     const python = getPythonBinary();
     const logFile = serviceLogPath(dataDir, "backend");
-    const masterKey =
-      process.env.MEILI_MASTER_KEY ||
-      process.env.TYPESENSE_API_KEY ||
-      "orb-dev-key";
+    const masterKey = this.meiliMasterKey || resolveMeiliMasterKey(dataDir);
     const child = this._spawn(
       "Backend",
       python,
@@ -408,9 +422,6 @@ class Supervisor {
           MEILI_MASTER_KEY: masterKey,
           FIREFLY_BASE_URL: fireflyUrl(),
           FIREFLY_RUNTIME_FILE: path.join(dataDir, "firefly", "runtime.json"),
-          TYPESENSE_HOST: "127.0.0.1",
-          TYPESENSE_PORT: String(PORTS.meilisearch),
-          TYPESENSE_API_KEY: masterKey,
           // Florence/Whisper/Marlin load in-process in the API — no sidecar URLs.
           AI_SETUP_MODE: process.env.AI_SETUP_MODE || "none",
           LLM_PROVIDER: process.env.LLM_PROVIDER || "local",
@@ -605,5 +616,4 @@ module.exports = {
   loadPaths,
   needsWizard,
   defaultPathsFile,
-  platformKey,
 };

@@ -1,3 +1,0 @@
-# MEO Rip Curl Pro Portugal 2017
-
-The MEO Rip Curl Pro Portugal 2017 is an event of the World Surf League for the 2017 World Surf League Men's Championship Tour.

@@ -288,13 +288,20 @@ async def prepare(
         notes_dir = Path(__file__).parent.parent.parent / manifest["notes_dir"]
     if not notes_dir.exists():
         print(f"❌ Notes directory not found: {notes_dir}")
+        print(
+            f"   Run: python tests/benchmark/fetch_notes.py --dataset {dataset}"
+        )
         sys.exit(1)
 
     # Collect all unique note filenames referenced by the manifest
     all_note_files: list[str] = []
     seen: set[str] = set()
     for tc in manifest["test_cases"]:
-        for fname in tc.get("all_notes", []) + tc.get("required_notes", []):
+        for fname in (
+            tc.get("all_notes", [])
+            + tc.get("notes", [])
+            + tc.get("required_notes", [])
+        ):
             if fname not in seen:
                 seen.add(fname)
                 all_note_files.append(fname)

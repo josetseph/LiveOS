@@ -1,4 +1,4 @@
-"""LangGraph ingestion agent: multimodal → extraction → refinement → storage → indexing."""
+"""LangGraph ingestion agent: multimodal → extraction → storage → indexing."""
 
 # pylint: disable=import-outside-toplevel,protected-access
 import asyncio
@@ -16,6 +16,17 @@ from app.services.llm import llm_service
 from app.services.multimedia import multimedia_service
 
 logger = get_logger("IngestionPipeline")
+
+
+def _require_workflow(state: "IngestionState"):
+    """Return the KB-scoped IngestionWorkflow; never fall back to a global default."""
+    wf = state.get("workflow")
+    if wf is None:
+        raise RuntimeError(
+            "Ingestion agent requires state['workflow'] "
+            "(KB-scoped IngestionWorkflow from process_note)"
+        )
+    return wf
 
 # Heavy local model multimedia extraction is serialized by default so Florence,
 # Whisper, and Marlin do not compete for the same CPU/RAM budget.
@@ -58,9 +69,7 @@ class IngestionState(TypedDict):
     errors: List[str]
     status: str  # START, MULTIMEDIA_DONE, EXTRACTED, INDEXED
     logs: List[str]
-    workflow: Optional[
-        Any
-    ]  # KB-specific IngestionWorkflow instance; None → use global default
+    workflow: Optional[Any]  # required KB-scoped IngestionWorkflow
 
 
 # 2. Node Functions
@@ -68,9 +77,7 @@ async def multimodal_node(
     state: IngestionState,
 ):  # pylint: disable=too-many-locals,too-many-statements
     """LangGraph node: extract text from any multimedia attachments in the note."""
-    from app.workflows.ingestion import ingestion_workflow as _default_wf
-
-    _wf = state.get("workflow") or _default_wf
+    _wf = _require_workflow(state)
 
     async def _set_status(stage: str, model: str | None = None) -> None:
         if state.get("note_id"):
@@ -98,8 +105,8 @@ async def multimodal_node(
         content_changed = content.strip() != original_content.strip()
         media_errors: list[str] = []
 
-        # Unified file link parsing:
-        # - [📎 Filename](/vault-files/...) or /files/ /uploads/ / http(s)
+        # Unified file link parsing (vault-files + optional remote http(s)):
+        # - [📎 Filename](/vault-files/...)
         # - [🎤 Voice Recording](...)
         # - ![alt](...) image markdown from the notes UI
         # URLs may contain unencoded spaces/commas (common for uploaded filenames);
@@ -108,7 +115,7 @@ async def multimodal_node(
         import re
         from urllib.parse import unquote
 
-        _URL = r"(?:https?://[^)]+|/(?:files|uploads|vault-files)/[^)]+)"
+        _URL = r"(?:https?://[^)]+|/(?:vault-files)/[^)]+)"
         _ATTACH_RE = re.compile(rf"\[(📎|🎤)\s*(.*?)\]\(({_URL})\)")
         _IMAGE_MD_RE = re.compile(rf"!\[([^\]]*)\]\(({_URL})\)")
 
@@ -343,7 +350,7 @@ async def multimodal_node(
                     f"Syncing processed multimedia content to vault for Note {state['note_id']}..."
                 )
                 await _set_status("Saving extracted attachment text")
-                await _wf._update_note_content_postgres(state["note_id"], content)
+                await _wf._persist_note_body(state["note_id"], content)
 
     t_end = time.perf_counter()
     logger.info(f"Multimedia processing took: {t_end - t_start:.4f}s")
@@ -358,9 +365,7 @@ async def extraction_node(
     state: IngestionState,
 ):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """LangGraph node: run structured LLM extraction to produce an Extraction object."""
-    from app.workflows.ingestion import ingestion_workflow as _default_wf
-
-    _wf = state.get("workflow") or _default_wf
+    _wf = _require_workflow(state)
     if state.get("note_id"):
         await _wf._update_note_processing_status(
             state["note_id"],
@@ -529,15 +534,13 @@ Now apply this entire process to the following note and return only the JSON out
 
 {extraction_content}
 """
-    # Retry loop: local servers (LM Studio / Ollama) occasionally return empty
-    # responses when the model fails to allocate output tokens (KV cache pressure).
-    # Waiting 30-60s lets the server recover before retrying.
+    # Retry loop: in-process GGUF chat can return empty/invalid JSON under
+    # KV-cache pressure; waiting 30–60s lets Metal/CPU recover before retrying.
     _MAX_EXTRACTION_ATTEMPTS = 3  # pylint: disable=invalid-name
     for _attempt in range(_MAX_EXTRACTION_ATTEMPTS):
         try:
-            # Use generate() instead of extract_structured() to bypass Ollama's
-            # grammar-constrained JSON sampling, which causes small models (e.g.
-            # gemma3:4b) to emit empty `relationships: []` for complex nested arrays.
+            # Free-form generate + JSON clean (not grammar-constrained sampling),
+            # which small models often empty out for nested relationship arrays.
             raw_response = await llm_service.ingestion_generate(prompt, temperature=0.1)
             cleaned_json = llm_service._clean_json(raw_response)
             extraction = Extraction.model_validate_json(cleaned_json)
@@ -676,9 +679,7 @@ async def storage_node(state: IngestionState):
     """LangGraph node: persist the validated extraction to the graph and vector stores."""
     if state.get("errors") or not state.get("extraction"):
         return {"errors": state.get("errors") or ["Missing extraction data"]}
-    from app.workflows.ingestion import ingestion_workflow as _default_wf
-
-    _wf = state.get("workflow") or _default_wf
+    _wf = _require_workflow(state)
     if state.get("note_id"):
         await _wf._update_note_processing_status(
             state["note_id"], "Writing graph and note metadata", None
@@ -686,7 +687,7 @@ async def storage_node(state: IngestionState):
 
     logs = state["logs"]
     logs.append(
-        f"[{datetime.now().strftime('%H:%M:%S')}] STORE: Writing to Graph & Postgres..."
+        f"[{datetime.now().strftime('%H:%M:%S')}] STORE: Writing to Graph & metadata..."
     )
 
     import time
@@ -697,7 +698,7 @@ async def storage_node(state: IngestionState):
     custom_title = state.get("input").title  # May be None
 
     try:
-        # 1. Write to Kuzu (The Mind)
+        # 1. Write ontology to Kuzu / Qdrant / Meili
         title = await asyncio.to_thread(
             _wf._write_ontology,
             note_id,
@@ -707,10 +708,9 @@ async def storage_node(state: IngestionState):
             custom_title,  # Pass custom title if provided
         )
 
-        # 2. Sync to Postgres (The Body)
-        # Sync Title
+        # 2. Sync title to SQLite metadata (body stays in vault .md)
         if title:
-            await _wf._update_note_title_postgres(note_id, title)
+            await _wf._update_note_title(note_id, title)
 
         t_end = time.perf_counter()
         logger.info(f"  [Perf] Graph Storage took: {t_end - t_start:.4f}s")
@@ -724,9 +724,7 @@ async def summarization_node(state: IngestionState):
     """LangGraph node: update per-node context summaries and mark ingestion complete."""
     if state.get("errors") or not state.get("extraction"):
         return {}
-    from app.workflows.ingestion import ingestion_workflow as _default_wf
-
-    _wf = state.get("workflow") or _default_wf
+    _wf = _require_workflow(state)
     if state.get("note_id"):
         await _wf._update_note_processing_status(
             state["note_id"], "Indexing entity contexts", "Embeddings"

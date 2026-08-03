@@ -2,8 +2,6 @@
 
 **End users do nothing.** On first launch the Electron supervisor downloads **Qdrant** and **Meilisearch** into `DATA_DIR/bin/<platform>/` (splash shows progress).
 
-Meilisearch replaces Typesense and includes a **native Windows** `.exe`.
-
 ## Prefetch (optional — packaging / CI)
 
 ```bash
@@ -18,7 +16,7 @@ npm run prefetch-binaries
 
 ## Local LLM (no Ollama / llama-server)
 
-Local chat + embeddings use **in-process** [`llama-cpp-python`](https://github.com/abetlen/llama-cpp-python) (same idea as content-machine). Setup → **Download models & start local LLM** fetches GGUF weights into `MODELS_DIR/gguf/` and loads them in the FastAPI process.
+Local chat + embeddings use **in-process** [`llama-cpp-python`](https://github.com/abetlen/llama-cpp-python). Setup → **Download models & start local LLM** fetches GGUF weights into `MODELS_DIR/gguf/` and loads them in the FastAPI process.
 
 Acceleration is auto-detected (Metal on macOS, CUDA when `nvidia-smi` is present, else CPU). Overrides:
 
@@ -38,7 +36,3 @@ Install llama-cpp-python with the matching backend, e.g. Metal:
 ```bash
 CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
 ```
-
-## Contributor Docker
-
-`docker compose` remains available (`ORB_USE_DOCKER=1`).

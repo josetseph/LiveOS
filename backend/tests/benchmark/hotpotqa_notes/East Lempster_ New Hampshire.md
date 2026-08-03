@@ -1,3 +1,0 @@
-# East Lempster, New Hampshire
-
-East Lempster is an unincorporated community in the town of Lempster in Sullivan County, New Hampshire, United States.

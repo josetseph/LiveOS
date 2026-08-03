@@ -1,4 +1,4 @@
-"""Meilisearch keyword search service (replaces Typesense — native Windows binary)."""
+"""Meilisearch keyword / BM25 search service."""
 
 from __future__ import annotations
 
@@ -26,12 +26,12 @@ class MeilisearchService:
     def __init__(self, collection_name: str | None = None) -> None:
         self._enabled = True
         # Keep attribute name `collection` for call-site compatibility
-        self.collection = collection_name or settings.MEILI_INDEX_NAME or settings.TYPESENSE_COLLECTION_NAME
+        self.collection = collection_name or settings.MEILI_INDEX_NAME
         self.client = None
         try:
-            host = settings.MEILI_HOST or settings.TYPESENSE_HOST
-            port = settings.MEILI_PORT or settings.TYPESENSE_PORT
-            key = settings.MEILI_MASTER_KEY or settings.TYPESENSE_API_KEY
+            host = settings.MEILI_HOST
+            port = settings.MEILI_PORT
+            key = settings.MEILI_MASTER_KEY
             url = f"http://{host}:{port}"
             self.client = meilisearch.Client(url, key)
             self._ensure_collection()
@@ -94,7 +94,7 @@ class MeilisearchService:
         logger.info(f"[Meili] Index '{self.collection}' reset.")
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
-        """Fetch one document (replaces Typesense .documents[id].retrieve())."""
+        """Fetch one document by node id."""
         if not self.is_available():
             return None
         try:
@@ -213,7 +213,4 @@ class MeilisearchService:
             logger.warning(f"Meili delete_node failed for {node_id}: {exc}")
 
 
-# Backward-compatible aliases during migration
-TypesenseService = MeilisearchService
 meilisearch_service = MeilisearchService()
-typesense_service = meilisearch_service

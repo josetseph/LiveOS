@@ -1,6 +1,6 @@
 {
   "dataset": "MuSiQue (LongBench - Local)",
-  "source_file": "/Users/joey/Projects/Orb/backend/testing_data/longbeach/data-2/musique.jsonl",
+  "source_file": "LongBench musique.jsonl (via fetch_notes.py)",
   "num_examples": 50,
   "avg_hop_count": 3.5,
   "avg_paragraphs": 10.6,

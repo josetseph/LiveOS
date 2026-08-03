@@ -65,14 +65,18 @@ def unique_md_path(vault: Path, title: str, folder: str | None = None) -> Path:
 
 
 def read_note_file(vault: Path, rel_path: str) -> str:
-    path = vault / rel_path
+    from app.services.vault_ops import safe_vault_join
+
+    path = safe_vault_join(Path(vault), rel_path)
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8")
 
 
 def write_note_file(vault: Path, rel_path: str, content: str) -> None:
-    path = vault / rel_path
+    from app.services.vault_ops import safe_vault_join
+
+    path = safe_vault_join(Path(vault), rel_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     mark_self_write(vault, rel_path)
     path.write_text(content, encoding="utf-8")
@@ -81,7 +85,9 @@ def write_note_file(vault: Path, rel_path: str, content: str) -> None:
 def delete_note_file(vault: Path | str, rel_path: str | None) -> None:
     if not rel_path:
         return
-    path = Path(vault) / rel_path
+    from app.services.vault_ops import safe_vault_join
+
+    path = safe_vault_join(Path(vault), rel_path)
     if path.exists():
         path.unlink()
 
@@ -174,11 +180,6 @@ def save_attachment(vault: Path, src_name: str, data: bytes, folder: str | None 
     _faststart_mp4(path)
     return f"{folder_clean}/{name}"
 
-
-def delete_attachment(vault: Path, rel_path: str) -> None:
-    path = vault / rel_path
-    if path.exists() and path.is_file():
-        path.unlink()
 
 
 def ensure_vault(path: str | Path) -> Path:

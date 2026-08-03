@@ -1,3 +1,0 @@
-# Taimushan Railway Station
-
-Mount Taimu Railway Station () is a railway station located in Fuding City, Ningde, Fujian Province, China, on the Wenzhou-Fuzhou Railway operated by the Nanchang Railway Bureau, China Railway Corporation.

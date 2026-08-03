@@ -23,13 +23,11 @@ def ai_is_configured() -> bool:
         # Cloud/hybrid needs at least one provider key or custom OpenAI-compat URL
         if settings.OPENAI_API_KEY or settings.GEMINI_API_KEY or settings.ANTHROPIC_API_KEY:
             return True
-        if settings.LLM_PROVIDER not in ("local", "ollama", "lm_studio", "none"):
+        provider = (settings.LLM_PROVIDER or "").lower().strip()
+        if provider not in ("local", "ollama", "lm_studio", "none", ""):
             return True
-        if settings.LLM_BASE_URL and settings.LLM_API_KEY and settings.LLM_API_KEY not in (
-            "lm-studio",
-            "ollama",
-            "",
-        ):
+        key = (settings.LLM_API_KEY or "").strip()
+        if settings.LLM_BASE_URL and key and key not in ("local", "lm-studio", "ollama"):
             return True
         return bool(settings.LLM_BASE_URL)
     return False

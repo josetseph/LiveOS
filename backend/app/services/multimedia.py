@@ -1,4 +1,4 @@
-"""Multimedia processing via local model services and lightweight document parsers."""
+"""Multimedia processing via in-process models and lightweight document parsers."""
 
 # pylint: disable=wrong-import-order,import-outside-toplevel
 import os
@@ -20,98 +20,7 @@ def _format_timestamp(seconds: float) -> str:
 
 
 class MultimediaService:
-    """Extract text from attachments using local model services."""
-
-    def _parse_storage_ref(self, path_or_url: str) -> tuple[str, str] | None:
-        """Return (bucket, key) when the path points at RustFS / proxy storage."""
-        from urllib.parse import urlparse
-
-        if path_or_url.startswith("http"):
-            parsed = urlparse(path_or_url)
-            parts = parsed.path.strip("/").split("/", 1)
-            if len(parts) == 2 and parts[1]:
-                return parts[0], parts[1]
-            return None
-
-        if path_or_url.startswith("/files/"):
-            remainder = path_or_url[len("/files/") :].lstrip("/")
-            parts = remainder.split("/", 1)
-            if len(parts) == 2 and parts[1]:
-                return parts[0], parts[1]
-            return None
-
-        if path_or_url.startswith("/uploads/"):
-            key = path_or_url[len("/uploads/") :].lstrip("/")
-            if key:
-                return settings.BUCKET_NAME, key
-
-        files_url = settings.FILES_URL.rstrip("/")
-        # Desktop uses FILES_URL=/vault-files as a local vault proxy — never S3.
-        if (
-            getattr(settings, "STORAGE_BACKEND", "local") == "s3"
-            and files_url.startswith("/")
-            and path_or_url.startswith(files_url + "/")
-            and not path_or_url.startswith("/vault-files/")
-        ):
-            key = path_or_url[len(files_url) + 1 :]
-            if key:
-                return settings.BUCKET_NAME, key
-
-        return None
-
-    def _download_from_storage(self, bucket: str, key: str) -> str:
-        """Download an object from RustFS/S3 to a temporary local file."""
-        import tempfile
-
-        import boto3
-        from botocore.client import Config
-
-        suffix = "." + key.rsplit(".", 1)[-1] if "." in key else ".tmp"
-        client = boto3.client(
-            "s3",
-            aws_access_key_id=settings.BUCKET_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.BUCKET_SECRET_ACCESS_KEY,
-            endpoint_url=settings.R2_ENDPOINT_URL,
-            config=Config(s3={"addressing_style": "path"}),
-        )
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            client.download_fileobj(bucket, key, tmp)
-            return tmp.name
-
-    def _resolve_storage_url(self, path_or_url: str) -> str:
-        """Normalize attachment URLs/paths to something the backend can fetch."""
-        if not path_or_url:
-            return path_or_url
-
-        if path_or_url.startswith("http"):
-            return path_or_url
-
-        if os.path.isfile(path_or_url):
-            return path_or_url
-
-        if path_or_url.startswith("/files/"):
-            remainder = path_or_url[len("/files/") :].lstrip("/")
-            if remainder:
-                return f"{settings.R2_ENDPOINT_URL.rstrip('/')}/{remainder}"
-
-        if path_or_url.startswith("/uploads/"):
-            key = path_or_url[len("/uploads/") :].lstrip("/")
-            if key:
-                return (
-                    f"{settings.R2_ENDPOINT_URL.rstrip('/')}/"
-                    f"{settings.BUCKET_NAME}/{key}"
-                )
-
-        files_url = settings.FILES_URL.rstrip("/")
-        if files_url.startswith("/") and path_or_url.startswith(files_url + "/"):
-            key = path_or_url[len(files_url) + 1 :]
-            if key:
-                return (
-                    f"{settings.R2_ENDPOINT_URL.rstrip('/')}/"
-                    f"{settings.BUCKET_NAME}/{key}"
-                )
-
-        return path_or_url
+    """Extract text from attachments via in-process models and vault files."""
 
     def _resolve_vault_local_path(self, path_or_url: str) -> str | None:
         """Map ``/vault-files/<kb_id>/<rel>`` to an absolute vault file path."""
@@ -178,7 +87,7 @@ class MultimediaService:
         return True
 
     def _download_temp_file(self, path_or_url: str) -> str:
-        """Resolve vault/local/storage/remote attachments to a local file path."""
+        """Resolve vault/local/remote attachments to a local file path."""
         import tempfile
 
         import requests
@@ -186,52 +95,18 @@ class MultimediaService:
         if os.path.isfile(path_or_url):
             return path_or_url
 
-        # Vault attachments are local-only — never fall through to RustFS/S3.
-        if "/vault-files/" in path_or_url or path_or_url.lstrip("/").startswith(
-            "vault-files/"
-        ):
-            vault_path = self._resolve_vault_local_path(path_or_url)
-            if vault_path:
-                logger.info(f"Resolved vault attachment: {vault_path}")
-                return vault_path
-            raise FileNotFoundError(f"Vault attachment not found: {path_or_url}")
-
         vault_path = self._resolve_vault_local_path(path_or_url)
         if vault_path:
             logger.info(f"Resolved vault attachment: {vault_path}")
             return vault_path
 
-        if getattr(settings, "STORAGE_BACKEND", "local") != "s3":
-            if os.path.isfile(path_or_url):
-                return path_or_url
+        if not path_or_url.startswith("http"):
             raise FileNotFoundError(f"Attachment not found: {path_or_url}")
 
-        storage_ref = self._parse_storage_ref(path_or_url)
-        if storage_ref:
-            bucket, key = storage_ref
-            logger.info(f"Downloading storage object: {bucket}/{key}")
-            return self._download_from_storage(bucket, key)
-
-        resolved = self._resolve_storage_url(path_or_url)
-        if resolved != path_or_url:
-            vault_path = self._resolve_vault_local_path(resolved)
-            if vault_path:
-                return vault_path
-            storage_ref = self._parse_storage_ref(resolved)
-            if storage_ref:
-                bucket, key = storage_ref
-                logger.info(f"Downloading storage object: {bucket}/{key}")
-                return self._download_from_storage(bucket, key)
-
-        if not resolved.startswith("http"):
-            if os.path.isfile(resolved):
-                return resolved
-            raise FileNotFoundError(f"Attachment not found: {path_or_url}")
-
-        logger.info(f"Downloading remote file: {resolved}...")
-        response = requests.get(resolved, timeout=300)
+        logger.info(f"Downloading remote file: {path_or_url}...")
+        response = requests.get(path_or_url, timeout=300)
         response.raise_for_status()
-        suffix = "." + resolved.split(".")[-1] if "." in resolved else ".tmp"
+        suffix = "." + path_or_url.split(".")[-1] if "." in path_or_url else ".tmp"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(response.content)
             return tmp.name
@@ -339,7 +214,7 @@ class MultimediaService:
         return ""
 
     def transcribe_audio(self, audio_path: str) -> str:
-        """Transcribe audio via the local-models service."""
+        """Transcribe audio via in-process Whisper (multimodal_runtime)."""
         local_path = self._download_temp_file(audio_path)
         try:
             logger.info(f"Transcribing audio: {local_path}")

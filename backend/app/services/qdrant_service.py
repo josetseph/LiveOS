@@ -68,39 +68,66 @@ class QdrantService:
     def _ensure_collections(self) -> None:
         """Create any missing Qdrant collections for this KB instance (idempotent).
 
-        Also recreates collections when the configured embedding dimension no longer
-        matches (e.g. model upgraded from 1024 → 2560). Empty mismatched collections
-        are safe to drop; non-empty ones are also recreated because writes would
-        otherwise fail with Vector dimension errors.
+        Empty collections with a dim mismatch are safe to drop and recreate —
+        but only when **no** sibling collection has data at the old dim
+        (avoids split-brain cores@1024 + contexts@768).
+
+        Non-empty mismatched collections block all recreate/create for this set.
+        Mid-ingest upsert paths fail closed via ``_prepare_vector``.
         """
         try:
             existing = {c.name for c in self.client.get_collections().collections}
             want_size = int(settings.EMBEDDING_DIMENSIONS) or 1024
-            for name in (self._col_cores, self._col_rels, self._col_contexts):
-                if name in existing:
-                    try:
-                        info = self.client.get_collection(name)
-                        params = getattr(info.config, "params", None)
-                        vectors = getattr(params, "vectors", None) if params else None
-                        size = getattr(vectors, "size", None) if vectors else None
-                        if isinstance(vectors, dict):
-                            size = vectors.get("size")
-                        if size is not None and int(size) != want_size:
-                            points = getattr(info, "points_count", None)
-                            logger.warning(
-                                "[Qdrant] Collection '%s' dim=%s but EMBEDDING_DIMENSIONS=%s "
-                                "(points=%s) — recreating so embeddings can be stored.",
-                                name,
-                                size,
-                                want_size,
-                                points,
-                            )
-                            self.client.delete_collection(name)
-                            existing.discard(name)
-                    except Exception as exc:  # pylint: disable=broad-exception-caught
-                        logger.warning(
-                            "[Qdrant] Could not inspect collection '%s': %s", name, exc
-                        )
+            names = (self._col_cores, self._col_rels, self._col_contexts)
+
+            nonempty_mismatch: list[tuple[str, int, int]] = []
+            empty_mismatch: list[str] = []
+            for name in names:
+                if name not in existing:
+                    continue
+                try:
+                    info = self.client.get_collection(name)
+                    params = getattr(info.config, "params", None)
+                    vectors = getattr(params, "vectors", None) if params else None
+                    size = getattr(vectors, "size", None) if vectors else None
+                    if isinstance(vectors, dict):
+                        size = vectors.get("size")
+                    if size is None or int(size) == want_size:
+                        continue
+                    points = int(getattr(info, "points_count", 0) or 0)
+                    if points > 0:
+                        nonempty_mismatch.append((name, int(size), points))
+                    else:
+                        empty_mismatch.append(name)
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    logger.warning(
+                        "[Qdrant] Could not inspect collection '%s': %s", name, exc
+                    )
+
+            if nonempty_mismatch:
+                for name, size, points in nonempty_mismatch:
+                    logger.error(
+                        "[Qdrant] Collection '%s' dim=%s but EMBEDDING_DIMENSIONS=%s "
+                        "with %s points — refusing to wipe or recreate siblings. "
+                        "Rebuild via admin reset or clear indexes before changing embed model.",
+                        name,
+                        size,
+                        want_size,
+                        points,
+                    )
+                return
+
+            for name in empty_mismatch:
+                logger.warning(
+                    "[Qdrant] Empty collection '%s' dim mismatch "
+                    "(want=%s) — recreating.",
+                    name,
+                    want_size,
+                )
+                self.client.delete_collection(name)
+                existing.discard(name)
+
+            for name in names:
                 if name not in existing:
                     self.client.create_collection(
                         collection_name=name,
@@ -331,28 +358,7 @@ class QdrantService:
             )
             return True
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            msg = str(exc)
-            if description_vector and "dimension" in msg.lower():
-                try:
-                    self.ensure_vector_size(len(description_vector))
-                    self.client.upsert(
-                        collection_name=collection,
-                        points=[
-                            PointStruct(
-                                id=str(uuid.uuid5(uuid.NAMESPACE_OID, node_id)),
-                                vector=description_vector,
-                                payload=payload,
-                            )
-                        ],
-                    )
-                    return True
-                except Exception as retry_exc:  # pylint: disable=broad-exception-caught
-                    logger.warning(
-                        "Qdrant upsert_node_core retry failed for %s: %s",
-                        node_id,
-                        retry_exc,
-                    )
-                    return False
+            # Fail closed — never call ensure_vector_size mid-ingest (split-brain risk).
             logger.warning(f"Qdrant upsert_node_core failed for {node_id}: {exc}")
             return False
 
@@ -374,8 +380,19 @@ class QdrantService:
         """
         if not self.is_available() or not self.client:
             return
+        # Validate dims before mutating — dim mismatch must not be swallowed.
+        prepared: list[tuple[list[float], dict[str, Any]]] = []
+        for item in items or []:
+            vector = item.get("vector")
+            if not vector:
+                continue
+            vector = self._prepare_vector(vector) or vector
+            payload: dict[str, Any] = {"parent_node_id": node_id}
+            for k, v in item.items():
+                if k != "vector":
+                    payload[k] = v
+            prepared.append((vector, payload))
         try:
-            # Delete stale points for this node
             self.client.delete(
                 collection_name=collection_name,
                 points_selector=FilterSelector(
@@ -389,22 +406,13 @@ class QdrantService:
                     )
                 ),
             )
-            if not items:
+            if not prepared:
                 return
-            points = []
-            for item in items:
-                vector = item.get("vector")
-                if not vector:
-                    continue
-                vector = self._prepare_vector(vector) or vector
-                payload: dict[str, Any] = {"parent_node_id": node_id}
-                for k, v in item.items():
-                    if k != "vector":
-                        payload[k] = v
-                point_id = str(uuid.uuid4())
-                points.append(PointStruct(id=point_id, vector=vector, payload=payload))
-            if points:
-                self.client.upsert(collection_name=collection_name, points=points)
+            points = [
+                PointStruct(id=str(uuid.uuid4()), vector=vector, payload=payload)
+                for vector, payload in prepared
+            ]
+            self.client.upsert(collection_name=collection_name, points=points)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning(
                 f"Qdrant upsert_node_items failed for {collection_name}/{node_id}: {exc}"
@@ -435,20 +443,6 @@ class QdrantService:
             self.client.upsert(collection_name=collection_name, points=[point])
             return True
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            msg = str(exc)
-            if vector and "dimension" in msg.lower():
-                try:
-                    self.ensure_vector_size(len(vector))
-                    self.client.upsert(collection_name=collection_name, points=[point])
-                    return True
-                except Exception as retry_exc:  # pylint: disable=broad-exception-caught
-                    logger.warning(
-                        "Qdrant append_node_item retry failed for %s/%s: %s",
-                        collection_name,
-                        node_id,
-                        retry_exc,
-                    )
-                    return False
             logger.warning(
                 f"Qdrant append_node_item failed for {collection_name}/{node_id}: {exc}"
             )
@@ -491,28 +485,6 @@ class QdrantService:
                 ],
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            msg = str(exc)
-            if nl_vector and "dimension" in msg.lower():
-                try:
-                    self.ensure_vector_size(len(nl_vector))
-                    self.client.upsert(
-                        collection_name=collection,
-                        points=[
-                            PointStruct(
-                                id=str(uuid.uuid5(uuid.NAMESPACE_OID, relationship_id)),
-                                vector=nl_vector,
-                                payload=payload,
-                            )
-                        ],
-                    )
-                    return
-                except Exception as retry_exc:  # pylint: disable=broad-exception-caught
-                    logger.warning(
-                        "Qdrant upsert_node_relationship retry failed for %s: %s",
-                        relationship_id,
-                        retry_exc,
-                    )
-                    return
             logger.warning(
                 f"Qdrant upsert_node_relationship failed for {relationship_id}: {exc}"
             )

@@ -1,3 +1,0 @@
-# Suburban Madness
-
-Suburban Madness is an American crime drama television film, based on a true story, starring Sela Ward as PI Bobbi Bacha of Blue Moon Investigations.  It aired on CBS on October 3, 2004.

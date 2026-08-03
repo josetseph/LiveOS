@@ -114,50 +114,11 @@ services:
         condition: service_started
       meilisearch:
         condition: service_healthy
-      init:
-        condition: service_completed_successfully
     volumes:
       - ./backend:/app
       - ./data:/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-  # Initialization Service (one-shot — runs once, then exits)
-  init:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: orb-init
-    env_file: ./backend/.env
-    environment:
-      # Override .env's localhost values with Docker service names inside the network
-      QDRANT_HOST: qdrant
-      MEILI_HOST: meilisearch
-      MEILI_PORT: "7700"
-      MEILI_MASTER_KEY: orb-dev-key
-      TYPESENSE_HOST: meilisearch
-      TYPESENSE_PORT: "7700"
-      TYPESENSE_API_KEY: orb-dev-key
-      DATABASE_BACKEND: postgres
-      STORAGE_BACKEND: local
-      FILES_URL: /files/orb-assets
-      INGESTION_PIPELINE_CONCURRENCY: 1
-      MULTIMEDIA_CONCURRENCY: 1
-      DATABASE_TRANSACTION_POOLER_URL: postgresql://user:password@postgres:5432/orb
-      DATABASE_SESSION_POOLER_URL: postgresql://user:password@postgres:5432/orb
-      DATABASE_DIRECT_CONNECTION_URL: postgresql://user:password@postgres:5432/orb
-    depends_on:
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_started
-      meilisearch:
-        condition: service_healthy
-    command: /bin/bash /app/scripts/init.sh
-    volumes:
-      - ./backend:/app
-      - ./data:/data
-    restart: "no"
 
   # Frontend (Next.js)
   frontend:

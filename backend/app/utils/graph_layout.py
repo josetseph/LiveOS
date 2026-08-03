@@ -1,16 +1,14 @@
 """
-Hierarchical 3D layout computation for the knowledge graph.
+Deterministic 3D layout for the knowledge graph.
 
-Algorithm:
-  1. Level-2 communities (most specific) are placed on a large Fibonacci sphere.
-  2. Member nodes are distributed on a smaller sphere centred at their community.
-  3. Level-0 and level-1 community positions are the centroid of their positioned
-     members (computed after step 2).
-  4. Nodes with no community assignment are placed on a fallback inner sphere so
-     they are always visible, even before communities have been computed.
+Public algorithms:
+  - ``compute_solar_positions`` — hierarchical L0/L1/L2 solar-system layout
+    (stored on community recompute for the nested 3D graph).
+  - ``compute_spring_layout_3d`` — Fruchterman–Reingold spring layout
+    (flat “show everything” 3D graph after Leiden).
 
-The result is a static dict {node_id: (x, y, z)} that is stored in Kuzu so
-the frontend never has to run a physics simulation.
+Results are static ``{id: (x, y, z)}`` dicts persisted in Kuzu so the
+frontend does not run a physics simulation.
 """
 
 from __future__ import annotations
@@ -29,7 +27,7 @@ def _fibonacci_sphere(n: int, radius: float) -> list[tuple[float, float, float]]
     golden = math.pi * (math.sqrt(5.0) - 1.0)  # golden angle in radians
     for i in range(n):
         y = 1.0 - (i / max(n - 1, 1)) * 2.0
-        r = math.sqrt(1.0 - y * y)
+        r = math.sqrt(max(0.0, 1.0 - y * y))
         theta = golden * i
         x = math.cos(theta) * r
         z = math.sin(theta) * r
@@ -39,30 +37,19 @@ def _fibonacci_sphere(n: int, radius: float) -> list[tuple[float, float, float]]
 
 def _deterministic_jitter(seed: str, max_offset: float) -> tuple[float, float, float]:
     """Produce a stable small offset from a string seed to avoid z-fighting."""
-    h = int(hashlib.md5(seed.encode()).hexdigest(), 16)
+    h = int(hashlib.md5(seed.encode(), usedforsecurity=False).hexdigest(), 16)
     jx = ((h & 0xFF) / 255.0 - 0.5) * 2.0 * max_offset
     jy = (((h >> 8) & 0xFF) / 255.0 - 0.5) * 2.0 * max_offset
     jz = (((h >> 16) & 0xFF) / 255.0 - 0.5) * 2.0 * max_offset
     return jx, jy, jz
 
 
-def _centroid(points: list[tuple[float, float, float]]) -> tuple[float, float, float]:
-    """Return the average position of a non-empty list of 3D points."""
-    n = len(points)
-    return (
-        sum(p[0] for p in points) / n,
-        sum(p[1] for p in points) / n,
-        sum(p[2] for p in points) / n,
-    )
+def _majority_key(votes: dict[str, int]) -> str:
+    """Return the key with the highest vote count (deterministic on ties via max)."""
+    return max(votes, key=votes.__getitem__)
 
 
-# ── Constants ────────────────────────────────────────────────────────────────
-
-UNIVERSE_RADIUS = 1200.0  # radius of the top-level sphere
-CLUSTER_RADIUS_BASE = 120.0  # base radius of each community cluster sphere
-ORPHAN_RADIUS = 600.0  # fallback sphere radius for unclustered nodes
-
-# Solar-system layout constants
+# ── Solar-system layout constants ────────────────────────────────────────────
 #
 # Orbit depth ratio per level: ~4× between successive levels so hierarchy is
 # clearly visible at any zoom. For the most-common case (1 L2 per L1, 8 nodes):
@@ -77,99 +64,6 @@ SOLAR_L1_RING_BASE = 150.0  # L2 orbit radius around L1 star
 SOLAR_L1_RING_MAX = 400.0
 SOLAR_L2_NODE_BASE = 18.0  # node orbit radius (per sqrt of member count)
 SOLAR_L2_NODE_MAX = 55.0
-
-
-# ── Public API ───────────────────────────────────────────────────────────────
-
-
-def compute_positions(  # pylint: disable=too-many-locals
-    communities: list[dict],
-    memberships: dict[str, list[str]],
-    all_node_ids: list[str] | None = None,
-) -> dict[str, tuple[float, float, float]]:
-    """Compute stable 3D positions for all nodes and community nodes.
-
-    Args:
-        communities:   list of community dicts, each must have
-                       ``community_id``, ``community_level``, ``name``
-        memberships:   {community_id: [node_id, ...]} for level-2 communities
-                       (most-specific assignments only)
-        all_node_ids:  optional full list of regular node IDs so unclustered
-                       nodes are placed on a fallback sphere and always visible
-
-    Returns:
-        {node_id_or_community_id: (x, y, z)}
-    """
-    positions: dict[str, tuple[float, float, float]] = {}
-
-    # ── 1. Level-2 cluster centres on the universe sphere ────────────────────
-    level2 = [
-        c
-        for c in communities
-        if c.get("community_level") == 2 and memberships.get(c["community_id"])
-    ]
-
-    root_pts = _fibonacci_sphere(len(level2), UNIVERSE_RADIUS)
-    community_centres: dict[str, tuple[float, float, float]] = {}
-
-    for i, community in enumerate(level2):
-        cid = community["community_id"]
-        cx, cy, cz = root_pts[i]
-        jx, jy, jz = _deterministic_jitter(cid, 5.0)
-        centre = (cx + jx, cy + jy, cz + jz)
-        community_centres[cid] = centre
-        positions[cid] = centre
-
-    # ── 2. Member nodes distributed around their level-2 centre ─────────────
-    for community in level2:
-        cid = community["community_id"]
-        members = memberships.get(cid, [])
-        if not members:
-            continue
-
-        cx, cy, cz = community_centres[cid]
-        cluster_radius = CLUSTER_RADIUS_BASE * math.sqrt(max(len(members), 1))
-        cluster_radius = min(cluster_radius, CLUSTER_RADIUS_BASE * 8)
-
-        member_pts = _fibonacci_sphere(len(members), cluster_radius)
-        for j, node_id in enumerate(members):
-            px, py, pz = member_pts[j]
-            jx, jy, jz = _deterministic_jitter(node_id, 3.0)
-            positions[node_id] = (cx + px + jx, cy + py + jy, cz + pz + jz)
-
-    # ── 3. Level-0 and level-1 communities → centroid of their members ───────
-    # Sort descending by level so level-1 resolves before level-0 (level-0
-    # communities may contain level-1 members that are themselves communities).
-    coarser = sorted(
-        [c for c in communities if c.get("community_level") in (0, 1)],
-        key=lambda c: c.get("community_level", 0),
-        reverse=True,
-    )
-    for community in coarser:
-        cid = community["community_id"]
-        if cid in positions:
-            continue
-        member_ids = memberships.get(cid) or []
-        member_pts_list = [positions[nid] for nid in member_ids if nid in positions]
-        if member_pts_list:
-            positions[cid] = _centroid(member_pts_list)
-        else:
-            # No positioned members yet — scatter on the universe sphere with
-            # a deterministic offset so it's at least somewhere sensible.
-            jx, jy, jz = _deterministic_jitter(cid, UNIVERSE_RADIUS * 0.9)
-            positions[cid] = (jx, jy, jz)
-
-    # ── 4. Fallback: unclustered nodes on a separate inner sphere ────────────
-    if all_node_ids:
-        orphans = [nid for nid in all_node_ids if nid not in positions]
-        if orphans:
-            orphan_pts = _fibonacci_sphere(len(orphans), ORPHAN_RADIUS)
-            for j, node_id in enumerate(orphans):
-                ox, oy, oz = orphan_pts[j]
-                jx, jy, jz = _deterministic_jitter(node_id, 3.0)
-                positions[node_id] = (ox + jx, oy + jy, oz + jz)
-
-    return positions
 
 
 def compute_solar_positions(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -222,15 +116,13 @@ def compute_solar_positions(  # pylint: disable=too-many-locals,too-many-branche
             l1_l0_votes.setdefault(l1, {})
             l1_l0_votes[l1][l0] = l1_l0_votes[l1].get(l0, 0) + 1
 
-    # Resolve parent by majority vote
     l2_parent: dict[str, str] = {
-        cid: max(votes, key=votes.__getitem__) for cid, votes in l2_l1_votes.items()
+        cid: _majority_key(votes) for cid, votes in l2_l1_votes.items()
     }
     l1_parent: dict[str, str] = {
-        cid: max(votes, key=votes.__getitem__) for cid, votes in l1_l0_votes.items()
+        cid: _majority_key(votes) for cid, votes in l1_l0_votes.items()
     }
 
-    # Build children sets (needed for sizing the orbit spheres)
     l0_l1_children: dict[str, list[str]] = {}
     for l1_cid, l0_cid in l1_parent.items():
         l0_l1_children.setdefault(l0_cid, []).append(l1_cid)
@@ -239,13 +131,11 @@ def compute_solar_positions(  # pylint: disable=too-many-locals,too-many-branche
     for l2_cid, l1_cid in l2_parent.items():
         l1_l2_children.setdefault(l1_cid, []).append(l2_cid)
 
-    # Sort for determinism
-    for v in l0_l1_children.values():
-        v.sort()
-    for v in l1_l2_children.values():
-        v.sort()
+    for children in l0_l1_children.values():
+        children.sort()
+    for children in l1_l2_children.values():
+        children.sort()
 
-    # Community id sets by level for quick lookup
     l0_cids = sorted(
         c["community_id"] for c in communities if c.get("community_level") == 0
     )
@@ -284,7 +174,6 @@ def compute_solar_positions(  # pylint: disable=too-many-locals,too-many-branche
             l1_positions[l1_cid] = pos
             positions[l1_cid] = pos
 
-    # Orphan L1s (no L0 parent): scatter on a fallback sphere
     for l1_cid in l1_cids:
         if l1_cid not in l1_positions:
             jx, jy, jz = _deterministic_jitter(l1_cid, SOLAR_UNIVERSE_RADIUS * 0.8)
@@ -310,7 +199,6 @@ def compute_solar_positions(  # pylint: disable=too-many-locals,too-many-branche
             l2_positions[l2_cid] = pos
             positions[l2_cid] = pos
 
-    # Orphan L2s
     for l2_cid in l2_cids:
         if l2_cid not in l2_positions:
             jx, jy, jz = _deterministic_jitter(l2_cid, SOLAR_UNIVERSE_RADIUS * 0.5)
@@ -333,10 +221,7 @@ def compute_solar_positions(  # pylint: disable=too-many-locals,too-many-branche
             positions[node_id] = (cx + px + jx, cy + py + jy, cz + pz + jz)
 
     # ── 5. Fallback: unclustered nodes ────────────────────────────────────────
-    # Nodes that have no L2 assignment (so they weren't placed in step 4) may
-    # still belong to an L1 or L0 community.  Group them by their best-known
-    # ancestor so they cluster visually near the right part of the graph
-    # rather than forming an orphan sphere at the origin.
+    # Prefer clustering near L1/L0 ancestors over a solid central orphan sphere.
     if all_node_ids:
         orphans = [nid for nid in all_node_ids if nid not in positions]
         if orphans:
@@ -355,7 +240,6 @@ def compute_solar_positions(  # pylint: disable=too-many-locals,too-many-branche
                 else:
                     truly_orphan.append(node_id)
 
-            # Cluster around L1 center (like loose moons that lost their L2)
             for l1_cid, members in l1_orphan_groups.items():
                 cx, cy, cz = l1_positions[l1_cid]
                 n = len(members)
@@ -369,7 +253,6 @@ def compute_solar_positions(  # pylint: disable=too-many-locals,too-many-branche
                     px, py, pz = pts[i]
                     positions[node_id] = (cx + px + jx, cy + py + jy, cz + pz + jz)
 
-            # Cluster around L0 center (loosest — just needs to be in the right galaxy)
             for l0_cid, members in l0_orphan_groups.items():
                 cx, cy, cz = l0_positions[l0_cid]
                 n = len(members)
@@ -383,25 +266,25 @@ def compute_solar_positions(  # pylint: disable=too-many-locals,too-many-branche
                     px, py, pz = pts[i]
                     positions[node_id] = (cx + px + jx, cy + py + jy, cz + pz + jz)
 
-            # Truly orphan — scatter as asteroids throughout the universe volume.
-            # We use a hash-derived spherical coordinate where r is spread across
-            # the full universe depth (not a surface), so they appear as background
-            # asteroids between star systems rather than a solid central sphere.
+            # Truly orphan — scatter through the universe volume (cube-root density).
             if truly_orphan:
-                _MAX_R = SOLAR_UNIVERSE_RADIUS * 1.4  # pylint: disable=invalid-name
-                _MIN_R = 80.0  # pylint: disable=invalid-name
+                max_r = SOLAR_UNIVERSE_RADIUS * 1.4
+                min_r = 80.0
                 for node_id in truly_orphan:
-                    h = int(hashlib.md5(node_id.encode()).hexdigest(), 16)
-                    # Uniform point on unit sphere (rejection-free method)
+                    h = int(
+                        hashlib.md5(
+                            node_id.encode(), usedforsecurity=False
+                        ).hexdigest(),
+                        16,
+                    )
                     cos_theta = ((h & 0xFFFF) / 65535.0) * 2.0 - 1.0
                     phi = ((h >> 16) & 0xFFFF) / 65535.0 * 2.0 * math.pi
                     sin_theta = math.sqrt(max(0.0, 1.0 - cos_theta * cos_theta))
                     nx = sin_theta * math.cos(phi)
                     ny = cos_theta
                     nz = sin_theta * math.sin(phi)
-                    # r uniformly distributed across volume (cube-root gives uniform 3D density)
                     r_frac = ((h >> 32) & 0xFFFFFF) / float(0xFFFFFF)
-                    r = _MIN_R + (r_frac ** (1.0 / 3.0)) * (_MAX_R - _MIN_R)
+                    r = min_r + (r_frac ** (1.0 / 3.0)) * (max_r - min_r)
                     positions[node_id] = (nx * r, ny * r, nz * r)
 
     return positions
@@ -437,21 +320,13 @@ def compute_spring_layout_3d(  # pylint: disable=too-many-locals,too-many-statem
     if n == 1:
         return {node_ids[0]: (0.0, 0.0, 0.0)}
 
-    # ── Initial positions on a Fibonacci sphere so layout is deterministic ───
-    pos: dict[str, list[float]] = {}
-    golden = math.pi * (math.sqrt(5.0) - 1.0)
     init_radius = k * max(n ** (1 / 3), 1.5)
-    for i, nid in enumerate(node_ids):
-        y = 1.0 - (i / max(n - 1, 1)) * 2.0
-        r = math.sqrt(max(1.0 - y * y, 0.0))
-        theta = golden * i
-        pos[nid] = [
-            math.cos(theta) * r * init_radius,
-            y * init_radius,
-            math.sin(theta) * r * init_radius,
-        ]
+    sphere = _fibonacci_sphere(n, init_radius)
+    pos: dict[str, list[float]] = {
+        nid: [sphere[i][0], sphere[i][1], sphere[i][2]]
+        for i, nid in enumerate(node_ids)
+    }
 
-    # ── Build undirected unique-edge set ────────────────────────────────────
     node_set = set(node_ids)
     adj: set[tuple[str, str]] = set()
     for src, tgt in edges:
@@ -460,16 +335,14 @@ def compute_spring_layout_3d(  # pylint: disable=too-many-locals,too-many-statem
             adj.add((a, b))
     adj_list = list(adj)
 
-    # ── FR iterations with cosine cooling ───────────────────────────────────
     t_start = k * 2.5
     for step in range(iterations):
-        # Cosine cool: fast at first, smooth near convergence
         progress = step / iterations
         t = t_start * (0.5 + 0.5 * math.cos(math.pi * progress))
 
         disp: dict[str, list[float]] = {nid: [0.0, 0.0, 0.0] for nid in node_ids}
 
-        # Repulsion: O(n²) — acceptable for n ≤ 500
+        # Repulsion: O(n²) — acceptable for personal-KB sizes (n ≤ ~500)
         for i in range(n):
             for j in range(i + 1, n):
                 u, v = node_ids[i], node_ids[j]
@@ -477,7 +350,7 @@ def compute_spring_layout_3d(  # pylint: disable=too-many-locals,too-many-statem
                 dy = pos[u][1] - pos[v][1]
                 dz = pos[u][2] - pos[v][2]
                 d = math.sqrt(dx * dx + dy * dy + dz * dz) or 0.01
-                f = (k * k) / d  # repulsion magnitude
+                f = (k * k) / d
                 nx_, ny_, nz_ = dx / d, dy / d, dz / d
                 disp[u][0] += nx_ * f
                 disp[u][1] += ny_ * f
@@ -486,13 +359,12 @@ def compute_spring_layout_3d(  # pylint: disable=too-many-locals,too-many-statem
                 disp[v][1] -= ny_ * f
                 disp[v][2] -= nz_ * f
 
-        # Attraction along edges
         for src, tgt in adj_list:
             dx = pos[src][0] - pos[tgt][0]
             dy = pos[src][1] - pos[tgt][1]
             dz = pos[src][2] - pos[tgt][2]
             d = math.sqrt(dx * dx + dy * dy + dz * dz) or 0.01
-            f = (d * d) / k  # attraction magnitude
+            f = (d * d) / k
             nx_, ny_, nz_ = dx / d, dy / d, dz / d
             disp[src][0] -= nx_ * f
             disp[src][1] -= ny_ * f
@@ -501,14 +373,12 @@ def compute_spring_layout_3d(  # pylint: disable=too-many-locals,too-many-statem
             disp[tgt][1] += ny_ * f
             disp[tgt][2] += nz_ * f
 
-        # Gravity toward origin
         if gravity > 0:
             for nid in node_ids:
                 disp[nid][0] -= pos[nid][0] * gravity
                 disp[nid][1] -= pos[nid][1] * gravity
                 disp[nid][2] -= pos[nid][2] * gravity
 
-        # Apply displacement, capped by temperature
         for nid in node_ids:
             dx, dy, dz = disp[nid]
             d = math.sqrt(dx * dx + dy * dy + dz * dz) or 0.01

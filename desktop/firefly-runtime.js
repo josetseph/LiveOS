@@ -5,16 +5,12 @@ const https = require("https");
 const crypto = require("crypto");
 const { execFileSync, spawnSync } = require("child_process");
 const { nativeArch } = require("./download-binaries");
-const { PORTS, localhost } = require("./ports");
+const { fireflyUrl } = require("./ports");
 const { getRepoRoot, getResourcesRoot } = require("./paths");
 
 const FIREFLY_VERSION = process.env.ORB_FIREFLY_VERSION || "v6.6.6";
 const PHP_BIN_VERSION = process.env.ORB_PHP_BIN_VERSION || "1.2.0";
 const PHP_RUNTIME_ID = `nativephp:${PHP_BIN_VERSION}:php-8.5`;
-
-function fireflyUrl() {
-  return localhost(PORTS.firefly);
-}
 
 function fireflyDataRoot(dataDir) {
   return path.join(dataDir, "firefly");
@@ -133,9 +129,17 @@ function extractArchive(archivePath, destDir, archiveType) {
   fs.mkdirSync(destDir, { recursive: true });
   if (archiveType === "zip") {
     const python = process.platform === "win32" ? "python" : "python3";
-    execFileSync(python, ["-c", `import zipfile; zipfile.ZipFile(r'${archivePath}').extractall(r'${destDir}')`], {
-      stdio: "ignore",
-    });
+    // Pass paths via argv (not string-interpolated into -c) to avoid quote injection.
+    execFileSync(
+      python,
+      [
+        "-c",
+        "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])",
+        archivePath,
+        destDir,
+      ],
+      { stdio: "ignore" },
+    );
     return;
   }
   execFileSync("tar", ["-xf", archivePath, "-C", destDir], { stdio: "ignore" });
@@ -270,25 +274,6 @@ function randomFixedToken(length = 32) {
   return crypto.randomBytes(length * 2).toString("base64url").slice(0, length);
 }
 
-function envToObject(source) {
-  const out = {};
-  for (const rawLine of source.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const idx = line.indexOf("=");
-    if (idx === -1) continue;
-    let value = line.slice(idx + 1);
-    if (
-      (value.startsWith("\"") && value.endsWith("\""))
-      || (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    out[line.slice(0, idx)] = value;
-  }
-  return out;
-}
-
 function renderEnv(env) {
   return Object.entries(env)
     .map(([key, value]) => `${key}=${String(value ?? "")}`)
@@ -315,7 +300,7 @@ function ensureFireflyEnv(dataDir) {
     TZ: "UTC",
     DEFAULT_LANGUAGE: "en_US",
     DEFAULT_LOCALE: "equal",
-    TRUSTED_PROXIES: "**",
+    TRUSTED_PROXIES: "127.0.0.1,::1",
     LOG_CHANNEL: "stack",
     DB_CONNECTION: "sqlite",
     DB_DATABASE: dbPath,
@@ -473,18 +458,6 @@ function ensureRuntimeMetadata(dataDir) {
   if (!existing.instanceId) existing.instanceId = crypto.randomUUID();
   writeJson(file, existing);
   return existing;
-}
-
-function generateTokenScript(email) {
-  return [
-    "require 'vendor/autoload.php';",
-    "$app = require_once 'bootstrap/app.php';",
-    "$app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap();",
-    `$user = FireflyIII\\User::where('email', '${email.replace(/'/g, "\\'")}')->first();`,
-    "if (!$user) { fwrite(STDERR, 'User not found'); exit(1); }",
-    "$token = $user->createToken('Orb Desktop')->accessToken;",
-    "echo $token;",
-  ].join(" ");
 }
 
 function bootstrapUserScript(email, password, groupTitle) {

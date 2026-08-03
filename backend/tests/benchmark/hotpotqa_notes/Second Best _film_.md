@@ -1,3 +1,0 @@
-# Second Best (film)
-
-Second Best is a 1994 British film produced by Sarah Radclyffe and directed by Chris Menges.  It closely follows the 1991 novel of the same name by David Cook, who also wrote the screenplay.

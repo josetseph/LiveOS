@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   encodeFileUrl,
   fetchMediaObjectUrl,
@@ -23,40 +23,61 @@ export function BlobMediaPlayer({
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+  const blobTriedRef = useRef(false);
   const yt = youtubeEmbedUrl(url);
   const vimeo = vimeoEmbedUrl(url);
 
   useEffect(() => {
     if (yt || vimeo) return;
-    let objectUrl: string | null = null;
     let cancelled = false;
+    blobTriedRef.current = false;
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+    }
     setSrc(null);
     setError(null);
 
     const direct = encodeFileUrl(resolveFileUrl(url, kbId));
-    // Try direct first (works with Range + faststart); blob as fallback.
-    setSrc(direct);
+    // Prefer direct URL (Range + faststart). Blob-fetch only if playback fails.
+    if (!cancelled) setSrc(direct);
 
+    return () => {
+      cancelled = true;
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+    };
+  }, [url, kbId, yt, vimeo]);
+
+  const onMediaError = () => {
+    if (blobTriedRef.current || !src || src.startsWith("blob:")) {
+      setError(
+        kind === "video"
+          ? "Could not play this video."
+          : "Could not play this audio.",
+      );
+      return;
+    }
+    blobTriedRef.current = true;
     void fetchMediaObjectUrl(url, kbId)
       .then((blobUrl) => {
-        if (cancelled) {
-          if (blobUrl.startsWith("blob:")) URL.revokeObjectURL(blobUrl);
-          return;
-        }
         if (blobUrl.startsWith("blob:")) {
-          objectUrl = blobUrl;
+          if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+          objectUrlRef.current = blobUrl;
         }
         setSrc(blobUrl);
       })
       .catch(() => {
-        /* keep direct src */
+        setError(
+          kind === "video"
+            ? "Could not play this video."
+            : "Could not play this audio.",
+        );
       });
-
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [url, kbId, yt, vimeo]);
+  };
 
   if (yt || vimeo) {
     return (
@@ -90,7 +111,7 @@ export function BlobMediaPlayer({
           className ||
           "mx-auto max-h-[70vh] w-full max-w-full rounded-lg bg-black"
         }
-        onError={() => setError("Could not play this video.")}
+        onError={onMediaError}
       >
         Your browser does not support video playback.
       </video>
@@ -102,7 +123,7 @@ export function BlobMediaPlayer({
       controls
       src={src}
       className={className || "w-full max-w-2xl"}
-      onError={() => setError("Could not play this audio.")}
+      onError={onMediaError}
     />
   );
 }

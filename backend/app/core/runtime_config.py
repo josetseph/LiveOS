@@ -4,6 +4,8 @@ Stored under DATA_DIR/runtime_config.json (desktop) with a repo data/ fallback.
 API keys are never stored here — those stay in ``.env``.
 """
 
+from __future__ import annotations
+
 import json
 import threading
 from pathlib import Path
@@ -34,9 +36,11 @@ def load() -> dict:
     path = _data_path()
     try:
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {k: v for k, v in data.items() if k in MUTABLE_KEYS}
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Could not load runtime config", extra={"error": str(exc)})
+        logger.warning("Could not load runtime config: %s", exc)
     return {}
 
 
@@ -49,18 +53,18 @@ def save(overrides: dict) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(safe, indent=2), encoding="utf-8")
         except OSError as exc:
-            logger.warning("Could not save runtime config", extra={"error": str(exc)})
+            logger.warning("Could not save runtime config: %s", exc)
 
 
 def apply_to_settings(overrides: dict) -> None:
     """Mutate the global ``settings`` object with the given overrides."""
-    if "provider" in overrides:
+    if "provider" in overrides and overrides["provider"] is not None:
         settings.LLM_PROVIDER = overrides["provider"]
-    if "model" in overrides:
+    if "model" in overrides and overrides["model"] is not None:
         settings.CHAT_MODEL = overrides["model"]
-    if "ingestion_model" in overrides:
+    if "ingestion_model" in overrides and overrides["ingestion_model"] is not None:
         settings.INGESTION_MODEL = overrides["ingestion_model"]
-    if "base_url" in overrides:
+    if "base_url" in overrides and overrides["base_url"] is not None:
         settings.LLM_BASE_URL = overrides["base_url"]
-    if "ai_setup_mode" in overrides:
+    if "ai_setup_mode" in overrides and overrides["ai_setup_mode"] is not None:
         settings.AI_SETUP_MODE = overrides["ai_setup_mode"]

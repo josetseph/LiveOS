@@ -60,6 +60,7 @@
       .mode strong { display: block; margin-bottom: 2px; }
       .mode span { font-size: 0.75rem; color: #888; }
       .warn { font-size: 0.75rem; color: #fbbf24; margin-top: 8px; }
+      .err { font-size: 0.75rem; color: #f87171; margin-top: 8px; }
     </style>
   </head>
   <body>
@@ -110,37 +111,25 @@
       Next screen downloads chat/embed/rerank GGUFs plus Florence-2, Whisper, and Marlin
       (many GB). Stay online — progress shows on Setup after Continue.
     </p>
+    <p class="err" id="formError" style="display:none"></p>
 
     <button class="primary" id="continue">Continue</button>
 
     <script>
-      const { ipcRenderer } = require("electron");
-      const os = require("os");
-      const path = require("path");
-
-      function defaultData() {
-        if (process.platform === "darwin")
-          return path.join(os.homedir(), "Library", "Application Support", "Orb", "data");
-        if (process.platform === "win32")
-          return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Orb", "data");
-        return path.join(os.homedir(), ".local", "share", "Orb", "data");
-      }
-      function defaultModels() {
-        if (process.platform === "darwin")
-          return path.join(os.homedir(), "Library", "Application Support", "Orb", "models");
-        if (process.platform === "win32")
-          return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Orb", "models");
-        return path.join(os.homedir(), ".local", "share", "Orb", "models");
+      const desktop = window.orbDesktop;
+      if (!desktop) {
+        document.getElementById("formError").style.display = "block";
+        document.getElementById("formError").textContent =
+          "Desktop bridge unavailable — restart Orb.";
       }
 
       (async () => {
         try {
-          const defs = await ipcRenderer.invoke("get-default-paths");
+          const defs = await desktop.getDefaultPaths();
           if (defs?.data_dir) document.getElementById("dataDir").value = defs.data_dir;
           if (defs?.models_dir) document.getElementById("modelsDir").value = defs.models_dir;
         } catch (_) {
-          document.getElementById("dataDir").value = defaultData();
-          document.getElementById("modelsDir").value = defaultModels();
+          /* defaults stay empty; Browse still works */
         }
       })();
 
@@ -161,7 +150,7 @@
           e.stopPropagation();
           const id = btn.getAttribute("data-pick");
           const input = document.getElementById(id);
-          const dir = await ipcRenderer.invoke("pick-directory", {
+          const dir = await desktop.pickDirectory({
             title: btn.getAttribute("data-pick-title") || "Choose folder",
             defaultPath: (input && input.value.trim()) || undefined,
           });
@@ -173,11 +162,14 @@
       });
 
       document.getElementById("continue").addEventListener("click", async () => {
+        const errEl = document.getElementById("formError");
+        errEl.style.display = "none";
         const vault = document.getElementById("vaultPath").value.trim();
         const dataDir = document.getElementById("dataDir").value.trim();
         const modelsDir = document.getElementById("modelsDir").value.trim();
         if (!dataDir || !modelsDir) {
-          alert("Please set both the data and models directories.");
+          errEl.textContent = "Please set both the data and models directories.";
+          errEl.style.display = "block";
           return;
         }
         if (!vault) {
@@ -192,8 +184,13 @@
           default_vault_path: vault || undefined,
           ai_setup_mode: aiMode,
         };
-        await ipcRenderer.invoke("save-wizard", payload);
-        ipcRenderer.send("wizard-done");
+        try {
+          await desktop.saveWizard(payload);
+          desktop.wizardDone();
+        } catch (err) {
+          errEl.textContent = String(err?.message || err);
+          errEl.style.display = "block";
+        }
       });
     </script>
   </body>

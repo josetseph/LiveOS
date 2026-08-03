@@ -1,12 +1,40 @@
 import axios from "axios";
-import type { ChatConversation, ChatMessageRecord, ChatStatus, KnowledgeBase, NoteStatus } from "@/lib/types";
+import type {
+  ChatConversation,
+  ChatMessageRecord,
+  ChatStatus,
+  FinanceAccount,
+  FinanceBudget,
+  FinanceCategory,
+  FinanceRecurrence,
+  FinanceReport,
+  FinanceRule,
+  FinanceRuleGroup,
+  FinanceSearchResult,
+  FinanceSummary,
+  FinanceTransaction,
+  FinanceWorkspace,
+  KnowledgeBase,
+  NotesGraphPayload,
+  NoteStatus,
+  SetupStatus,
+} from "@/lib/types";
 import { resolveApiBaseUrl } from "@/lib/desktop";
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "/api/v1").replace(/\/$/, "");
-const API_ORIGIN = API_BASE_URL.replace(/\/api\/v1$/, "");
 
-/** Append ?kb=<name> when targeting a non-default knowledge base. */
-function kbParam(kb: string): string {
+/** Merge optional kb into axios query params (omit for default). */
+function withKb(
+  kb: string,
+  params?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = { ...(params || {}) };
+  if (kb && kb !== "default") out.kb = kb;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Path-only kb query for methods that already encode other params in the URL. */
+function kbQuery(kb: string): string {
   return kb && kb !== "default" ? `?kb=${encodeURIComponent(kb)}` : "";
 }
 
@@ -27,17 +55,13 @@ const http = {
 export const api = {
   // ── Chat ────────────────────────────────────────────────────────────────
 
-  async chat(query: string, kb = "default", requestId?: string) {
-    return http.post(`/chat${kbParam(kb)}`, { query, request_id: requestId });
-  },
-
   async startChat(
     query: string,
     kb = "default",
     requestId?: string,
     conversationId?: string | null,
   ) {
-    return http.post(`/chat/async${kbParam(kb)}`, {
+    return http.post(`/chat/async${kbQuery(kb)}`, {
       query,
       request_id: requestId,
       conversation_id: conversationId || undefined,
@@ -49,11 +73,7 @@ export const api = {
   },
 
   async listChatConversations(kb = "default"): Promise<ChatConversation[]> {
-    return http.get(`/chat/conversations${kbParam(kb)}`);
-  },
-
-  async createChatConversation(kb = "default", title?: string) {
-    return http.post(`/chat/conversations${kbParam(kb)}`, title ? { title } : {});
+    return http.get(`/chat/conversations`, withKb(kb));
   },
 
   async getChatMessages(conversationId: string): Promise<ChatMessageRecord[]> {
@@ -73,37 +93,25 @@ export const api = {
     // Next.js rewrite proxy (default 10MB → socket hang up / 500).
     const base = await resolveApiBaseUrl(API_BASE_URL);
     const response = await axios.post(
-      `${base}/upload${kbParam(kb)}`,
+      `${base}/upload${kbQuery(kb)}`,
       formData,
       { timeout: 10 * 60 * 1000 },
     );
     return response.data;
   },
 
-  async deleteFile(fileKey: string) {
-    return http.del(`/files/${encodeURIComponent(fileKey)}`);
-  },
-
-  // ── Notes (Postgres — not KB-scoped except ingest/delete) ───────────────
-
-  async ingest(data: {
-    content: string;
-    created_at?: string;
-    skip_ingestion?: boolean;
-  }, kb = "default") {
-    return http.post(`/ingest${kbParam(kb)}`, data);
-  },
+  // ── Notes (vault markdown + SQLite metadata) ─────────────────────────────
 
   async getNotes(search?: string, processed?: boolean, failed?: boolean, kb = "default") {
     const params: Record<string, unknown> = {};
     if (search) params.search = search;
     if (processed !== undefined) params.processed = processed;
     if (failed !== undefined) params.failed = failed;
-    return http.get(`/notes${kbParam(kb)}`, params);
+    return http.get(`/notes`, withKb(kb, params));
   },
 
   async getNote(id: string, kb = "default") {
-    return http.get(`/notes/${id}${kbParam(kb)}`);
+    return http.get(`/notes/${id}${kbQuery(kb)}`);
   },
 
   async getNoteStatus(id: string): Promise<NoteStatus> {
@@ -117,7 +125,7 @@ export const api = {
     title?: string,
     folder?: string,
   ) {
-    return http.post(`/notes${kbParam(kb)}`, {
+    return http.post(`/notes${kbQuery(kb)}`, {
       content,
       created_at,
       title,
@@ -126,18 +134,18 @@ export const api = {
   },
 
   async moveNote(id: string, folder: string, kb = "default") {
-    return http.post(`/notes/${id}/move${kbParam(kb)}`, { folder });
+    return http.post(`/notes/${id}/move${kbQuery(kb)}`, { folder });
   },
 
   async moveVaultFile(fromRel: string, toRel: string, kb = "default") {
-    return http.post(`/vault/move${kbParam(kb)}`, {
+    return http.post(`/vault/move${kbQuery(kb)}`, {
       from_rel: fromRel,
       to_rel: toRel,
     });
   },
 
   async deleteVaultFile(relPath: string, kb = "default") {
-    return http.post(`/vault/delete${kbParam(kb)}`, { rel_path: relPath });
+    return http.post(`/vault/delete${kbQuery(kb)}`, { rel_path: relPath });
   },
 
   async listVaultFolders(kb = "default"): Promise<{
@@ -147,11 +155,11 @@ export const api = {
     vault_name?: string;
     vault_path?: string;
   }> {
-    return http.get(`/vault/folders${kbParam(kb)}`);
+    return http.get(`/vault/folders`, withKb(kb));
   },
 
   async mkdirVaultFolder(path: string, kb = "default") {
-    return http.post(`/vault/mkdir${kbParam(kb)}`, { path });
+    return http.post(`/vault/mkdir${kbQuery(kb)}`, { path });
   },
 
   async resolveVaultLocalPath(relOrUrl: string, kb = "default"): Promise<{
@@ -160,7 +168,7 @@ export const api = {
     vault_path: string;
     exists: boolean;
   }> {
-    return http.get(`/vault/local-path${kbParam(kb)}`, { rel: relOrUrl });
+    return http.get(`/vault/local-path`, withKb(kb, { rel: relOrUrl }));
   },
 
   async updateNote(
@@ -170,17 +178,17 @@ export const api = {
     kb = "default",
     title?: string,
   ) {
-    return http.put(`/notes/${id}${kbParam(kb)}`, { content, created_at, title });
+    return http.put(`/notes/${id}${kbQuery(kb)}`, { content, created_at, title });
   },
 
   /** Ingest an existing note into the given KB (default KB if omitted). */
   async ingestNote(id: string, kb = "default") {
-    return http.post(`/notes/${id}/ingest${kbParam(kb)}`);
+    return http.post(`/notes/${id}/ingest${kbQuery(kb)}`);
   },
 
-  /** Delete note from Postgres and from the given KB's graph. */
+  /** Delete note from vault/SQLite and from the given KB's graph. */
   async deleteNote(id: string, kb = "default") {
-    return http.del(`/notes/${id}${kbParam(kb)}`);
+    return http.del(`/notes/${id}${kbQuery(kb)}`);
   },
 
   /** Batch-delete notes (vault + SQLite + graph cleanup). Max 100. */
@@ -193,95 +201,10 @@ export const api = {
     deleted_count: number;
     failed_count: number;
   }> {
-    return http.post(`/notes/batch-delete${kbParam(kb)}`, { ids });
-  },
-
-  // ── Graph summary ─────────────────────────────────────────────────────────
-
-  async getSummary(kb = "default") {
-    return http.get(`/graph/summary${kbParam(kb)}`);
-  },
-
-  async getGraphData(kb = "default") {
-    return http.get(`/graph/visualization${kbParam(kb)}`);
-  },
-
-  // ── Feedback ──────────────────────────────────────────────────────────────
-
-  async submitFeedback(payload: {
-    query: string;
-    response: string;
-    relevance: number;
-    quality: number;
-    comments?: string;
-    node_ids_used?: string[];
-  }) {
-    return http.post("/feedback", payload);
-  },
-
-  // ── Health ───────────────────────────────────────────────────────────────
-
-  async getHealth() {
-    const response = await axios.get(`${API_ORIGIN}/health`);
-    return response.data;
+    return http.post(`/notes/batch-delete${kbQuery(kb)}`, { ids });
   },
 
   // ── 3D Exploration graph ──────────────────────────────────────────────────
-
-  async getGraph3DOverview(kb = "default"): Promise<{
-    communities: Array<{
-      community_id: string;
-      name: string;
-      summary: string;
-      community_level: number;
-      member_count: number;
-      themes: string[];
-      x: number;
-      y: number;
-      z: number;
-    }>;
-    orphan_nodes: Array<{
-      node_id: string;
-      name: string;
-      node_type: string;
-      description: string;
-      facts: string[];
-      x: number;
-      y: number;
-      z: number;
-    }>;
-    orphan_edges: Array<{
-      source: string;
-      target: string;
-      type: string;
-    }>;
-  }> {
-    return http.get(`/graph/3d/overview${kbParam(kb)}`);
-  },
-
-  async getGraph3DCommunity(communityId: string, kb = "default"): Promise<{
-    nodes: Array<{
-      node_id: string;
-      name: string;
-      node_type: string;
-      description: string;
-      facts: string[];
-      domain?: string;
-      status?: string;
-      community_id: string;
-      x: number;
-      y: number;
-      z: number;
-    }>;
-    edges: Array<{
-      source: string;
-      target: string;
-      type: string;
-      natural_language: string;
-    }>;
-  }> {
-    return http.get(`/graph/3d/community/${communityId}${kbParam(kb)}`);
-  },
 
   async getGraph3DFull(kb = "default"): Promise<{
     nodes: Array<{
@@ -301,10 +224,10 @@ export const api = {
       type: string;
     }>;
   }> {
-    return http.get(`/graph/3d/full${kbParam(kb)}`);
+    return http.get(`/graph/3d/full`, withKb(kb));
   },
 
-    async getNodeDetail(nodeId: string, kb = "default"): Promise<{
+  async getNodeDetail(nodeId: string, kb = "default"): Promise<{
     node_id: string;
     name: string;
     node_type: string;
@@ -325,7 +248,7 @@ export const api = {
     related_notes?: { note_id: string; name: string }[];
   }> {
     return http.get(
-      `/graph/3d/node/${encodeURIComponent(nodeId)}${kbParam(kb)}`,
+      `/graph/3d/node/${encodeURIComponent(nodeId)}${kbQuery(kb)}`,
     );
   },
 
@@ -336,9 +259,7 @@ export const api = {
     kb = "default",
     limit = 5,
   ): Promise<{ node_id: string; name: string; node_type: string }[]> {
-    const params: Record<string, unknown> = { q, limit };
-    if (kb && kb !== "default") params.kb = kb;
-    return http.get("/graph/entities/search", params);
+    return http.get("/graph/entities/search", withKb(kb, { q, limit }));
   },
 
   async scanTextEntities(
@@ -347,7 +268,7 @@ export const api = {
   ): Promise<{ node_id: string; name: string; node_type: string }[]> {
     const params: Record<string, unknown> = {};
     if (kb && kb !== "default") params.kb = kb;
-    return http.post(`/graph/entities/scan-text${kbParam(kb)}`, { text });
+    return http.post(`/graph/entities/scan-text${kbQuery(kb)}`, { text });
   },
 
   // ── Knowledge-base management ─────────────────────────────────────────────
@@ -379,7 +300,7 @@ export const api = {
     vault_path: string;
     message: string;
   }> {
-    return http.post(`/kb/empty${kbParam(kb)}`, {});
+    return http.post(`/kb/empty${kbQuery(kb)}`, {});
   },
 
   async deleteAllNonDefaultKBs(): Promise<{
@@ -393,7 +314,7 @@ export const api = {
 
   // ── Setup / paths ─────────────────────────────────────────────────────────
 
-  async getSetupStatus(): Promise<import("@/lib/types").SetupStatus> {
+  async getSetupStatus(): Promise<SetupStatus> {
     return http.get("/setup/status");
   },
 
@@ -433,53 +354,36 @@ export const api = {
     return http.post("/setup/select-chat-model", { chat_id: chatId });
   },
 
-  async startMultimodalServices(installDeps = false) {
-    return http.post(
-      `/setup/start-multimodal-services?install_deps=${installDeps ? "true" : "false"}`,
-    );
-  },
-
   async getMultimodalStatus() {
     return http.get("/setup/multimodal-status");
   },
 
-  async startLocalLlm(chatId?: string) {
-    // Metal load of 12B can take several minutes — no axios timeout.
-    return axios
-      .post(
-        `${API_BASE_URL}/setup/start-local-llm`,
-        { chat_id: chatId || undefined },
-        { timeout: 0 },
-      )
-      .then((r) => r.data);
-  },
-
   // ── Notes graph / vault ───────────────────────────────────────────────────
 
-  async getNotesGraph(kb = "default"): Promise<import("@/lib/types").NotesGraphPayload> {
-    return http.get(`/graph/notes${kbParam(kb)}`);
+  async getNotesGraph(kb = "default"): Promise<NotesGraphPayload> {
+    return http.get(`/graph/notes`, withKb(kb));
   },
 
   async getNoteNeighbors(
     noteId: string,
     kb = "default",
-  ): Promise<import("@/lib/types").NotesGraphPayload> {
-    return http.get(`/graph/notes/${encodeURIComponent(noteId)}/neighbors${kbParam(kb)}`);
+  ): Promise<NotesGraphPayload> {
+    return http.get(`/graph/notes/${encodeURIComponent(noteId)}/neighbors${kbQuery(kb)}`);
   },
 
   async getNoteEntitySubgraph(
     text: string,
     kb = "default",
-  ): Promise<import("@/lib/types").NotesGraphPayload> {
-    return http.post(`/graph/entities/note-subgraph${kbParam(kb)}`, { text });
+  ): Promise<NotesGraphPayload> {
+    return http.post(`/graph/entities/note-subgraph${kbQuery(kb)}`, { text });
   },
 
   async rebuildNotesGraph(kb = "default") {
-    return http.post(`/graph/notes/rebuild${kbParam(kb)}`);
+    return http.post(`/graph/notes/rebuild${kbQuery(kb)}`);
   },
 
   async reingestVault(kb = "default") {
-    return http.post(`/notes/reingest-vault${kbParam(kb)}`);
+    return http.post(`/notes/reingest-vault${kbQuery(kb)}`);
   },
 
   async exportChat(conversationId: string, format: "markdown" | "json" = "markdown") {
@@ -496,11 +400,11 @@ export const api = {
   // ── Finance ───────────────────────────────────────────────────────────────
 
   async getFinanceWorkspace(kb = "default") {
-    return http.get(`/finance/workspace${kbParam(kb)}`) as Promise<import("@/lib/types").FinanceWorkspace>;
+    return http.get(`/finance/workspace`, withKb(kb)) as Promise<FinanceWorkspace>;
   },
 
   async createFinanceWorkspace(currency: string, kb = "default") {
-    return http.post(`/finance/workspace${kbParam(kb)}`, { currency });
+    return http.post(`/finance/workspace${kbQuery(kb)}`, { currency });
   },
 
   async resetFinanceAdministration(kb = "default"): Promise<{
@@ -508,11 +412,11 @@ export const api = {
     kb_id: string;
     message: string;
   }> {
-    return http.post(`/finance/reset-administration${kbParam(kb)}`, {});
+    return http.post(`/finance/reset-administration${kbQuery(kb)}`, {});
   },
 
-  async listFinanceAccounts(kb = "default"): Promise<import("@/lib/types").FinanceAccount[]> {
-    return http.get(`/finance/accounts${kbParam(kb)}`);
+  async listFinanceAccounts(kb = "default"): Promise<FinanceAccount[]> {
+    return http.get(`/finance/accounts`, withKb(kb));
   },
 
   async createFinanceAccount(
@@ -524,119 +428,64 @@ export const api = {
     },
     kb = "default",
   ) {
-    return http.post(`/finance/accounts${kbParam(kb)}`, data);
+    return http.post(`/finance/accounts${kbQuery(kb)}`, data);
   },
 
   async listFinanceTransactions(
     kb = "default",
     accountId?: string,
-  ): Promise<import("@/lib/types").FinanceTransaction[]> {
+  ): Promise<FinanceTransaction[]> {
     const params: Record<string, unknown> = {};
     if (accountId) params.account_id = accountId;
-    return http.get(`/finance/transactions${kbParam(kb)}`, params);
+    return http.get(`/finance/transactions`, withKb(kb, params));
   },
 
   async getFinanceSummary(
     kb = "default",
     days = 30,
-  ): Promise<import("@/lib/types").FinanceSummary> {
-    return http.get(`/finance/summary${kbParam(kb)}`, { days });
+  ): Promise<FinanceSummary> {
+    return http.get(`/finance/summary`, withKb(kb, { days }));
   },
 
   async getFinanceReport(
     kb = "default",
     start?: string,
     end?: string,
-  ): Promise<import("@/lib/types").FinanceReport> {
+  ): Promise<FinanceReport> {
     const params: Record<string, unknown> = {};
     if (start) params.start = start;
     if (end) params.end = end;
-    return http.get(`/finance/report${kbParam(kb)}`, params);
+    return http.get(`/finance/report`, withKb(kb, params));
   },
 
   async listFinanceBudgets(
     kb = "default",
     days = 30,
-  ): Promise<import("@/lib/types").FinanceBudget[]> {
-    return http.get(`/finance/budgets${kbParam(kb)}`, { days });
+  ): Promise<FinanceBudget[]> {
+    return http.get(`/finance/budgets`, withKb(kb, { days }));
   },
 
   async createFinanceBudget(
     data: { name: string; amount?: number; currency?: string },
     kb = "default",
   ) {
-    return http.post(`/finance/budgets${kbParam(kb)}`, data);
+    return http.post(`/finance/budgets${kbQuery(kb)}`, data);
   },
 
-  async listFinanceCategories(kb = "default"): Promise<import("@/lib/types").FinanceCategory[]> {
-    return http.get(`/finance/categories${kbParam(kb)}`);
+  async listFinanceCategories(kb = "default"): Promise<FinanceCategory[]> {
+    return http.get(`/finance/categories`, withKb(kb));
   },
 
   async createFinanceCategory(data: { name: string; notes?: string }, kb = "default") {
-    return http.post(`/finance/categories${kbParam(kb)}`, data);
+    return http.post(`/finance/categories${kbQuery(kb)}`, data);
   },
 
   async deleteFinanceCategory(id: string, kb = "default") {
-    return http.del(`/finance/categories/${id}${kbParam(kb)}`);
+    return http.del(`/finance/categories/${id}${kbQuery(kb)}`);
   },
 
-  async listFinanceBills(kb = "default"): Promise<import("@/lib/types").FinanceBill[]> {
-    return http.get(`/finance/bills${kbParam(kb)}`);
-  },
-
-  async createFinanceBill(
-    data: {
-      name: string;
-      amount: number;
-      repeat_freq?: string;
-      date?: string;
-      currency?: string;
-    },
-    kb = "default",
-  ) {
-    return http.post(`/finance/bills${kbParam(kb)}`, data);
-  },
-
-  async deleteFinanceBill(id: string, kb = "default") {
-    return http.del(`/finance/bills/${id}${kbParam(kb)}`);
-  },
-
-  async listFinancePiggyBanks(kb = "default"): Promise<import("@/lib/types").FinancePiggyBank[]> {
-    return http.get(`/finance/piggy-banks${kbParam(kb)}`);
-  },
-
-  async createFinancePiggyBank(
-    data: {
-      name: string;
-      account_id: string;
-      target_amount: number;
-      current_amount?: number;
-      start_date?: string;
-      target_date?: string;
-    },
-    kb = "default",
-  ) {
-    return http.post(`/finance/piggy-banks${kbParam(kb)}`, data);
-  },
-
-  async deleteFinancePiggyBank(id: string, kb = "default") {
-    return http.del(`/finance/piggy-banks/${id}${kbParam(kb)}`);
-  },
-
-  async listFinanceTags(kb = "default"): Promise<import("@/lib/types").FinanceTag[]> {
-    return http.get(`/finance/tags${kbParam(kb)}`);
-  },
-
-  async createFinanceTag(data: { tag: string; description?: string }, kb = "default") {
-    return http.post(`/finance/tags${kbParam(kb)}`, data);
-  },
-
-  async deleteFinanceTag(id: string, kb = "default") {
-    return http.del(`/finance/tags/${id}${kbParam(kb)}`);
-  },
-
-  async listFinanceRecurrences(kb = "default"): Promise<import("@/lib/types").FinanceRecurrence[]> {
-    return http.get(`/finance/recurrences${kbParam(kb)}`);
+  async listFinanceRecurrences(kb = "default"): Promise<FinanceRecurrence[]> {
+    return http.get(`/finance/recurrences`, withKb(kb));
   },
 
   async createFinanceRecurrence(
@@ -652,27 +501,27 @@ export const api = {
     },
     kb = "default",
   ) {
-    return http.post(`/finance/recurrences${kbParam(kb)}`, data);
+    return http.post(`/finance/recurrences${kbQuery(kb)}`, data);
   },
 
   async deleteFinanceRecurrence(id: string, kb = "default") {
-    return http.del(`/finance/recurrences/${id}${kbParam(kb)}`);
+    return http.del(`/finance/recurrences/${id}${kbQuery(kb)}`);
   },
 
-  async listFinanceRuleGroups(kb = "default"): Promise<import("@/lib/types").FinanceRuleGroup[]> {
-    return http.get(`/finance/rule-groups${kbParam(kb)}`);
+  async listFinanceRuleGroups(kb = "default"): Promise<FinanceRuleGroup[]> {
+    return http.get(`/finance/rule-groups`, withKb(kb));
   },
 
   async createFinanceRuleGroup(data: { title: string; description?: string }, kb = "default") {
-    return http.post(`/finance/rule-groups${kbParam(kb)}`, data);
+    return http.post(`/finance/rule-groups${kbQuery(kb)}`, data);
   },
 
   async deleteFinanceRuleGroup(id: string, kb = "default") {
-    return http.del(`/finance/rule-groups/${id}${kbParam(kb)}`);
+    return http.del(`/finance/rule-groups/${id}${kbQuery(kb)}`);
   },
 
-  async listFinanceRules(kb = "default"): Promise<import("@/lib/types").FinanceRule[]> {
-    return http.get(`/finance/rules${kbParam(kb)}`);
+  async listFinanceRules(kb = "default"): Promise<FinanceRule[]> {
+    return http.get(`/finance/rules`, withKb(kb));
   },
 
   async createFinanceRule(
@@ -688,117 +537,19 @@ export const api = {
     },
     kb = "default",
   ) {
-    return http.post(`/finance/rules${kbParam(kb)}`, data);
+    return http.post(`/finance/rules${kbQuery(kb)}`, data);
   },
 
   async deleteFinanceRule(id: string, kb = "default") {
-    return http.del(`/finance/rules/${id}${kbParam(kb)}`);
-  },
-
-  async listFinanceWebhooks(kb = "default"): Promise<import("@/lib/types").FinanceWebhook[]> {
-    return http.get(`/finance/webhooks${kbParam(kb)}`);
-  },
-
-  async createFinanceWebhook(
-    data: {
-      title: string;
-      url: string;
-      trigger?: string;
-      response?: string;
-      delivery?: string;
-      active?: boolean;
-    },
-    kb = "default",
-  ) {
-    return http.post(`/finance/webhooks${kbParam(kb)}`, data);
-  },
-
-  async deleteFinanceWebhook(id: string, kb = "default") {
-    return http.del(`/finance/webhooks/${id}${kbParam(kb)}`);
-  },
-
-  async listFinanceObjectGroups(kb = "default"): Promise<import("@/lib/types").FinanceObjectGroup[]> {
-    return http.get(`/finance/object-groups${kbParam(kb)}`);
-  },
-
-  async createFinanceObjectGroup(data: { title: string }, kb = "default") {
-    return http.post(`/finance/object-groups${kbParam(kb)}`, data);
-  },
-
-  async updateFinanceObjectGroup(id: string, data: { title: string }, kb = "default") {
-    return http.put(`/finance/object-groups/${id}${kbParam(kb)}`, data);
-  },
-
-  async deleteFinanceObjectGroup(id: string, kb = "default") {
-    return http.del(`/finance/object-groups/${id}${kbParam(kb)}`);
-  },
-
-  async listFinanceExchangeRates(kb = "default"): Promise<import("@/lib/types").FinanceExchangeRate[]> {
-    return http.get(`/finance/exchange-rates${kbParam(kb)}`);
-  },
-
-  async createFinanceExchangeRate(
-    data: { date: string; from: string; to: string; rate: number },
-    kb = "default",
-  ) {
-    return http.post(`/finance/exchange-rates${kbParam(kb)}`, data);
-  },
-
-  async deleteFinanceExchangeRate(id: string, kb = "default") {
-    return http.del(`/finance/exchange-rates/${id}${kbParam(kb)}`);
-  },
-
-  async listFinanceAttachments(kb = "default"): Promise<import("@/lib/types").FinanceAttachment[]> {
-    return http.get(`/finance/attachments${kbParam(kb)}`);
-  },
-
-  async createFinanceAttachment(
-    data: {
-      filename: string;
-      attachable_type: string;
-      attachable_id: string;
-      title?: string;
-      notes?: string;
-      file?: File | null;
-    },
-    kb = "default",
-  ) {
-    const form = new FormData();
-    form.append("filename", data.filename);
-    form.append("attachable_type", data.attachable_type);
-    form.append("attachable_id", data.attachable_id);
-    if (data.title) form.append("title", data.title);
-    if (data.notes) form.append("notes", data.notes);
-    if (data.file) form.append("file", data.file);
-    const response = await axios.post(
-      `${API_BASE_URL}/finance/attachments${kbParam(kb)}`,
-      form,
-    );
-    return response.data;
-  },
-
-  async downloadFinanceAttachment(id: string, kb = "default") {
-    const response = await axios.get(
-      `${API_BASE_URL}/finance/attachments/${id}/download${kbParam(kb)}`,
-      { responseType: "blob" },
-    );
-    return response.data as Blob;
-  },
-
-  async deleteFinanceAttachment(id: string, kb = "default") {
-    return http.del(`/finance/attachments/${id}${kbParam(kb)}`);
+    return http.del(`/finance/rules/${id}${kbQuery(kb)}`);
   },
 
   async searchFinance(
     query: string,
     kind: "transactions" | "accounts" = "transactions",
     kb = "default",
-  ): Promise<import("@/lib/types").FinanceSearchResult> {
-    return http.get(`/finance/search${kbParam(kb)}`, { query, kind });
-  },
-
-  async openFinanceWorkspace(kb = "default"): Promise<{ url: string }> {
-    return http.post(`/finance/open${kbParam(kb)}`, {});
+  ): Promise<FinanceSearchResult> {
+    return http.get(`/finance/search`, withKb(kb, { query, kind }));
   },
 
   async createFinanceTransaction(
@@ -816,11 +567,11 @@ export const api = {
     },
     kb = "default",
   ) {
-    return http.post(`/finance/transactions${kbParam(kb)}`, data);
+    return http.post(`/finance/transactions${kbQuery(kb)}`, data);
   },
 
   async deleteFinanceTransaction(id: string, kb = "default") {
-    return http.del(`/finance/transactions/${id}${kbParam(kb)}`);
+    return http.del(`/finance/transactions/${id}${kbQuery(kb)}`);
   },
 
   // ── LLM runtime settings ──────────────────────────────────────────────────
@@ -855,22 +606,22 @@ export const api = {
     };
     healthy?: boolean;
   }> {
-    return http.get(`/admin/maintenance-status${kbParam(kb)}`);
+    return http.get(`/admin/maintenance-status`, withKb(kb));
   },
 
   async rebuildCommunities(kb = "default"): Promise<{ status: string; message: string }> {
-    return http.post(`/admin/rebuild-communities${kbParam(kb)}`, {});
+    return http.post(`/admin/rebuild-communities${kbQuery(kb)}`, {});
   },
 
   async buildTemporalDigests(period?: string, kb = "default"): Promise<{ status: string; message: string }> {
-    return http.post(`/admin/build-temporal-digests${kbParam(kb)}`, { period: period ?? null });
+    return http.post(`/admin/build-temporal-digests${kbQuery(kb)}`, { period: period ?? null });
   },
 
   async resetIngestionData(kb = "default"): Promise<{ status: string; message: string }> {
-    return http.post(`/admin/reset-ingestion-data${kbParam(kb)}`, {});
+    return http.post(`/admin/reset-ingestion-data${kbQuery(kb)}`, {});
   },
 
   async reingestAll(kb = "default"): Promise<{ status: string; notes_queued: number; message: string }> {
-    return http.post(`/admin/reingest-all${kbParam(kb)}`, {});
+    return http.post(`/admin/reingest-all${kbQuery(kb)}`, {});
   },
 };

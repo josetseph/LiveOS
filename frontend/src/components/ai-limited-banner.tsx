@@ -11,13 +11,20 @@ export function AiLimitedBanner() {
   const [needsDownload, setNeedsDownload] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     api
       .getSetupStatus()
       .then((s) => {
+        if (cancelled) return;
         setShow(!s.ai_configured);
         setNeedsDownload(Boolean(s.needs_model_download));
       })
-      .catch(() => setShow(false));
+      .catch(() => {
+        if (!cancelled) setShow(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (!show) return null;

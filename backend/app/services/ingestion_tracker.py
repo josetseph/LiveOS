@@ -15,9 +15,10 @@ COMMUNITY_IDLE_SECONDS = 120  # 2 minutes
 
 class IngestionTrackerService:
     """
-    Tracks ingestions and triggers a full Leiden recompute 5 minutes after the last ingestion.
-    If a new ingestion arrives while community detection is in progress, the running recompute
-    is signalled to stop early so the system prioritises ingestion throughput.
+    Tracks ingestions and triggers a full Leiden recompute
+    ``COMMUNITY_IDLE_SECONDS`` (default 2 minutes) after the last ingestion finishes.
+    If a new ingestion arrives while community detection is in progress, the running
+    recompute is signalled to stop early so the system prioritises ingestion throughput.
     """
 
     def __init__(self):

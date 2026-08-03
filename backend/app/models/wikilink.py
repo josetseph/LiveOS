@@ -1,14 +1,21 @@
 """Wikilink edges between notes (notes graph)."""
 
+from __future__ import annotations
+
 import uuid
 from datetime import datetime, timezone
 
-from app.core.database import Base
 from sqlalchemy import Column, DateTime, String, UniqueConstraint
+
+from app.core.database import Base
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class NoteLink(Base):  # pylint: disable=too-few-public-methods
-    """Directed edge: source note → target note title/path via [[wikilink]]."""
+    """Directed edge: source note → target note title/path via ``[[wikilink]]``."""
 
     __tablename__ = "note_links"
     __table_args__ = (
@@ -22,4 +29,4 @@ class NoteLink(Base):  # pylint: disable=too-few-public-methods
     source_note_id = Column(String, nullable=False, index=True)
     target_title = Column(String, nullable=False)
     target_note_id = Column(String, nullable=True, index=True)
-    created_at = Column(DateTime(timezone=True), default=datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=_utcnow)

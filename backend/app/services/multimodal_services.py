@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from pathlib import Path
 
 from app.core.log import get_logger
 from app.services.multimodal_models import is_hf_snapshot_ready, multimodal_model_path
@@ -102,7 +101,6 @@ def services_ready() -> dict:
         "marlin": deps_ok and status["models_ready"].get("marlin", False),
         "deps_ok": deps_ok,
         "deps_error": deps_err,
-        "ports": {},  # no sidecar ports
         "runtime": status,
     }
 
@@ -110,7 +108,7 @@ def services_ready() -> dict:
 def ensure_multimodal_services(
     *,
     install_deps: bool = False,
-    start_marlin: bool = True,  # noqa: ARG001 — kept for API compatibility
+    start_marlin: bool = True,  # noqa: ARG001 — API compat; Marlin is in-process
 ) -> dict:
     """Prepare in-process multimodal runtime (no HTTP processes spawned)."""
     florence = multimodal_model_path("florence")

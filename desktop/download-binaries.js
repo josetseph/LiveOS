@@ -47,7 +47,6 @@ function platformTriple() {
           : "meilisearch-macos-amd64",
       qdrantExe: "qdrant",
       meiliExe: "meilisearch",
-      meiliIsArchive: false,
     };
   }
   if (process.platform === "linux") {
@@ -61,7 +60,6 @@ function platformTriple() {
         arch === "arm64" ? "meilisearch-linux-aarch64" : "meilisearch-linux-amd64",
       qdrantExe: "qdrant",
       meiliExe: "meilisearch",
-      meiliIsArchive: false,
     };
   }
   if (process.platform === "win32") {
@@ -71,7 +69,6 @@ function platformTriple() {
       meiliAsset: "meilisearch-windows-amd64.exe",
       qdrantExe: "qdrant.exe",
       meiliExe: "meilisearch.exe",
-      meiliIsArchive: false,
     };
   }
   throw new Error(`Unsupported platform: ${process.platform}/${process.arch}`);
@@ -174,9 +171,8 @@ function stripQuarantine(filePath) {
 /**
  * @param {string} dataDir
  * @param {(msg: string) => void} [onStatus]
- * @param {string} [_modelsDir] — unused (GGUFs download via Python setup API)
  */
-async function ensureBinaries(dataDir, onStatus, _modelsDir) {
+async function ensureBinaries(dataDir, onStatus) {
   const status = onStatus || (() => {});
   const triple = platformTriple();
   const binDir = path.join(dataDir, "bin", triple.key);
@@ -233,7 +229,6 @@ async function ensureBinaries(dataDir, onStatus, _modelsDir) {
   return {
     qdrant: fs.existsSync(qdrantPath) ? qdrantPath : null,
     meilisearch: fs.existsSync(meiliPath) ? meiliPath : null,
-    typesense: fs.existsSync(meiliPath) ? meiliPath : null,
     binDir,
   };
 }
@@ -244,5 +239,4 @@ module.exports = {
   nativeArch,
   QDRANT_VERSION,
   MEILI_VERSION,
-  TYPESENSE_VERSION: MEILI_VERSION,
 };

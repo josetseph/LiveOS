@@ -10,7 +10,6 @@ from __future__ import annotations
 import gc
 import json
 import os
-import sys
 import threading
 import time
 from pathlib import Path
@@ -31,45 +30,20 @@ os.environ.setdefault("FPS_MIN_FRAMES", "4")
 
 
 def _resolve_torch_device() -> str:
-    try:
-        scripts = Path(__file__).resolve().parents[2] / "scripts"
-        if str(scripts) not in sys.path:
-            sys.path.insert(0, str(scripts))
-        from inference_device import resolve_torch_device  # type: ignore
+    from app.core.inference_device import resolve_torch_device
 
-        return resolve_torch_device()
-    except Exception:  # pylint: disable=broad-exception-caught
-        import torch
-
-        if torch.backends.mps.is_available():
-            return "mps"
-        if torch.cuda.is_available():
-            return "cuda"
-        return "cpu"
+    return resolve_torch_device()
 
 
 def _resolve_torch_dtype(device: str):
-    import torch
+    from app.core.inference_device import resolve_torch_dtype
 
-    try:
-        scripts = Path(__file__).resolve().parents[2] / "scripts"
-        if str(scripts) not in sys.path:
-            sys.path.insert(0, str(scripts))
-        from inference_device import resolve_torch_dtype  # type: ignore
-
-        return resolve_torch_dtype(device)
-    except Exception:  # pylint: disable=broad-exception-caught
-        if device in {"mps", "cuda"}:
-            return torch.bfloat16
-        return torch.float32
+    return resolve_torch_dtype(device)
 
 
 def _prepare_qwen35(device: str) -> None:
     try:
-        scripts = Path(__file__).resolve().parents[2] / "scripts"
-        if str(scripts) not in sys.path:
-            sys.path.insert(0, str(scripts))
-        from inference_device import prepare_qwen3_5_inference  # type: ignore
+        from app.core.inference_device import prepare_qwen3_5_inference
 
         prepare_qwen3_5_inference(device)
     except Exception as exc:  # pylint: disable=broad-exception-caught

@@ -1,3 +1,0 @@
-# Tazweed Center
-
-Tazweed Center is a chain of independently owned and operated hypermarkets operating in the Syrian refugee camps.  The word "tazweed" translates as "resupply".

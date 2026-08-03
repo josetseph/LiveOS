@@ -34,7 +34,6 @@ Cypher translation notes
 
 # pylint: disable=too-many-lines,import-outside-toplevel
 
-import math
 import re
 import threading
 from pathlib import Path
@@ -43,13 +42,6 @@ import kuzu
 from app.core.config import REPO_ROOT, settings
 from app.core.log import get_logger
 from app.services.qdrant_service import QdrantService, qdrant_service
-from app.utils.graph_layout import (
-    CLUSTER_RADIUS_BASE,
-    ORPHAN_RADIUS,
-    _deterministic_jitter,
-    _fibonacci_sphere,
-)
-
 logger = get_logger("GraphService")
 
 
@@ -163,15 +155,6 @@ class GraphService:
         """Resolve a node name to its stable node_id via Qdrant node_cores."""
         return self._qdrant.find_node_id_by_name(name)
 
-    def verify_connection(self) -> bool:
-        """Verify the Kuzu connection by running a lightweight test query."""
-        try:
-            self.execute_query("MATCH (n:Node) RETURN count(n) AS c LIMIT 1")
-            return True
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.error(f"[Graph] Connection check failed: {exc}")
-            return False
-
     def execute_query(self, query: str, params: dict = None):
         """Execute a Cypher query and return results as a list of row dictionaries."""
         if params is None:
@@ -281,57 +264,6 @@ class GraphService:
             query,
             {"base_name": base_lower, "limit": limit, "suffix_pat": _SUFFIX_PAT},
         )
-
-    def find_paths_between_nodes(
-        self,
-        node_names: list[str],
-        max_depth: int = 3,
-        min_confidence: float = 0.5,
-    ) -> list[dict]:
-        """Find all shortest paths between two named nodes up to a given hop limit."""
-        if len(node_names) < 2:
-            return []
-        node_ids = [
-            nid
-            for n in node_names
-            if (nid := self._qdrant.find_node_id_by_name(n.lower().strip()))
-        ]
-        if len(node_ids) < 2:
-            return []
-
-        # NOTE: Do NOT add `all(rel IN relationships(path) WHERE ...)` inside a
-        # variable-length MATCH — it triggers a KU_UNREACHABLE parser assertion in
-        # this Kuzu build.  Confidence filtering is done in Python
-        # below after the query returns.
-        query = f"""
-        UNWIND $node_ids AS source_id
-        UNWIND $node_ids AS target_id
-        WITH source_id, target_id
-        WHERE source_id < target_id
-        MATCH (source:Node {{id: source_id}}), (target:Node {{id: target_id}})
-        MATCH path = (source)-[:SEMANTIC_REL|REFERENCES*1..{max_depth}]-(target)
-        WITH path, source_id, target_id, length(path) AS pathLength,
-             relationships(path) AS rels
-        RETURN DISTINCT
-            source_id,
-            target_id,
-            [node IN nodes(path) | node.id] AS path_node_ids,
-            [rel IN rels |
-                CASE WHEN label(rel) = 'SEMANTIC_REL' THEN rel.rel_type
-                     ELSE label(rel) END
-            ] AS relationship_types,
-            [rel IN rels | coalesce(rel.confidence, 0.8)] AS confidence_path,
-            pathLength AS depth
-        ORDER BY pathLength
-        LIMIT 20
-        """
-        rows = self.execute_query(query, {"node_ids": node_ids})
-        # Post-filter: keep only paths where every hop meets the confidence threshold.
-        return [
-            r
-            for r in rows
-            if all(c >= min_confidence for c in (r.get("confidence_path") or []))
-        ]
 
     def get_indexable_nodes_for_communities(self) -> list[dict]:
         """Return all indexable (non-community, non-note) nodes for community detection input."""
@@ -585,58 +517,6 @@ class GraphService:
             row["evidence"] = (row.get("evidence") or [])[:limit_per_node]
             row["node_name"] = id_to_name.get(row.get("node_id", ""), "")
         return rows
-
-    def get_full_graph(self) -> dict:
-        """Return a full snapshot of all nodes and semantic edges for graph rendering."""
-        nodes_query = """
-        MATCH (n:Node)
-        WHERE n.kind IN ['indexable', 'note']
-        RETURN n.id AS node_id, [n.kind] AS labels
-        """
-        links_query = """
-        MATCH (source:Node)-[r:SEMANTIC_REL|REFERENCES]->(target:Node)
-        WHERE source.kind IN ['indexable', 'note']
-          AND target.kind IN ['indexable', 'note']
-        RETURN
-            source.id AS source,
-            target.id AS target,
-            CASE WHEN label(r) = 'SEMANTIC_REL' THEN r.rel_type
-                 ELSE label(r) END AS type,
-            r.edge_weight AS edge_weight
-        """
-        nodes_data = self.execute_query(nodes_query)
-        links_data = self.execute_query(links_query)
-
-        node_ids = [row["node_id"] for row in nodes_data if row.get("node_id")]
-        content_map = (
-            self._qdrant.get_nodes_content_by_ids(node_ids) if node_ids else {}
-        )
-
-        nodes = []
-        for row in nodes_data:
-            nid = row.get("node_id")
-            c = content_map.get(nid, {})
-            nodes.append(
-                {
-                    "id": nid,
-                    "name": c.get("name") or nid or "Unknown",
-                    "group": c.get("type") or "unknown",
-                    "description": _strip_facts_prefix(c.get("description", "")),
-                    "entity_type": c.get("type") or "unknown",
-                    "labels": row.get("labels", []),
-                }
-            )
-        links = [
-            {
-                "source": link["source"],
-                "target": link["target"],
-                "type": link["type"],
-                "edge_weight": link.get("edge_weight"),
-            }
-            for link in links_data
-            if link.get("source") and link.get("target")
-        ]
-        return {"nodes": nodes, "links": links}
 
     # ---- Relationship management -------------------------------------------
 
@@ -1086,215 +966,6 @@ class GraphService:
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.debug(f"[Graph] store_node_positions skipped {nid}: {exc}")
-
-    def get_3d_overview(self) -> dict:  # pylint: disable=too-many-locals
-        """Return a community-centric 3-D overview with orphan nodes and inter-community edges."""
-        from app.utils.graph_layout import compute_positions
-
-        rows = self.execute_query(
-            """
-            MATCH (c:Node)
-            WHERE c.kind = 'community' AND c.id IS NOT NULL
-            RETURN c.id AS community_id, NULL AS community_level
-            """,
-            {},
-        )
-        membership_rows = self.execute_query(
-            """
-            MATCH (n:Node)-[r:MEMBER_OF]->(c:Node)
-            WHERE n.id IS NOT NULL AND c.id IS NOT NULL
-            RETURN n.id AS node_id, c.id AS community_id, r.level AS level
-            ORDER BY r.level DESC
-            """,
-            {},
-        )
-
-        community_members: dict[str, list[str]] = {}
-        for mr in membership_rows:
-            nid = mr.get("node_id")
-            cid = mr.get("community_id")
-            if nid and cid and (mr.get("level") or 0) == 2:
-                community_members.setdefault(cid, []).append(nid)
-
-        community_ids = [r["community_id"] for r in rows if r.get("community_id")]
-        content_map = (
-            self._qdrant.get_nodes_content_by_ids(community_ids)
-            if community_ids
-            else {}
-        )
-
-        communities_meta = [
-            {
-                "community_id": r["community_id"],
-                "community_level": r.get("community_level") or 2,
-                "name": content_map.get(r["community_id"], {}).get("name", ""),
-            }
-            for r in rows
-            if r.get("community_id")
-        ]
-        positions = compute_positions(
-            communities=communities_meta,
-            memberships=community_members,
-        )
-
-        communities = []
-        for r in rows:
-            cid = r.get("community_id")
-            c = content_map.get(cid, {})
-            x, y, z = positions.get(cid, (0.0, 0.0, 0.0))
-            communities.append(
-                {
-                    "community_id": cid,
-                    "name": c.get("name") or "Unnamed Cluster",
-                    "summary": _strip_facts_prefix(c.get("description") or ""),
-                    "community_level": c.get("community_level") or 2,
-                    "member_count": c.get("member_count") or 0,
-                    "themes": c.get("themes") or [],
-                    "x": float(x),
-                    "y": float(y),
-                    "z": float(z),
-                }
-            )
-
-        orphan_rows = self.execute_query(
-            """
-            MATCH (n:Node)
-            WHERE n.kind IN ['indexable', 'note']
-              AND n.id IS NOT NULL AND n.name IS NOT NULL
-              AND NOT EXISTS { MATCH (n)-[:MEMBER_OF]->(:Node) }
-            RETURN n.id AS node_id, n.name AS name, n.type AS node_type
-            """,
-            {},
-        )
-        orphan_ids = [r["node_id"] for r in orphan_rows if r.get("node_id")]
-        orphan_content = (
-            self._qdrant.get_nodes_content_by_ids(orphan_ids) if orphan_ids else {}
-        )
-
-        orphan_pts = _fibonacci_sphere(len(orphan_ids), ORPHAN_RADIUS)
-        orphan_nodes = []
-        for idx, row in enumerate(orphan_rows):
-            nid = row.get("node_id")
-            if not nid:
-                continue
-            c = orphan_content.get(nid, {})
-            ox, oy, oz = orphan_pts[idx] if idx < len(orphan_pts) else (0.0, 0.0, 0.0)
-            jx, jy, jz = _deterministic_jitter(nid, 3.0)
-            orphan_nodes.append(
-                {
-                    "node_id": nid,
-                    "name": c.get("name") or row.get("name") or "Unnamed",
-                    "node_type": c.get("type") or row.get("node_type") or "unknown",
-                    "description": _strip_facts_prefix(c.get("description", "")),
-                    "facts": c.get("facts", []),
-                    "x": float(ox + jx),
-                    "y": float(oy + jy),
-                    "z": float(oz + jz),
-                }
-            )
-
-        orphan_edge_rows = self.execute_query(
-            """
-            MATCH (a:Node)-[r:SEMANTIC_REL]->(b:Node)
-            WHERE a.kind IN ['indexable', 'note']
-              AND b.kind IN ['indexable', 'note']
-              AND NOT EXISTS { MATCH (:Node)-[:CONTAINS]->(a) }
-              AND NOT EXISTS { MATCH (:Node)-[:CONTAINS]->(b) }
-              AND a.id IS NOT NULL AND b.id IS NOT NULL
-            RETURN DISTINCT a.id AS source, b.id AS target, r.rel_type AS rel_type
-            LIMIT 1000
-            """,
-            {},
-        )
-        orphan_edges = [
-            {
-                "source": r["source"],
-                "target": r["target"],
-                "type": r.get("rel_type", ""),
-            }
-            for r in orphan_edge_rows
-            if r.get("source") and r.get("target")
-        ]
-
-        return {
-            "communities": communities,
-            "orphan_nodes": orphan_nodes,
-            "orphan_edges": orphan_edges,
-        }
-
-    def get_community_members(self, community_id: str) -> dict:
-        """Return nodes and edges belonging to a single community for focused 3-D display."""
-        node_rows = self.execute_query(
-            """
-            MATCH (c:Node {id: $cid})-[:CONTAINS]->(n:Node)
-            WHERE n.id IS NOT NULL
-            RETURN n.id AS node_id
-            """,
-            {"cid": community_id},
-        )
-        edge_rows = self.execute_query(
-            """
-            MATCH (c:Node {id: $cid})-[:CONTAINS]->(a:Node)
-            MATCH (c)-[:CONTAINS]->(b:Node)
-            MATCH (a)-[r:SEMANTIC_REL]->(b)
-            WHERE a.id IS NOT NULL AND b.id IS NOT NULL
-            RETURN DISTINCT
-                a.id AS source,
-                b.id AS target,
-                r.rel_type AS rel_type,
-                r.edge_weight AS edge_weight
-            LIMIT 500
-            """,
-            {"cid": community_id},
-        )
-
-        node_ids = [row["node_id"] for row in node_rows if row.get("node_id")]
-        content_map = (
-            self._qdrant.get_nodes_content_by_ids(node_ids) if node_ids else {}
-        )
-        nodes = self._build_positioned_nodes(node_rows, node_ids, content_map)
-        edges = [
-            {
-                "source": row["source"],
-                "target": row["target"],
-                "type": row.get("rel_type", ""),
-                "edge_weight": row.get("edge_weight"),
-            }
-            for row in edge_rows
-            if row.get("source") and row.get("target")
-        ]
-        return {"nodes": nodes, "edges": edges}
-
-    @staticmethod
-    def _build_positioned_nodes(
-        node_rows: list, node_ids: list, content_map: dict
-    ) -> list:
-        """Compute fibonacci-sphere positions and jitter for a set of community nodes."""
-        cluster_radius = CLUSTER_RADIUS_BASE * math.sqrt(max(len(node_ids), 1))
-        cluster_radius = min(cluster_radius, CLUSTER_RADIUS_BASE * 8)
-        pts = _fibonacci_sphere(len(node_ids), cluster_radius)
-        nodes = []
-        for idx, row in enumerate(node_rows):
-            nid = row.get("node_id")
-            if not nid:
-                continue
-            c = content_map.get(nid, {})
-            pos = pts[idx] if idx < len(pts) else (0.0, 0.0, 0.0)
-            jitter = _deterministic_jitter(nid, 3.0)
-            nodes.append(
-                {
-                    "node_id": nid,
-                    "name": c.get("name") or "Unnamed",
-                    "node_type": c.get("type") or "unknown",
-                    "description": _strip_facts_prefix(c.get("description", "")),
-                    "facts": c.get("facts", []),
-                    "community_id": c.get("community_id"),
-                    "x": float(pos[0] + jitter[0]),
-                    "y": float(pos[1] + jitter[1]),
-                    "z": float(pos[2] + jitter[2]),
-                }
-            )
-        return nodes
 
     def get_node_connections(self, node_id: str, *, limit: int = 16) -> list[dict]:
         """1-hop neighbours for a node id (semantic + REFERENCES)."""

@@ -93,17 +93,21 @@
       </p>
     </div>
     <script>
-      const { ipcRenderer } = require("electron");
+      const desktop = window.orbDesktop;
       const el = document.getElementById("status");
       const hint = document.getElementById("hint");
-      ipcRenderer.on("status", (_e, message) => {
-        if (el) el.textContent = message;
-      });
-      ipcRenderer.invoke("get-app-info").then((info) => {
-        if (hint && info?.version) {
-          hint.textContent = `Orb v${info.version} · First launch may download search binaries.`;
-        }
-      }).catch(() => {});
+      if (desktop?.onStatus) {
+        desktop.onStatus((message) => {
+          if (el) el.textContent = message;
+        });
+      }
+      if (desktop?.getAppInfo) {
+        desktop.getAppInfo().then((info) => {
+          if (hint && info?.version) {
+            hint.textContent = `Orb v${info.version} · First launch may download search binaries.`;
+          }
+        }).catch(() => {});
+      }
     </script>
   </body>
 </html>

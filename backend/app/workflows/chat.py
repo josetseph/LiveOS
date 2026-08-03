@@ -1,4 +1,4 @@
-"""Research-loop chat workflow: iterative retrieval, sub-question synthesis, and attribution."""
+"""Research-loop chat workflow: iterative retrieval and attribution."""
 
 # pylint: disable=wrong-import-order
 import time
@@ -24,11 +24,75 @@ def _doc_passage(doc: dict) -> str:
     return text
 
 
+def _dedupe_docs(docs: list[dict]) -> list[dict]:
+    """Deduplicate retrieved docs by node name, note id, or text."""
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for doc in docs:
+        doc_id = (
+            doc.get("original_obj", {}).get("name")
+            or doc.get("note_id")
+            or doc.get("text", "")
+        )
+        if doc_id and doc_id not in seen:
+            deduped.append(doc)
+            seen.add(doc_id)
+    return deduped
+
+
+def _truncate_context(docs: list[dict], max_docs: int) -> list[dict]:
+    """Keep the highest-confidence docs; clear unverified linked_notes."""
+    if len(docs) > max_docs:
+        docs = sorted(
+            docs,
+            key=lambda d: d.get("rerank_score", 0.0),
+            reverse=True,
+        )[:max_docs]
+    for doc in docs:
+        if "rerank_score" not in doc:
+            doc["linked_notes"] = []
+    return docs
+
+
 class ChatWorkflow:  # pylint: disable=too-few-public-methods
-    """Iterative research-loop workflow: retrieve, synthesise, and attribute sources per turn."""
+    """Iterative research-loop workflow: retrieve, synthesise, and attribute sources."""
 
     def __init__(self, retrieval: RetrievalService | None = None) -> None:
         self._retrieval = retrieval or retrieval_service
+
+    async def _retrieve_context(
+        self,
+        user_query: str,
+        history: list[ChatTurn] | None,
+        progress_callback: Callable[[str, str | None], None] | None,
+        max_context_docs: int,
+    ) -> tuple[str, str, list[dict], str]:
+        """Rewrite → research-loop retrieve → dedupe/truncate.
+
+        Returns ``(rewritten_query, final_answer, unique_docs, thinking)``.
+        """
+        history = history or []
+        history_payload = [{"role": t.role, "content": t.content} for t in history]
+        rewritten_query = llm_service.rewrite_follow_up_query(
+            history_payload, user_query
+        )
+
+        def _progress(stage: str, model: str | None = None) -> None:
+            if progress_callback:
+                progress_callback(stage, model)
+
+        _progress("Planning retrieval", "Gemma4")
+        final_answer, all_docs, thinking = (
+            await self._retrieval.retrieve_with_self_correction(
+                rewritten_query,
+                top_k=50,
+                progress_callback=progress_callback,
+                conversation_history=history_payload,
+            )
+        )
+        _progress("Selecting best evidence")
+        unique_docs = _truncate_context(_dedupe_docs(all_docs), max_context_docs)
+        return rewritten_query, final_answer or "", unique_docs, thinking
 
     async def chat(
         self,
@@ -36,134 +100,58 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
         history: list[ChatTurn] | None = None,
         progress_callback: Callable[[str, str | None], None] | None = None,
     ) -> dict:
-        """
-        Research-style retrieval loop:
-
-        1. Generate a focused search query for the original question.
-        2. Search, filter, expand neighbours, and distill a finding.
-        3. Decide whether to answer now or issue a new focused search.
-        4. Repeat up to the loop limit, then fall back to a final synthesis.
-        """
+        """Research-style retrieval loop with final answer + note references."""
         start_time = time.perf_counter()
-        history = history or []
-        history_payload = [{"role": t.role, "content": t.content} for t in history]
-        rewritten_query = llm_service.rewrite_follow_up_query(
-            history_payload, user_query
-        )
-        logger.info(
-            f"\n[Chat] Started processing query: '{user_query}'"
-            + (f" (rewritten: '{rewritten_query}')" if rewritten_query != user_query else "")
-        )
-
-        def _progress(stage: str, model: str | None = None) -> None:
-            if progress_callback:
-                progress_callback(stage, model)
-
-        # ── Research loop retrieval ──────────────────────────────────────────
-        t0 = time.perf_counter()
-        _progress("Planning retrieval", "Gemma4")
-        final_answer, all_docs, thinking = (
-            await self._retrieval.retrieve_with_self_correction(
-                rewritten_query,
-                top_k=50,
-                max_hops=10,
-                filter_docs=False,
-                progress_callback=progress_callback,
-                conversation_history=history_payload,
+        logger.info(f"\n[Chat] Started processing query: '{user_query}'")
+        rewritten_query, final_answer, unique_docs, thinking = (
+            await self._retrieve_context(
+                user_query, history, progress_callback, max_context_docs=6
             )
         )
-        _progress("Selecting best evidence")
-        logger.info(
-            f"[Chat] Research loop retrieval: {len(all_docs)} docs accumulated "
-            f"in {time.perf_counter() - t0:.2f}s"
-        )
-
-        def _dedupe_docs(docs: list[dict]) -> list[dict]:
-            seen_local: set[str] = set()
-            deduped: list[dict] = []
-            for doc in docs:
-                doc_id = (
-                    doc.get("original_obj", {}).get("name")
-                    or doc.get("note_id")
-                    or doc.get("text", "")
-                )
-                if doc_id and doc_id not in seen_local:
-                    deduped.append(doc)
-                    seen_local.add(doc_id)
-            return deduped
-
-        # Deduplicate docs
-        _progress("Deduplicating retrieved context")
-        unique_docs: list[dict] = _dedupe_docs(all_docs)
-
-        # Precision guard: the answer is already synthesised inside the pipeline.
-        # For references and returned context we only expose the highest-confidence
-        # docs so that irrelevant graph-expansion neighbours don't dilute precision.
-        # Sort by the rerank_score already attached by _apply_reranker_logging;
-        # unscored docs (expanded neighbours) fall to the bottom (score = 0).
-        MAX_CONTEXT_DOCS = 6  # pylint: disable=invalid-name
-        if len(unique_docs) > MAX_CONTEXT_DOCS:
-            unique_docs = sorted(
-                unique_docs,
-                key=lambda d: d.get("rerank_score", 0.0),
-                reverse=True,
-            )[:MAX_CONTEXT_DOCS]
-
+        if rewritten_query != user_query:
+            logger.info(f"[Chat] Rewritten query: '{rewritten_query}'")
         logger.info(f"[Chat] Unique docs: {len(unique_docs)}")
         if unique_docs:
             logger.debug(
                 "Context (%d docs): %s",
                 len(unique_docs),
                 [
-                    f"{i+1}. [{doc.get('original_obj', {}).get('name', '?')}] {_doc_passage(doc)}"
+                    f"{i+1}. [{doc.get('original_obj', {}).get('name', '?')}] "
+                    f"{_doc_passage(doc)}"
                     for i, doc in enumerate(unique_docs)
                 ],
             )
 
-        # ── Answer assembly ──────────────────────────────────────────────────
-        # Do not synthesize from raw docs in chat workflow. The only valid answer
-        # synthesis is the structured final synthesis over sub-question results
-        # (pipeline final_answer / structured fallback fb_answer).
-        answer = ""
-        if final_answer:
+        # Only valid answer synthesis is the pipeline's structured final answer.
+        answer = final_answer
+        if answer:
             logger.info(
                 f"[Chat] Using pipeline answer directly (structured synthesis): "
-                f"'{final_answer}'"
+                f"'{answer}'"
             )
-            answer = final_answer
-
-        if not answer:
+        else:
             answer = (
-                "I couldn't find any relevant information in the knowledge base to answer that."
+                "I couldn't find any relevant information in the knowledge base "
+                "to answer that."
                 if not unique_docs
                 else "I couldn't find enough information to answer that."
             )
             logger.info("[Chat] Iterative loop exhausted — no answer produced.")
 
-        # Only cite notes from docs that the reranker individually scored.
-        # Graph-expansion docs are added after reranking and carry no rerank_score;
-        # their linked_notes are graph neighbours that were never verified as relevant
-        # to the question, so they inflate the reference list without adding precision.
-        for doc in unique_docs:
-            if "rerank_score" not in doc:
-                doc["linked_notes"] = []
-
-        # Append references
         references = await self._extract_references(unique_docs)
-        _progress("Formatting answer")
+        if progress_callback:
+            progress_callback("Formatting answer", None)
         if references:
             answer += "\n\n### References\n" + "\n".join(references)
 
-        total_time = time.perf_counter() - start_time
-        logger.info(f"[Chat] Total pipeline duration: {total_time:.2f}s\n")
-
+        logger.info(
+            f"[Chat] Total pipeline duration: {time.perf_counter() - start_time:.2f}s\n"
+        )
         return {
             "query": user_query,
             "rewritten_query": rewritten_query,
             "answer": answer,
             "context": unique_docs,
-            "information_needs": [user_query],
-            "discovered_entities": {},
             "thinking": thinking,
         }
 
@@ -174,83 +162,29 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
         progress_callback: Callable[[str, str | None], None] | None = None,
     ) -> dict:
         """Retrieve note context without synthesizing a final answer."""
-        history = history or []
-        history_payload = [{"role": t.role, "content": t.content} for t in history]
-        rewritten_query = llm_service.rewrite_follow_up_query(
-            history_payload, user_query
-        )
-
-        def _progress(stage: str, model: str | None = None) -> None:
-            if progress_callback:
-                progress_callback(stage, model)
-
-        _progress("Planning retrieval", "Gemma4")
-        final_answer, all_docs, thinking = (
-            await self._retrieval.retrieve_with_self_correction(
-                rewritten_query,
-                top_k=50,
-                max_hops=10,
-                filter_docs=False,
-                progress_callback=progress_callback,
-                conversation_history=history_payload,
+        rewritten_query, _final_answer, unique_docs, thinking = (
+            await self._retrieve_context(
+                user_query, history, progress_callback, max_context_docs=12
             )
         )
-        _progress("Selecting best evidence")
-
-        def _dedupe_docs(docs: list[dict]) -> list[dict]:
-            seen_local: set[str] = set()
-            deduped: list[dict] = []
-            for doc in docs:
-                doc_id = (
-                    doc.get("original_obj", {}).get("name")
-                    or doc.get("note_id")
-                    or doc.get("text", "")
-                )
-                if doc_id and doc_id not in seen_local:
-                    deduped.append(doc)
-                    seen_local.add(doc_id)
-            return deduped
-
-        unique_docs = _dedupe_docs(all_docs)
-        # With 32k chat ctx, keep more high-confidence passages in the prompt.
-        max_context_docs = 12
-        if len(unique_docs) > max_context_docs:
-            unique_docs = sorted(
-                unique_docs,
-                key=lambda d: d.get("rerank_score", 0.0),
-                reverse=True,
-            )[:max_context_docs]
-
-        for doc in unique_docs:
-            if "rerank_score" not in doc:
-                doc["linked_notes"] = []
-
         return {
             "query": user_query,
             "rewritten_query": rewritten_query,
             "context": unique_docs,
             "thinking": thinking,
-            "pipeline_answer": final_answer,
         }
 
     async def _extract_references(self, docs: list) -> list:
-        """
-        Extract unique note references from retrieved documents.
-        Always prefers Postgres titles because graph note titles can be stale
-        or placeholder values from earlier ingestion passes.
-        """
-        # Deduplicate references by Note ID from graph-node linked_notes.
+        """Extract unique note references, preferring SQLite titles over graph titles."""
         seen_refs: set[str] = set()
         id_to_title: dict[str, str | None] = {}
 
-        # Collect all note IDs we'll need titles for
         for d in docs:
             for linked_note in d.get("linked_notes", []):
                 lnid = linked_note.get("id")
                 if lnid:
                     id_to_title.setdefault(lnid, linked_note.get("title"))
 
-        # Batch-fetch titles from Postgres and let them override graph evidence.
         if id_to_title:
             try:
                 async with AsyncSessionLocal() as session:
@@ -274,6 +208,3 @@ class ChatWorkflow:  # pylint: disable=too-few-public-methods
 
         logger.info(f"[Chat] Found {len(references)} references for response")
         return references
-
-
-chat_workflow = ChatWorkflow()

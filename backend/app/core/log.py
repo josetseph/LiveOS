@@ -1,10 +1,6 @@
-"""
-Central Logging Module for Orb
+"""Central logging for Orb — component file routing under DATA_DIR/logs."""
 
-Handles configuration and retrieval of loggers.
-Routes logs to specific files based on component name.
-Respects global LOG_LEVEL from settings.
-"""
+from __future__ import annotations
 
 import logging
 import sys
@@ -12,10 +8,6 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from app.core.config import settings
-
-# Create logs directory
-LOGS_DIR = Path(__file__).parent.parent.parent / "logs"
-LOGS_DIR.mkdir(exist_ok=True)
 
 # Log formatters
 file_formatter = logging.Formatter(
@@ -25,34 +17,55 @@ file_formatter = logging.Formatter(
 
 console_formatter = logging.Formatter(fmt="%(levelname)s: %(message)s")
 
-# Mapping of logger names to filenames
+# Mapping of logger names to filenames (under resolve_logs_dir()).
 COMPONENT_LOG_FILES = {
     "API": "api.log",
-    "IngestionPipeline": "ingestion.log",
-    "RetrievalService": "retrieval.log",
-    "GraphService": "graph.log",
-    "LLMService": "llm.log",
-    "uvicorn.access": "api.log",
-    "uvicorn.error": "api.log",
-    "MultimediaService": "multimedia.log",
-    "ChatWorkflow": "chat.log",
-    "BucketStorage": "ingestion.log",
-    "DatabaseService": "database.log",
+    "KBRegistry": "api.log",
+    "RuntimeConfig": "api.log",
     "ResetIndex": "api.log",
     "InitDB": "api.log",
-    # Storage / search infrastructure — consolidated into retrieval log
+    "uvicorn.access": "api.log",
+    "uvicorn.error": "api.log",
+    "IngestionPipeline": "ingestion.log",
+    "IngestionTracker": "ingestion.log",
+    "VaultSync": "ingestion.log",
+    "VaultWatcher": "ingestion.log",
+    "MultimediaService": "multimedia.log",
+    "MultimodalRuntime": "multimedia.log",
+    "MultimodalModels": "multimedia.log",
+    "MultimodalServices": "multimedia.log",
+    "ChatWorkflow": "chat.log",
+    "ChatStore": "chat.log",
+    "DatabaseService": "database.log",
+    "GraphService": "graph.log",
+    "LLMService": "llm.log",
+    "LocalModels": "llm.log",
+    "InferenceDevice": "llm.log",
+    "RetrievalService": "retrieval.log",
     "QdrantService": "retrieval.log",
-    "TypesenseService": "retrieval.log",
-    # Retrieval sub-services
+    "MeilisearchService": "retrieval.log",
     "RerankerService": "retrieval.log",
-    "TavilyService": "retrieval.log",
+    "FireflyService": "finance.log",
 }
+
+_configured = False
+
+
+def resolve_logs_dir() -> Path:
+    """Current logs directory from live ``settings.DATA_DIR`` (wizard-aware)."""
+    root = Path(settings.DATA_DIR).expanduser() / "logs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+# Back-compat alias — prefer ``resolve_logs_dir()`` so path changes are picked up.
+LOGS_DIR = resolve_logs_dir()
 
 
 def get_file_handler(filename: str, level: int) -> RotatingFileHandler:
-    """Create a rotating file handler."""
+    """Create a rotating file handler under the current logs directory."""
     handler = RotatingFileHandler(
-        LOGS_DIR / filename,
+        resolve_logs_dir() / filename,
         maxBytes=10 * 1024 * 1024,  # 10MB
         backupCount=5,
         encoding="utf-8",
@@ -70,65 +83,61 @@ def get_console_handler(level: int) -> logging.StreamHandler:
     return handler
 
 
-def setup_logging():
-    """
-    Initialize the logging configuration.
-    Should be called once at application startup.
-    """
-    # Determine global log level
+def _strip_rotating_handlers(logger: logging.Logger) -> None:
+    for handler in list(logger.handlers):
+        if isinstance(handler, RotatingFileHandler):
+            logger.removeHandler(handler)
+            handler.close()
+
+
+def setup_logging() -> None:
+    """Initialize logging. Safe to call once at startup; use ``reconfigure_logging`` after path changes."""
+    global _configured, LOGS_DIR  # noqa: PLW0603
+
     log_level_str = settings.LOG_LEVEL.upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
+    LOGS_DIR = resolve_logs_dir()
 
-    # Root logger configuration
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
     root_logger.handlers.clear()
-
-    # Console output (always attached to root)
     root_logger.addHandler(get_console_handler(log_level))
 
-    # Error file handler (catches ERROR+ from everywhere)
     error_handler = get_file_handler("errors.log", logging.ERROR)
     root_logger.addHandler(error_handler)
 
-    # Configure component-specific loggers
     for logger_name, filename in COMPONENT_LOG_FILES.items():
         logger = logging.getLogger(logger_name)
-        # Ensure component logger captures at least the global level
         logger.setLevel(log_level)
-
-        # Avoid adding multiple handlers if called multiple times (though setup usually runs once)
-        if not any(
-            isinstance(h, RotatingFileHandler) and Path(h.baseFilename).name == filename
-            for h in logger.handlers
-        ):
-            logger.addHandler(get_file_handler(filename, log_level))
-
-        # Prevent propagation to root to avoid duplicate console/error logs
-        # IF we want component logs strictly in their files + console.
-        # But if we propagate, they go to root -> console AND root -> errors.log.
-        # Usually, we WANT them in console.
-        # If we stop propagation, we must add console handler to EACH component logger.
-        # EASIER: Let them propagate, but the file handler is specific.
-        # WAIT: The previous config had `propagate = False`.
-        # If propagate is False, we need to add console handler here too if we want console output.
+        _strip_rotating_handlers(logger)
+        # Drop duplicate console handlers if reconfiguring
+        for handler in list(logger.handlers):
+            if isinstance(handler, logging.StreamHandler) and not isinstance(
+                handler, RotatingFileHandler
+            ):
+                logger.removeHandler(handler)
+        logger.addHandler(get_file_handler(filename, log_level))
+        logger.addHandler(get_console_handler(log_level))
+        logger.addHandler(error_handler)
         logger.propagate = False
-        logger.addHandler(get_console_handler(log_level))  # Add console to component
-        logger.addHandler(
-            error_handler
-        )  # Ensure errors also go to errors.log via this logger
 
-    # Third-party noise reduction
-    calm_loggers = ["httpx", "httpcore", "asyncio", "urllib3", "multipart"]
-    for name in calm_loggers:
+    for name in ("httpx", "httpcore", "asyncio", "urllib3", "multipart"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
-    logging.info(f"Logging initialized at level {log_level_str} | Logs dir: {LOGS_DIR}")
+    _configured = True
+    logging.info(
+        "Logging initialized at level %s | Logs dir: %s", log_level_str, LOGS_DIR
+    )
+
+
+def reconfigure_logging() -> None:
+    """Re-bind file handlers after DATA_DIR changes (first-run wizard)."""
+    global LOGS_DIR  # noqa: PLW0603
+    LOGS_DIR = resolve_logs_dir()
+    if _configured:
+        setup_logging()
 
 
 def get_logger(name: str) -> logging.Logger:
-    """
-    Get a configured logger instance.
-    Use defined component names to ensure routing to correct log files.
-    """
+    """Return a logger. Use a COMPONENT_LOG_FILES key for dedicated file routing."""
     return logging.getLogger(name)

@@ -1,3 +1,0 @@
-# Ajugeae
-
-Ajugeae is a tribe of the Teucrioideae subfamily of the family Lamiaceae and might contain the genera "Acrymia" , "Ajuga" , "Cymaria" , "Garrettia" , "Holocheila" .

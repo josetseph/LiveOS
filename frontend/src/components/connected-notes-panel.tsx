@@ -111,7 +111,7 @@ export function ConnectedNotesPanel({
     const n = data.nodes.length || 1;
     const cx = w / 2;
     const cy = h / 2;
-    const rand = seededRandom(hashSeed(`${noteId}:${mode}:${layoutNonce}:${Date.now()}`));
+    const rand = seededRandom(hashSeed(`${noteId}:${mode}:${layoutNonce}`));
     const angleOffset = rand() * Math.PI * 2;
     const r = Math.min(110, 28 + n * 10);
     const initial: SimNode[] = data.nodes.map((node, i) => {
@@ -133,10 +133,12 @@ export function ConnectedNotesPanel({
     const edges = data.edges;
     let alive = true;
     let frames = 0;
+    const maxFrames = 180;
 
     const tick = () => {
       if (!alive) return;
       frames += 1;
+      let maxSpeed = 0;
       setNodes((prev) => {
         const next = prev.map((n) => ({ ...n }));
         const byId = new Map(next.map((n) => [n.id, n]));
@@ -175,16 +177,20 @@ export function ConnectedNotesPanel({
         for (const n of next) {
           n.vx += (w / 2 - n.x) * 0.008;
           n.vy += (h / 2 - n.y) * 0.008;
-          // Soften over time but keep a little drift for organic feel
           const damp = frames < 90 ? 0.86 : 0.92;
           n.vx *= damp;
           n.vy *= damp;
           n.x = Math.max(18, Math.min(w - 18, n.x + n.vx));
           n.y = Math.max(18, Math.min(h - 28, n.y + n.vy));
+          maxSpeed = Math.max(maxSpeed, Math.hypot(n.vx, n.vy));
         }
         return next;
       });
-      rafRef.current = requestAnimationFrame(tick);
+      if (frames < maxFrames && maxSpeed > 0.05) {
+        rafRef.current = requestAnimationFrame(tick);
+      } else {
+        rafRef.current = null;
+      }
     };
     rafRef.current = requestAnimationFrame(tick);
     return () => {

@@ -81,13 +81,19 @@ def mock_graph_service():
 
 
 @pytest.fixture()
-def mock_typesense_service():
+def mock_meili_service():
     svc = MagicMock()
     svc.is_available = MagicMock(return_value=True)
     svc.index_node = MagicMock()
     svc.update_node_community = MagicMock()
     svc.delete_node = MagicMock()
     return svc
+
+
+# Backward-compatible alias for older tests
+@pytest.fixture()
+def mock_typesense_service(mock_meili_service):
+    return mock_meili_service
 
 
 # ---------------------------------------------------------------------------

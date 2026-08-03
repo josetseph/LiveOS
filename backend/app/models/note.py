@@ -1,27 +1,38 @@
-"""SQLAlchemy ORM model for note metadata (body lives in vault .md files)."""
+"""Note metadata ORM — markdown body lives in the KB vault ``.md`` file."""
+
+from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy import Boolean, Column, DateTime, Index, String, Text
+
 from app.core.database import Base
-from sqlalchemy import Boolean, Column, DateTime, String, Text
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class Note(Base):  # pylint: disable=too-few-public-methods
-    """Note metadata; markdown body is at vault_path/rel_path."""
+    """Note metadata; body is at ``{vault_path}/{rel_path}``."""
 
     __tablename__ = "notes"
+    __table_args__ = (
+        Index("ix_notes_kb_rel_path", "kb_id", "rel_path"),
+    )
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    # Deprecated: kept nullable for migration; prefer vault file via rel_path
+    # Deprecated fallback only — ``persist_note_body`` keeps this empty.
+    # Prefer vault file via ``rel_path``; see ``note_files.note_body``.
     content = Column(Text, nullable=True, default="")
     title = Column(String, nullable=True)
     rel_path = Column(String, nullable=True)  # relative to KB vault_path
-    created_at = Column(DateTime(timezone=True), default=datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
     updated_at = Column(
         DateTime(timezone=True),
-        onupdate=datetime.now(timezone.utc),
-        default=datetime.now(timezone.utc),
+        default=_utcnow,
+        onupdate=_utcnow,
     )
     processed = Column(Boolean, default=False)
     failed = Column(Boolean, default=False)

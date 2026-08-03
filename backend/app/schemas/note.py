@@ -1,45 +1,46 @@
-"""Pydantic schemas for note creation and API response serialization."""
-from pydantic import BaseModel
+"""Pydantic schemas for notes and vault file operations."""
 
+from __future__ import annotations
 
-class NoteResponse(BaseModel):
-    """API response schema for a note record."""
-    id: str
-    content: str
-    created_at: str | None = None
-    updated_at: str | None = None
-    title: str | None = None
-    summary: str | None = None
-    processed: bool = False
-    failed: bool = False
-    processing_stage: str | None = None
-    processing_model: str | None = None
-
-    class Config:  # pylint: disable=too-few-public-methods
-        """Pydantic ORM-mode configuration for NoteResponse."""
-        from_attributes = True
+from pydantic import BaseModel, Field
 
 
 class CreateNoteInput(BaseModel):
-    """Input schema for creating a new note."""
+    """Create or update a note (body is written to the vault ``.md``)."""
+
     title: str | None = None
-    content: str
+    content: str = ""
     created_at: str | None = None
-    # Vault-relative folder to create the note in (e.g. "Life/Daily Log")
+    # Vault-relative folder (e.g. "Life/Daily Log")
     folder: str | None = None
 
 
 class MoveNoteInput(BaseModel):
-    """Move a note into a folder (or to vault root if empty)."""
+    """Move a note into a folder (empty string = vault root)."""
+
     folder: str = ""
 
 
 class MoveVaultFileInput(BaseModel):
     """Move any vault file (note or attachment) to a new relative path."""
+
     from_rel: str
     to_rel: str
 
 
 class DeleteVaultFileInput(BaseModel):
-    """Delete a vault attachment and strip markdown links to it."""
+    """Delete a vault attachment and strip markdown links that pointed at it."""
+
     rel_path: str
+
+
+class BatchDeleteNotesInput(BaseModel):
+    """Delete many notes in the current KB."""
+
+    ids: list[str] = Field(default_factory=list)
+
+
+class MkdirInput(BaseModel):
+    """Create an empty folder in the vault."""
+
+    path: str = ""

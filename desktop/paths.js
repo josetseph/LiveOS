@@ -203,4 +203,5 @@ module.exports = {
   defaultDataDir,
   defaultModelsDir,
   useProductionFrontend,
+  envFirst,
 };

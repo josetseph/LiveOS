@@ -9,7 +9,6 @@ import {
   Network,
   Brain,
   Database,
-  Cpu,
   Search,
   Layers,
 } from "lucide-react";
@@ -123,7 +122,7 @@ export default function Home() {
             <div className="flex flex-wrap items-center justify-center gap-2">
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
                 <Database className="h-3 w-3 text-green-400" />
-                <span className="text-xs text-white/70">Postgres</span>
+                <span className="text-xs text-white/70">SQLite</span>
               </div>
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
                 <Network className="h-3 w-3 text-blue-400" />
@@ -136,10 +135,6 @@ export default function Home() {
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
                 <Search className="h-3 w-3 text-yellow-400" />
                 <span className="text-xs text-white/70">Meilisearch</span>
-              </div>
-              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 backdrop-blur-xl">
-                <Cpu className="h-3 w-3 text-orange-400" />
-                <span className="text-xs text-white/70">RustFS</span>
               </div>
             </div>
           </motion.div>

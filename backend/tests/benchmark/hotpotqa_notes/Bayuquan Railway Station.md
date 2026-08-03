@@ -1,3 +1,0 @@
-# Bayuquan Railway Station
-
-Bayuquan Railway Station (IATA: JYQ) is a railway station of the Harbin–Dalian section of the Beijing–Harbin High-Speed Railway.  It is located in Bayuquan, in the Yingkou prefecture level city, in the Liaoning province of China.

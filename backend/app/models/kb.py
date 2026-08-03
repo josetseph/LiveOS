@@ -1,14 +1,22 @@
-"""Knowledge base registry rows (replaces kb_registry.json)."""
+"""Knowledge base registry rows (SQLite metadata; also maintained via kb_registry)."""
+
+from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy.orm import synonym
+
 from app.core.database import Base
-from sqlalchemy import Column, DateTime, String, Text
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class KnowledgeBase(Base):  # pylint: disable=too-few-public-methods
-    """One vault / knowledge base."""
+    """One vault / knowledge base — indexes + Firefly admin scope."""
 
     __tablename__ = "knowledge_bases"
 
@@ -20,5 +28,10 @@ class KnowledgeBase(Base):  # pylint: disable=too-few-public-methods
     qdrant_col_cores = Column(String, nullable=False)
     qdrant_col_rels = Column(String, nullable=False)
     qdrant_col_contexts = Column(String, nullable=False)
+    # Meilisearch index name (column kept as typesense_collection for existing DBs)
     typesense_collection = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=datetime.now(timezone.utc))
+    meili_index = synonym("typesense_collection")
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    # Per-KB Firefly III administration (user_group_id) — never leak across vaults
+    firefly_group_id = Column(Integer, nullable=True)
+    firefly_group_title = Column(Text, nullable=True)

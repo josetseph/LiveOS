@@ -1,3 +1,0 @@
-# Tysons Corner Center
-
-Tysons Corner Center, located in the Tysons Corner unincorporated area in Fairfax County, Virginia, United States (between McLean and Vienna, Virginia), opened to the public in 1968, becoming one of the first fully enclosed, climate-controlled shopping malls in the Washington metropolitan area.

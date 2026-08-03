@@ -5,13 +5,14 @@ const {
   Supervisor,
   needsWizard,
   defaultPathsFile,
+  loadPaths,
 } = require("./supervisor");
 const {
   getAppRoot,
-  getRepoRoot,
   isPackaged,
   defaultDataDir,
   defaultModelsDir,
+  envFirst,
 } = require("./paths");
 const { uiUrl, apiV1Url } = require("./ports");
 
@@ -21,15 +22,10 @@ if (process.platform === "win32") {
   app.setAppUserModelId("com.orb.app");
 }
 
-function envFirst(...names) {
-  for (const name of names) {
-    const v = process.env[name];
-    if (v != null && String(v).trim() !== "") return v;
-  }
-  return undefined;
-}
-
 const APP_URL = envFirst("ORB_URL", "LIVEOS_URL") || uiUrl();
+const PRELOAD = path.join(__dirname, "preload.js");
+const AI_SETUP_MODES = new Set(["none", "local", "cloud"]);
+
 let mainWindow = null;
 let splashWindow = null;
 let supervisor = null;
@@ -51,6 +47,15 @@ function appIconPath() {
   return undefined;
 }
 
+function shellWebPreferences() {
+  return {
+    preload: PRELOAD,
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true,
+  };
+}
+
 function createSplash() {
   const icon = appIconPath();
   splashWindow = new BrowserWindow({
@@ -61,10 +66,7 @@ function createSplash() {
     backgroundColor: "#0a0a0f",
     show: false,
     ...(icon ? { icon } : {}),
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-    },
+    webPreferences: shellWebPreferences(),
   });
   splashWindow.loadFile(path.join(__dirname, "splash.html"));
   splashWindow.once("ready-to-show", () => splashWindow.show());
@@ -81,10 +83,7 @@ function createWizard() {
     title: "Orb Setup",
     backgroundColor: "#0a0a0f",
     ...(icon ? { icon } : {}),
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-    },
+    webPreferences: shellWebPreferences(),
   });
   win.loadFile(path.join(__dirname, "wizard.html"));
   return win;
@@ -99,14 +98,17 @@ function createMainWindow(initialPath = "/") {
     backgroundColor: "#0a0a0f",
     ...(icon ? { icon } : {}),
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: PRELOAD,
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
-  const url = initialPath && initialPath !== "/"
-    ? `${APP_URL.replace(/\/$/, "")}${initialPath.startsWith("/") ? initialPath : `/${initialPath}`}`
-    : APP_URL;
+  const url =
+    initialPath && initialPath !== "/"
+      ? `${APP_URL.replace(/\/$/, "")}${
+          initialPath.startsWith("/") ? initialPath : `/${initialPath}`
+        }`
+      : APP_URL;
   mainWindow.loadURL(url);
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -136,10 +138,13 @@ function dirHasGguf(dir, depth = 0) {
 function resolveBootPath() {
   // Full local without GGUFs yet → open Setup so download can auto-start.
   try {
-    const pathsFile = envFirst("ORB_PATHS_FILE", "LIVEOS_PATHS_FILE") || defaultPathsFile();
+    const pathsFile =
+      envFirst("ORB_PATHS_FILE", "LIVEOS_PATHS_FILE") || defaultPathsFile();
     if (!fs.existsSync(pathsFile)) return "/";
     const j = JSON.parse(fs.readFileSync(pathsFile, "utf8"));
-    const mode = String(j.ai_setup_mode || process.env.AI_SETUP_MODE || "none").toLowerCase();
+    const mode = String(
+      j.ai_setup_mode || process.env.AI_SETUP_MODE || "none",
+    ).toLowerCase();
     if (mode !== "local") return "/";
     const modelsDir = j.models_dir || process.env.MODELS_DIR;
     if (!dirHasGguf(modelsDir)) return "/setup";
@@ -160,6 +165,28 @@ function setupAutoUpdater() {
   } catch (_) {
     // electron-updater optional
   }
+}
+
+/** Require an absolute filesystem path (no null bytes). */
+function assertAbsolutePath(label, value) {
+  if (!value || typeof value !== "string") {
+    throw new Error(`${label} is required`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.includes("\0")) {
+    throw new Error(`${label} is invalid`);
+  }
+  if (!path.isAbsolute(trimmed)) {
+    throw new Error(`${label} must be an absolute path`);
+  }
+  return path.resolve(trimmed);
+}
+
+function pathUnderRoot(candidate, root) {
+  if (!root) return false;
+  const resolved = path.resolve(candidate);
+  const base = path.resolve(root);
+  return resolved === base || resolved.startsWith(base + path.sep);
 }
 
 ipcMain.handle("pick-directory", async (event, opts = {}) => {
@@ -185,8 +212,28 @@ ipcMain.handle("reveal-in-folder", (_e, filePath) => {
   if (!filePath || typeof filePath !== "string") {
     return { ok: false, error: "Missing path" };
   }
+  let resolved;
   try {
-    shell.showItemInFolder(filePath);
+    resolved = assertAbsolutePath("path", filePath);
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+  try {
+    const roots = loadPaths(getAppRoot());
+    const allowed = [
+      roots.dataDir,
+      roots.modelsDir,
+      roots.defaultVault,
+      defaultDataDir(),
+      defaultModelsDir(),
+    ];
+    if (!allowed.some((root) => pathUnderRoot(resolved, root))) {
+      return { ok: false, error: "Path is outside Orb data / vault / models" };
+    }
+    if (!fs.existsSync(resolved)) {
+      return { ok: false, error: "Path does not exist" };
+    }
+    shell.showItemInFolder(resolved);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err?.message || err) };
@@ -203,27 +250,42 @@ ipcMain.handle("get-app-info", () => {
   return {
     version: pkg.version,
     packaged: isPackaged(),
-    repoRoot: getRepoRoot(),
-    appRoot: getAppRoot(),
   };
 });
 
 ipcMain.handle("save-wizard", async (_e, payload) => {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Invalid wizard payload");
+  }
+  const dataDir = assertAbsolutePath("data_dir", payload.data_dir);
+  const modelsDir = assertAbsolutePath("models_dir", payload.models_dir);
+  let defaultVault = undefined;
+  if (payload.default_vault_path) {
+    defaultVault = assertAbsolutePath(
+      "default_vault_path",
+      payload.default_vault_path,
+    );
+  }
+  const aiMode = String(payload.ai_setup_mode || "none").toLowerCase();
+  if (!AI_SETUP_MODES.has(aiMode)) {
+    throw new Error("ai_setup_mode must be none, local, or cloud");
+  }
+
   const loc = defaultPathsFile();
   fs.mkdirSync(path.dirname(loc), { recursive: true });
   const data = {
-    data_dir: payload.data_dir,
-    models_dir: payload.models_dir,
+    data_dir: dataDir,
+    models_dir: modelsDir,
+    ai_setup_mode: aiMode,
   };
-  if (payload.default_vault_path) data.default_vault_path = payload.default_vault_path;
-  if (payload.ai_setup_mode) data.ai_setup_mode = payload.ai_setup_mode;
+  if (defaultVault) data.default_vault_path = defaultVault;
   fs.writeFileSync(loc, JSON.stringify(data, null, 2), "utf8");
-  if (payload.ai_setup_mode) {
-    process.env.AI_SETUP_MODE = payload.ai_setup_mode;
-  }
+  process.env.AI_SETUP_MODE = aiMode;
+
   try {
-    const dataDir = payload.data_dir;
     fs.mkdirSync(dataDir, { recursive: true });
+    fs.mkdirSync(modelsDir, { recursive: true });
+    if (defaultVault) fs.mkdirSync(defaultVault, { recursive: true });
     const rcPath = path.join(dataDir, "runtime_config.json");
     let rc = {};
     if (fs.existsSync(rcPath)) {
@@ -233,7 +295,7 @@ ipcMain.handle("save-wizard", async (_e, payload) => {
         rc = {};
       }
     }
-    if (payload.ai_setup_mode) rc.ai_setup_mode = payload.ai_setup_mode;
+    rc.ai_setup_mode = aiMode;
     fs.writeFileSync(rcPath, JSON.stringify(rc, null, 2), "utf8");
   } catch (err) {
     console.warn("Could not write runtime_config.json", err);
@@ -243,28 +305,18 @@ ipcMain.handle("save-wizard", async (_e, payload) => {
 
 async function bootStack(appRoot) {
   supervisor = new Supervisor(appRoot, sendStatus);
-  if (envFirst("ORB_USE_DOCKER", "LIVEOS_USE_DOCKER") === "1") {
-    sendStatus("Starting Docker services…");
-    const { spawn } = require("child_process");
-    const repoRoot = getRepoRoot();
-    await new Promise((resolve, reject) => {
-      const child = spawn("docker", ["compose", "up", "-d"], {
-        cwd: repoRoot,
-        shell: process.platform === "win32",
-      });
-      child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`compose ${code}`))));
-      child.on("error", reject);
-    });
-  } else {
-    await supervisor.startAll();
-  }
+  await supervisor.startAll();
 }
 
 app.whenReady().then(async () => {
   const appRoot = getAppRoot();
-  const pathsFile = envFirst("ORB_PATHS_FILE", "LIVEOS_PATHS_FILE") || defaultPathsFile();
+  const pathsFile =
+    envFirst("ORB_PATHS_FILE", "LIVEOS_PATHS_FILE") || defaultPathsFile();
 
-  if (needsWizard(pathsFile) && !envFirst("ORB_SKIP_WIZARD", "LIVEOS_SKIP_WIZARD")) {
+  if (
+    needsWizard(pathsFile) &&
+    !envFirst("ORB_SKIP_WIZARD", "LIVEOS_SKIP_WIZARD")
+  ) {
     const wizard = createWizard();
     await new Promise((resolve) => {
       ipcMain.once("wizard-done", () => {
@@ -307,5 +359,7 @@ app.on("before-quit", () => {
 });
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) createMainWindow(resolveBootPath());
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createMainWindow(resolveBootPath());
+  }
 });

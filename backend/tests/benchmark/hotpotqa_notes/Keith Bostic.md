@@ -1,3 +1,0 @@
-# Keith Bostic
-
-Keith Bostic is an American Software Engineer and one of the key people in the history of Berkeley Software Distribution UNIX and Open Source software.

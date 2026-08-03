@@ -3,17 +3,16 @@
 # pylint: disable=too-many-lines,import-outside-toplevel
 import calendar
 import logging
-import os
 import time
-from datetime import datetime
 from collections.abc import Callable
+from datetime import datetime
 from typing import List
 
 from app.core.config import settings
 from app.core.log import get_logger
 from app.services.graph import GraphService, graph_service
 from app.services.qdrant_service import QdrantService, qdrant_service
-from app.services.typesense_service import TypesenseService, typesense_service
+from app.services.meilisearch_service import MeilisearchService, meilisearch_service
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 
 # Suppress noisy tokenizer warnings
@@ -29,14 +28,11 @@ class RetrievalService:
         self,
         graph: GraphService | None = None,
         qdrant: QdrantService | None = None,
-        typesense: TypesenseService | None = None,
+        meili: MeilisearchService | None = None,
     ):
         self._graph = graph or graph_service
         self._qdrant = qdrant or qdrant_service
-        self._typesense = typesense or typesense_service
-        self.models_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), f"../../{settings.MODELS_PATH}")
-        )
+        self._meili = meili or meilisearch_service
         logger.info("RetrievalService initialized")
 
     def _log_retrieval_details(
@@ -887,13 +883,13 @@ class RetrievalService:
         )
         return result
 
-    async def _search_typesense_by_keyword(self, query: str) -> list[dict]:
-        """Search Typesense full-text index and normalize into node-like results."""
-        hits = self._typesense.search_nodes(query=query, limit=100)
+    async def _search_meili_by_keyword(self, query: str) -> list[dict]:
+        """Search Meilisearch full-text index and normalize into node-like results."""
+        hits = self._meili.search_nodes(query=query, limit=100)
         if not hits:
-            logger.info("  [Typesense] No BM25 keyword hits.")
+            logger.info("  [Meili] No BM25 keyword hits.")
             return []
-        logger.info(f"  [Typesense] {len(hits)} raw hits from Typesense")
+        logger.info(f"  [Meili] {len(hits)} raw Meili hits")
 
         merged: dict[str, dict] = {}
         for hit in hits:
@@ -914,7 +910,7 @@ class RetrievalService:
                 "entity_type": payload.get("type") or "",
                 "summary": payload.get("description") or "",
                 "score": score,
-                "_source": "typesense",
+                "_source": "meili",
             }
 
         return list(merged.values())
@@ -1155,19 +1151,19 @@ class RetrievalService:
             t_entity = time.perf_counter() - t_entity_start
             logger.info(f"  [⏱️ Timing] Entity name matching: {t_entity:.2f}s")
 
-        # STEP 1b: BM25 TYPESENSE SEARCH (always runs)
+        # STEP 1b: BM25 MEILI SEARCH (always runs)
         # Lexical full-text search on query + individual keywords/concepts.
         # Grouped with entity matching since both are lexical (non-semantic).
         try:
-            _typesense_queries = [query] + [
+            _meili_queries = [query] + [
                 t
                 for t in query_keywords + query_concepts
                 if t and t.lower() not in query.lower()
             ]
             _seen_ts: set[str] = set()
             _all_keyword_nodes: list[dict] = []
-            for _ts_q in _typesense_queries:
-                _kn = await self._search_typesense_by_keyword(_ts_q)
+            for _ts_q in _meili_queries:
+                _kn = await self._search_meili_by_keyword(_ts_q)
                 for _n in _kn:
                     _key = (_n.get("name") or "").lower()
                     if _key not in _seen_ts:
@@ -1180,10 +1176,10 @@ class RetrievalService:
                     node_names_found,
                 )
                 logger.info(
-                    f"  [Keyword] Added {len(_all_keyword_nodes)} Typesense BM25 matches"
+                    f"  [Keyword] Added {len(_all_keyword_nodes)} Meili BM25 matches"
                 )
         except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.warning(f"  [Keyword] Typesense BM25 search failed: {e}")
+            logger.warning(f"  [Keyword] Meili BM25 search failed: {e}")
 
         # STEP 2: VECTOR SEARCH (always runs)
         # Semantic similarity search to find nodes that lexical search missed.
@@ -1410,19 +1406,10 @@ class RetrievalService:
         self,
         query: str,
         top_k: int = 50,
-        max_hops: int = 10,  # pylint: disable=unused-argument
-        filter_docs: bool = True,  # pylint: disable=unused-argument
         progress_callback: Callable[[str, str | None], None] | None = None,
         conversation_history: list[dict] | None = None,
     ) -> tuple[str | None, list[dict], str | None]:
-        """Entry-point alias for the primary structured sub-question pipeline.
-
-        The ``_max_hops`` and ``_filter_docs`` parameters are accepted for call-site
-        compatibility but are no longer operative — the primary pipeline
-        (``retrieve_with_iterative_loop``) manages its own hop budget and candidate
-        filtering internally.  They are retained in the signature so callers do
-        not need to be updated when the parameters are eventually removed.
-        """
+        """Entry-point alias for the primary structured sub-question pipeline."""
         return await self.retrieve_with_iterative_loop(
             query,
             top_k=top_k,

@@ -10,7 +10,6 @@ from app.services.vault import (
     read_note_file,
     unique_md_path,
     write_note_file,
-    title_from_filename,
 )
 
 

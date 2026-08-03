@@ -2,26 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from app.services.vault import save_attachment
-
-
-_ATTACH_RE = re.compile(
-    r"(?:!\[([^\]]*)\]\(([^)]+)\)|\[(?:📎|🎤)\s*([^\]]+)\]\(([^)]+)\))"
-)
-
-
-def extract_attachment_refs(content: str) -> list[tuple[str, str]]:
-    """Return (label, url_or_path) pairs from note markdown (📎/🎤 and image embeds)."""
-    out: list[tuple[str, str]] = []
-    for m in _ATTACH_RE.finditer(content or ""):
-        if m.group(2):
-            out.append(((m.group(1) or "").strip() or "image", m.group(2)))
-        else:
-            out.append((m.group(3), m.group(4)))
-    return out
 
 
 def vault_rel_from_url(url: str) -> str | None:
@@ -49,10 +32,15 @@ async def store_upload(vault: Path, filename: str, data: bytes, kb_id: str) -> d
 
 
 async def remove_upload(vault: Path, key_or_url: str) -> None:
+    from app.services.vault_ops import safe_vault_join
+
     rel = vault_rel_from_url(key_or_url) or key_or_url
     rel = rel.replace("\\", "/").lstrip("/")
     if not rel or ".." in rel.split("/"):
         return
-    path = vault / rel
+    try:
+        path = safe_vault_join(Path(vault), rel)
+    except ValueError:
+        return
     if path.is_file():
         path.unlink()

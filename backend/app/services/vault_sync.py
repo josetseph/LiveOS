@@ -7,7 +7,6 @@ from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
 
 from app.core.log import get_logger
 from app.models.note import Note
@@ -95,56 +94,6 @@ def iter_vault_md_files(vault: Path) -> list[str]:
             continue
         out.append(rel)
     return sorted(out)
-
-
-def sync_vault_notes_sync(session: Session, kb_id: str, vault: Path) -> dict[str, int]:
-    """Upsert note metadata for every .md under vault (preserves folder rel_path)."""
-    rels = iter_vault_md_files(vault)
-    existing = list(
-        session.execute(select(Note).where(Note.kb_id == kb_id)).scalars().all()
-    )
-    by_rel = { (n.rel_path or "").replace("\\", "/"): n for n in existing if n.rel_path }
-    by_title = { (n.title or "").lower(): n for n in existing if n.title }
-
-    created = 0
-    updated = 0
-    for rel in rels:
-        title = title_from_filename(rel)
-        row = by_rel.get(rel)
-        if row is None:
-            # Prefer matching a flat-path note with the same stem so we don't duplicate.
-            stem = Path(rel).stem.lower()
-            row = by_title.get(stem)
-            if row is not None and row.rel_path and "/" not in row.rel_path.replace("\\", "/"):
-                row.rel_path = rel
-                if not (row.title or "").strip():
-                    row.title = title
-                row.updated_at = datetime.now(timezone.utc)
-                updated += 1
-                by_rel[rel] = row
-                continue
-            row = Note(
-                kb_id=kb_id,
-                title=title,
-                rel_path=rel,
-                content="",
-                processed=False,
-                processing_stage="Saved",
-            )
-            session.add(row)
-            created += 1
-            by_rel[rel] = row
-            by_title[title.lower()] = row
-        else:
-            # Display title is user-owned — don't clobber from filename
-            if not (row.title or "").strip():
-                row.title = title
-                updated += 1
-    session.commit()
-    logger.info(
-        f"[VaultSync] kb={kb_id} files={len(rels)} created={created} updated={updated}"
-    )
-    return {"files": len(rels), "created": created, "updated": updated}
 
 
 async def sync_vault_notes(db: AsyncSession, kb: KBContext) -> dict[str, int]:

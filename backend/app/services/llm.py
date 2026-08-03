@@ -2,11 +2,9 @@
 
 # pylint: disable=too-many-lines,wrong-import-order,import-outside-toplevel
 import asyncio
-import os
 import re
 from typing import Optional, Type
 
-import httpx
 import instructor
 from app.core.config import settings
 from app.core.log import get_logger
@@ -22,23 +20,18 @@ class LLMService:
     """Multi-provider LLM client supporting structured extraction, generation, and ingestion routing."""
 
     def __init__(self):
-        self.device = "cpu"
-        self.models_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "../../models")
-        )
-
         # Declare client attributes upfront so they are always present on the
         # instance regardless of which provider branch _init_clients() takes.
         self.extraction_client = None
         self.chat_client = None
         self.async_chat_client = None
-        self._lm_studio_model_cache: Optional[str] = None
 
-        # Determine Primary Provider — Ollama / LM Studio removed; map to local
+        # Map deprecated sidecar names onto in-process local GGUF.
         raw = settings.LLM_PROVIDER.lower()
         if raw in ("ollama", "lm_studio"):
             logger.warning(
-                f"LLM_PROVIDER={raw} is deprecated; using in-process llama-cpp-python instead"
+                "LLM_PROVIDER=%s is deprecated; using in-process llama-cpp-python",
+                raw,
             )
             raw = "local"
         self.provider = raw
@@ -54,45 +47,9 @@ class LLMService:
         # Initialize ingestion-specific clients (may be separate provider/server)
         self._init_ingestion_clients()
 
-        # Legacy compatibility flags
-        self.is_gemini = self.provider == "gemini"
-
-    def _make_local_openai_clients(
-        self,
-        base_url: str,
-        api_key: str,
-        timeout: "httpx.Timeout",
-        instructor_mode=None,
-    ):
-        """Create extraction, chat, and async_chat clients for a local OpenAI-compatible server.
-
-        ``instructor_mode`` is passed to ``instructor.patch()``; omit it (or pass None)
-        to use instructor's default mode (suitable for lm_studio).
-        """
-        raw_client = OpenAI(
-            base_url=base_url,
-            api_key=api_key,
-            timeout=timeout,
-            max_retries=3,
-        )
-        patch_kwargs = {"mode": instructor_mode} if instructor_mode is not None else {}
-        self.extraction_client = instructor.patch(raw_client, **patch_kwargs)
-        self.chat_client = OpenAI(
-            base_url=base_url,
-            api_key=api_key,
-            timeout=timeout,
-            max_retries=3,
-        )
-        self.async_chat_client = AsyncOpenAI(
-            base_url=base_url,
-            api_key=api_key,
-            timeout=timeout,
-            max_retries=3,
-        )
-
     def init_clients(self):  # pylint: disable=too-many-statements
         """Initialize clients for the configured provider."""
-        if self.provider in ("ollama", "lm_studio", "local"):
+        if self.provider == "local":
             # In-process GGUF via llama-cpp-python (content-machine style; no HTTP server)
             from app.services.local_models import local_llama_runtime
 
@@ -133,8 +90,7 @@ class LLMService:
                 http_options=types.HttpOptions(timeout=120000),
             )
 
-            # Create a minimal wrapper for backward compatibility with methods that use chat_client
-            # This allows detect_similarity and other legacy methods to work
+            # OpenAI-compatible wrapper so callers that use chat_client still work
             class GeminiChatWrapper:  # pylint: disable=too-few-public-methods
                 """OpenAI-compatible wrapper that routes completion requests through the native Gemini SDK."""
 
@@ -260,26 +216,20 @@ class LLMService:
         """
         Set up a separate set of clients for ingestion (extraction/entity reasoning).
 
-        If INGESTION_PROVIDER / INGESTION_BASE_URL / INGESTION_API_KEY are not set,
-        the ingestion clients simply alias the main chat clients so there is zero overhead.
+        If INGESTION_PROVIDER is not set, the ingestion clients simply alias the
+        main chat clients so there is zero overhead.
         """
         raw_provider = (settings.INGESTION_PROVIDER or "").strip().lower()
+        if raw_provider in ("ollama", "lm_studio"):
+            logger.warning(
+                "INGESTION_PROVIDER=%s is deprecated; using in-process local",
+                raw_provider,
+            )
+            raw_provider = "local"
         self.ingestion_provider = raw_provider or self.provider
 
-        ingestion_base_url = (
-            settings.INGESTION_BASE_URL or ""
-        ).strip() or settings.LLM_BASE_URL
-        ingestion_api_key = (
-            settings.INGESTION_API_KEY or ""
-        ).strip() or settings.LLM_API_KEY
-
-        # Determine whether ingestion truly differs from the main provider
-        same_local = self.ingestion_provider in (
-            "local",
-            "ollama",
-            "lm_studio",
-        ) and self.provider in ("local", "ollama", "lm_studio")
-        same_provider = self.ingestion_provider == self.provider or same_local
+        # Alias main clients when ingestion uses the same provider.
+        same_provider = self.ingestion_provider == self.provider
 
         if same_provider:
             # Alias main clients — no extra connections needed
@@ -297,7 +247,7 @@ class LLMService:
             f"Ingestion LLM: separate provider {self.ingestion_provider.upper()}"
         )
 
-        if self.ingestion_provider in ("local", "ollama", "lm_studio"):
+        if self.ingestion_provider == "local":
             from app.services.local_models import local_llama_runtime
 
             sync, async_client, extraction = local_llama_runtime.make_chat_clients()
@@ -387,95 +337,33 @@ class LLMService:
             )
 
     def _with_keep_alive(self, extra_body: dict | None = None) -> dict:
-        """Attach provider keep-alive controls for local OpenAI-compatible backends."""
-        body = dict(extra_body or {})
-        if self.provider in ("ollama", "lm_studio", "local"):
-            body.setdefault("keep_alive", settings.LLM_KEEP_ALIVE)
-        return body
+        """Pass-through body for chat completions (in-process local ignores keep_alive)."""
+        return dict(extra_body or {})
 
     def _with_ingestion_keep_alive(self, extra_body: dict | None = None) -> dict:
-        """keep_alive hint for local ingestion backends."""
-        body = dict(extra_body or {})
-        if self.ingestion_provider in ("ollama", "lm_studio", "local"):
-            body.setdefault("keep_alive", settings.LLM_KEEP_ALIVE)
-        return body
+        """Pass-through body for ingestion chat completions."""
+        return dict(extra_body or {})
 
-    def _lm_studio_json_response_format(
+    def _local_json_response_format(
         self, _schema: dict | None = None, _schema_name: str = "response"
     ) -> dict:
-        """
-        Force json_object mode to avoid LM Studio grammar compilation stalls
-        on large nested schemas.
-        """
+        """Force json_object mode for structured local extraction."""
         return {"type": "json_object"}
 
-    def _lm_studio_text_response_format(self) -> dict:
-        """Compatibility fallback for servers that don't accept json_object."""
+    def _local_text_response_format(self) -> dict:
+        """Fallback when the backend rejects json_object."""
         return {"type": "text"}
 
-    def _lm_studio_response_format_candidates(  # pylint: disable=unused-argument
+    def _local_response_format_candidates(  # pylint: disable=unused-argument
         self, schema: dict | None = None, schema_name: str = "response"
     ) -> list[dict]:
-        """
-        Prioritize json_object to avoid schema-compiler hangs in LM Studio.
-        """
+        """Prefer json_object; fall back to text for compatibility."""
         mode = settings.LLM_RESPONSE_FORMAT.lower().strip()
         json_object = {"type": "json_object"}
         text = {"type": "text"}
         if mode == "text":
             return [text]
         return [json_object, text]
-
-    def _resolve_lm_studio_model(self, configured_model: str | None) -> str | None:
-        """
-        Resolve aliases (e.g. `gemma3:4b`) to LM Studio model IDs and, if possible,
-        auto-select an available downloaded variant (often with quant suffix like `@4bit`).
-        """
-        if not configured_model:
-            return configured_model
-
-        cached = getattr(self, "_lm_studio_model_cache", None)
-        if cached:
-            return cached
-
-        model = configured_model.strip()
-        alias_map = {
-            "gemma3:4b": "google/gemma-3-4b",
-            "gemma3:12b": "google/gemma-3-12b",
-        }
-        model = alias_map.get(model, model)
-
-        try:
-            available = [m.id for m in self.chat_client.models.list().data]
-            if model in available:
-                self._lm_studio_model_cache = model
-                return model
-
-            # Prefer exact prefix matches, e.g. google/gemma-3-4b@4bit
-            prefixed = [mid for mid in available if mid.startswith(f"{model}@")]
-            if prefixed:
-                logger.warning(
-                    f"[LM Studio] Model '{configured_model}' not found, using '{prefixed[0]}'"
-                )
-                self._lm_studio_model_cache = prefixed[0]
-                return prefixed[0]
-
-            # Final fallback: contains base model string
-            contains = [mid for mid in available if model in mid]
-            if contains:
-                logger.warning(
-                    f"[LM Studio] Model '{configured_model}' not found, using '{contains[0]}'"
-                )
-                self._lm_studio_model_cache = contains[0]
-                return contains[0]
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.warning(f"[LM Studio] Could not list models for resolution: {e}")
-
-        logger.warning(
-            f"[LM Studio] Using configured model '{configured_model}' as-is (could not auto-resolve)"
-        )
-        self._lm_studio_model_cache = model
-        return model
 
     def _clean_json(self, json_str: str) -> str:
         """
@@ -516,7 +404,7 @@ class LLMService:
     ) -> Optional[BaseModel]:
         """
         Provider-agnostic structured extraction with native schema enforcement.
-        Supports: Ollama, LM Studio, OpenAI, Gemini, Anthropic (with fallback).
+        Supports: local (in-process GGUF), OpenAI, Gemini, Anthropic (with fallback).
 
         Args:
             model: Optional model override. When set, uses this model instead of
@@ -524,12 +412,8 @@ class LLMService:
                    from ingestion callers to use the lighter extraction model).
         """
         try:
-            if self.provider == "ollama":
-                return self._extract_ollama(
-                    prompt, response_model, temperature, model=model
-                )
-            if self.provider in ("lm_studio", "local"):
-                return self._extract_lm_studio(
+            if self.provider == "local":
+                return self._extract_local(
                     prompt, response_model, temperature, model=model
                 )
             if self.provider == "openai":
@@ -569,79 +453,8 @@ class LLMService:
                     self.provider = original_provider
                     self.init_clients()
 
-            # Final fallback: return empty model
-            try:
-                return response_model()
-            except Exception:  # pylint: disable=broad-exception-caught
-                return None
-
-    def _extract_ollama(
-        self,
-        prompt: str,
-        response_model: Type[BaseModel],
-        temperature: float,
-        model: str | None = None,
-    ) -> BaseModel:
-        """Ollama extraction with native structured outputs."""
-        model = model or settings.LLM_MODEL
-        logger.info(f"[Ollama] Extracting with {model} (schema enforced)")
-
-        extra_body = {
-            "keep_alive": settings.LLM_KEEP_ALIVE,
-            "format": response_model.model_json_schema(),  # Native schema enforcement!
-        }
-
-        response = self.chat_client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            extra_body=extra_body,
-            temperature=temperature,
-        )
-
-        # Clean JSON response (strip markdown code fences, repair malformed JSON)
-        raw_content = response.choices[0].message.content
-        cleaned_json = self._clean_json(raw_content)
-
-        # Always log raw JSON for debugging (first 500 chars)
-        import json
-
-        try:
-            parsed = json.loads(cleaned_json)
-            # Handle bare list (top-level array) or normal object
-            if isinstance(parsed, list):
-                # [[nodes...], [rels...]] — list-of-two-lists format
-                if parsed and isinstance(parsed[0], list):
-                    node_count = len(parsed[0])
-                    rel_count = (
-                        len(parsed[1])
-                        if len(parsed) > 1 and isinstance(parsed[1], list)
-                        else 0
-                    )
-                else:
-                    node_count = len(parsed)
-                    rel_count = sum(
-                        len(n.get("relationships", []))
-                        for n in parsed
-                        if isinstance(n, dict)
-                    )
-            else:
-                node_count = len(parsed.get("nodes") or [])
-                rel_count = len(parsed.get("relationships") or [])
-            logger.info(
-                f"[Ollama] Raw extraction: {node_count} nodes, {rel_count} relationships"
-            )
-            if node_count == 0:
-                logger.warning(f"[Ollama] Empty nodes. Full JSON: {cleaned_json}")
-        except Exception:  # pylint: disable=broad-exception-caught
-            logger.warning(f"[Ollama] Could not pre-parse JSON: {cleaned_json}")
-
-        try:
-            return response_model.model_validate_json(cleaned_json)
-        except Exception as validation_error:
-            # Log the raw response for debugging
-            logger.error(f"[Ollama] Validation failed: {validation_error}")
-            logger.error(f"[Ollama] Raw JSON: {cleaned_json}")
-            raise  # Re-raise to trigger fallback handling
+            # Fail closed — empty Extraction would silently corrupt the graph.
+            return None
 
     def _extract_openai(
         self, prompt: str, response_model: Type[BaseModel], temperature: float
@@ -660,7 +473,7 @@ class LLMService:
 
         return response.choices[0].message.parsed  # Already validated!
 
-    def _extract_lm_studio(
+    def _extract_local(
         self,
         prompt: str,
         response_model: Type[BaseModel],
@@ -668,11 +481,11 @@ class LLMService:
         model: str | None = None,
         _client=None,
     ) -> BaseModel:
-        """LM Studio/local extraction using prompt-guided JSON object mode."""
+        """In-process / OpenAI-compat local extraction via prompt-guided JSON."""
         import json
 
         model = model or self.get_chat_model()
-        logger.info(f"[LM Studio] Extracting with {model} (JSON mode)")
+        logger.info("[Local] Extracting with %s (JSON mode)", model)
 
         # Keep schema compact to reduce prompt-processing overhead.
         schema_json = json.dumps(
@@ -685,7 +498,7 @@ class LLMService:
             f"{schema_json}"
         )
 
-        raw_content = self._extract_lm_studio_with_fallback(
+        raw_content = self._extract_local_with_fallback(
             model=model,
             system_prompt=system_prompt,
             prompt=prompt,
@@ -698,13 +511,13 @@ class LLMService:
         try:
             return response_model.model_validate_json(cleaned_json)
         except Exception:
-            # Some LM Studio models wrap result in {"extraction": {...}}.
+            # Some local models wrap result in {"extraction": {...}}.
             data = json.loads(cleaned_json)
             if isinstance(data, dict) and isinstance(data.get("extraction"), dict):
                 return response_model.model_validate(data["extraction"])
             raise
 
-    def _extract_lm_studio_with_fallback(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def _extract_local_with_fallback(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         model: str,
         system_prompt: str,
@@ -724,7 +537,7 @@ class LLMService:
             {"role": "user", "content": prompt},
         ]
         last_error = None
-        for response_format in self._lm_studio_response_format_candidates(
+        for response_format in self._local_response_format_candidates(
             schema=schema, schema_name=schema_name
         ):
             try:
@@ -739,13 +552,13 @@ class LLMService:
             except Exception as e:  # pylint: disable=broad-exception-caught
                 last_error = e
                 logger.warning(
-                    f"[LM Studio] response_format={response_format.get('type')} failed: {e}"
+                    f"[Local] response_format={response_format.get('type')} failed: {e}"
                 )
 
         if last_error:
             raise last_error
         raise RuntimeError(
-            "[LM Studio] Extraction failed with no response formats to try"
+            "[Local] Extraction failed with no response formats to try"
         )
 
     def _extract_huggingface(
@@ -1665,7 +1478,7 @@ class LLMService:
         """
         if settings.CHAT_MODEL:
             return settings.CHAT_MODEL
-        if self.provider in ("ollama", "lm_studio", "local"):
+        if self.provider == "local":
             return settings.LLM_MODEL
         provider_model_map = {
             "openai": settings.OPENAI_MODEL,
@@ -1685,9 +1498,9 @@ class LLMService:
         p = getattr(self, "ingestion_provider", self.provider)
         _local = settings.INGESTION_LLM_MODEL or settings.LLM_MODEL or None
         ingestion_model_map = {
-            "ollama": _local,
-            "lm_studio": _local,
             "local": _local,
+            "ollama": _local,  # deprecated alias
+            "lm_studio": _local,  # deprecated alias
             "gemini": settings.INGESTION_GEMINI_MODEL or settings.GEMINI_MODEL or None,
             "openai": settings.OPENAI_MODEL or None,
             "anthropic": settings.ANTHROPIC_MODEL or None,
@@ -1733,7 +1546,7 @@ class LLMService:
                 )
                 return response.content[0].text.strip()
 
-            # local / ollama / lm_studio / openai / huggingface
+            # local / openai / huggingface
             _kwargs = {
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
@@ -1749,7 +1562,7 @@ class LLMService:
                 raise ValueError(
                     "Local LLM returned empty content (0 output tokens). "
                     "Possible causes: context overflow, KV cache pressure, or "
-                    "model crash. Check LM Studio / Ollama server logs."
+                    "model crash. Check local GGUF / API server logs."
                 )
             return content.strip()
 
@@ -1769,8 +1582,8 @@ class LLMService:
         """
         model = self.get_ingestion_model()
         try:
-            if self.ingestion_provider in ("local", "ollama", "lm_studio"):
-                return self._extract_lm_studio(
+            if self.ingestion_provider == "local":
+                return self._extract_local(
                     prompt,
                     response_model,
                     temperature,

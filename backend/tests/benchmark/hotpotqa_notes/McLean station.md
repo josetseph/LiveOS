@@ -1,3 +1,0 @@
-# McLean station
-
-McLean (preliminary name Tysons East, Tysons–McLean) is a Washington Metro station in Fairfax County, Virginia, on the Silver Line.  The station is located in Tysons Corner, with a McLean postal address.  It began operation on July 26, 2014.

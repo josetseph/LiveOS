@@ -7,7 +7,7 @@ export function cn(...inputs: ClassValue[]) {
 
 /**
  * Resolve attachment / vault file URLs for the browser.
- * Supports /vault-files/…, attachments/…, and legacy RustFS URLs.
+ * Supports /vault-files/… and attachments/… URLs.
  */
 export function resolveFileUrl(url: string, kbId = "default"): string {
   if (!url) return url;
@@ -22,9 +22,7 @@ export function resolveFileUrl(url: string, kbId = "default"): string {
   if (cleaned.startsWith("attachments/")) {
     return `/vault-files/${encodeURIComponent(kbId)}/${cleaned}`;
   }
-  const publicBase =
-    process.env.NEXT_PUBLIC_FILES_URL ?? "/files/orb-assets";
-  return cleaned.replace(/https?:\/\/rustfs:\d+\/[^/]+/, publicBase);
+  return cleaned;
 }
 
 /** Returns true if the URL points to an image file. */
@@ -42,10 +40,6 @@ export function isAudioUrl(url: string): boolean {
   return /\.(m4a|mp3|wav|ogg|aac|flac)(\?|$)/i.test(decodeURIComponentSafe(url));
 }
 
-/** YouTube / Vimeo (and similar) URLs that can be embedded as an iframe. */
-export function isEmbeddableVideoUrl(url: string): boolean {
-  return Boolean(youtubeEmbedUrl(url) || vimeoEmbedUrl(url));
-}
 
 /** Convert a YouTube watch/share URL into an embeddable iframe src, or null. */
 export function youtubeEmbedUrl(url: string): string | null {

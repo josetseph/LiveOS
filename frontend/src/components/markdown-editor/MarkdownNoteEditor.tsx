@@ -216,26 +216,28 @@ const MarkdownNoteEditor = forwardRef<
     },
   }));
 
-  // Scan note text for entity mentions once on mount (parent remounts per note)
+  // Scan note text for entity mentions (debounced while typing; remounts per note via key=)
   useEffect(() => {
     if (!value || value.length < 10) {
       setScannedEntities([]);
       return;
     }
     let cancelled = false;
-    api
-      .scanTextEntities(value, kb)
-      .then((entities) => {
-        if (!cancelled) setScannedEntities(entities);
-      })
-      .catch(() => {
-        if (!cancelled) setScannedEntities([]);
-      });
+    const timer = window.setTimeout(() => {
+      api
+        .scanTextEntities(value, kb)
+        .then((entities) => {
+          if (!cancelled) setScannedEntities(entities);
+        })
+        .catch(() => {
+          if (!cancelled) setScannedEntities([]);
+        });
+    }, 600);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kb]);
+  }, [kb, value]);
 
   // Rebuild entity decorations when the scanned list changes
   useEffect(() => {

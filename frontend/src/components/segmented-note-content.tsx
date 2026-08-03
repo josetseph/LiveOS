@@ -218,14 +218,13 @@ function flattenLinkText(children: React.ReactNode): string {
     return "";
 }
 
-/** True when href points at an uploaded attachment served via the file proxy or RustFS. */
+/** True when href points at an uploaded vault attachment. */
 function isAttachmentHref(href: string): boolean {
     return (
         /\/files\//.test(href) ||
         /\/uploads\//.test(href) ||
         /\/vault-files\//.test(href) ||
-        /^attachments\//.test(href) ||
-        /rustfs:\d+/i.test(href)
+        /^attachments\//.test(href)
     );
 }
 
@@ -233,7 +232,8 @@ function isAttachmentHref(href: string): boolean {
 
 function makeLinkComponent(
     onFileClick: (url: string, filename: string) => void,
-    onEntityClick?: (nodeId: string, name: string) => void,
+    onEntityClick: ((nodeId: string, name: string) => void) | undefined,
+    kbId: string,
 ) {
     return function LinkComponent({
         children,
@@ -241,7 +241,7 @@ function makeLinkComponent(
         ...props
     }: React.ComponentPropsWithoutRef<"a"> & { node?: unknown }) {
         const text = flattenLinkText(children).trim();
-        const resolvedUrl = href ? resolveFileUrl(href) : "";
+        const resolvedUrl = href ? resolveFileUrl(href, kbId) : "";
         const isAttachment =
             Boolean(href) &&
             (text.startsWith("📎") || text.startsWith("🎤") || isAttachmentHref(href!));
@@ -283,6 +283,7 @@ function makeLinkComponent(
                     <span className="block my-4 not-prose">
                         <BlobMediaPlayer
                           url={resolvedUrl}
+                          kbId={kbId}
                           kind="video"
                           className="max-w-full rounded-xl border border-white/10 bg-black"
                         />
@@ -339,7 +340,10 @@ export function SegmentedNoteContent({
     }, [content, kb, onEntityClick]);
 
     const segments = useMemo(() => parseSegments(content || "*Empty note*"), [content]);
-    const LinkComponent = makeLinkComponent(onFileClick, onEntityClick);
+    const LinkComponent = useMemo(
+        () => makeLinkComponent(onFileClick, onEntityClick, kb),
+        [onFileClick, onEntityClick, kb],
+    );
 
     return (
         <div className={proseClassName}>

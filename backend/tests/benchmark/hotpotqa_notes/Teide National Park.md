@@ -1,3 +1,0 @@
-# Teide National Park
-
-Teide National Park (Spanish: "Parque nacional del Teide" , ] ) is a national park located in Tenerife (Canary Islands, Spain).

@@ -1,3 +1,0 @@
-# Lev Yilmaz
-
-Levni Yilmaz (born 1973) is a San Francisco based independent film maker, artist and publisher, best known for his “Tales of Mere Existence” animated comic series.

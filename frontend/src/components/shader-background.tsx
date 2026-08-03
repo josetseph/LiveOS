@@ -31,9 +31,9 @@ class ParticleImpl implements Particle {
     this.size = Math.random() * 5 + 3;
     this.speedX = (Math.random() - 0.5) * 0.5;
     this.speedY = (Math.random() - 0.5) * 0.5;
-    this.color = `rgba(${Math.floor(Math.random() * 100) + 100}, ${Math.floor(Math.random() * 100) + 150
-      }, ${Math.floor(Math.random() * 55) + 200
-      }, ${Math.random() * 0.5 + 0.2})`;
+    this.color = `rgba(${Math.floor(Math.random() * 100) + 100}, ${
+      Math.floor(Math.random() * 100) + 150
+    }, ${Math.floor(Math.random() * 55) + 200}, ${Math.random() * 0.5 + 0.2})`;
   }
 
   update() {
@@ -76,8 +76,11 @@ export function ShaderBackground() {
       particles.push(new ParticleImpl(canvasWidth, canvasHeight));
     }
 
+    let rafId = 0;
+    let alive = true;
+
     function animate() {
-      if (!ctx || !canvas) return;
+      if (!alive || !ctx || !canvas) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       for (const particle of particles) {
@@ -85,10 +88,10 @@ export function ShaderBackground() {
         particle.draw(ctx);
       }
 
-      requestAnimationFrame(animate);
+      rafId = requestAnimationFrame(animate);
     }
 
-    animate();
+    rafId = requestAnimationFrame(animate);
 
     const handleResize = () => {
       if (!canvas) return;
@@ -99,6 +102,8 @@ export function ShaderBackground() {
     window.addEventListener("resize", handleResize);
 
     return () => {
+      alive = false;
+      cancelAnimationFrame(rafId);
       window.removeEventListener("resize", handleResize);
     };
   }, []);

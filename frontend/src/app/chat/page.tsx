@@ -247,7 +247,7 @@ function AssistantMessageBody({
                       key={i}
                       onClick={() => {
                         const noteId = linkMatch[2];
-                        api.getNote(noteId).then((n) =>
+                        api.getNote(noteId, kb).then((n) =>
                           (window as unknown as { __chatSetPreview?: (n: NotePreview) => void }).__chatSetPreview?.({
                             id: n.id,
                             title: n.title || "Untitled",
@@ -277,7 +277,7 @@ function AssistantMessageBody({
 }
 
 export default function ChatPage() {
-  const { currentKB, currentKBName } = useKB();
+  const { currentKB, currentKBName, isHydrated } = useKB();
   const {
     messages,
     conversations,
@@ -320,8 +320,9 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
+    if (!isHydrated) return;
     void initializeForKb(currentKB);
-  }, [currentKB, initializeForKb]);
+  }, [currentKB, initializeForKb, isHydrated]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -340,7 +341,7 @@ export default function ChatPage() {
 
   const handleNoteReference = async (noteId: string) => {
     try {
-      const fullNote = await api.getNote(noteId);
+      const fullNote = await api.getNote(noteId, currentKB);
       setPreviewNote({
         id: fullNote.id,
         title: fullNote.title || "Untitled",

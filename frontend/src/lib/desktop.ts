@@ -8,9 +8,19 @@ export type OrbDesktopBridge = {
   }) => Promise<string | null>;
   /** Direct FastAPI base, e.g. http://127.0.0.1:17401/api/v1 */
   getApiBaseUrl?: () => Promise<string>;
-  /** Reveal a local file in Finder / Explorer */
+  /** Reveal a local file in Finder / Explorer (vault / data / models only) */
   revealInFolder?: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Splash boot status (shell pages); unused by Next UI */
   onStatus?: (cb: (message: string) => void) => void;
+  getDefaultPaths?: () => Promise<{ data_dir: string; models_dir: string }>;
+  getAppInfo?: () => Promise<{ version: string; packaged: boolean }>;
+  saveWizard?: (payload: {
+    data_dir: string;
+    models_dir: string;
+    default_vault_path?: string;
+    ai_setup_mode?: string;
+  }) => Promise<{ ok: boolean; pathsFile: string }>;
+  wizardDone?: () => void;
 };
 
 export function getDesktopBridge(): OrbDesktopBridge | null {

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -59,7 +60,7 @@ class Settings(BaseSettings):
     # ── LLM Provider (local = in-process GGUF via llama-cpp-python)
     LLM_PROVIDER: str = "local"
     LLM_FALLBACK_PROVIDER: str | None = None
-    # Legacy OpenAI-compat URL fields — unused for in-process local; kept for cloud HTTP
+    # OpenAI-compat HTTP fields — unused for in-process local; used by cloud HTTP
     LLM_BASE_URL: str = "http://127.0.0.1:8080"
     LLM_API_KEY: str = "local"
     LLM_MODEL: str = "local-chat"
@@ -68,8 +69,6 @@ class Settings(BaseSettings):
     CHAT_MODEL: str | None = None
     INGESTION_MODEL: str | None = None
     INGESTION_PROVIDER: str | None = None
-    INGESTION_BASE_URL: str | None = None
-    INGESTION_API_KEY: str | None = None
     INGESTION_LLM_MODEL: str | None = "local-chat"
     INGESTION_GEMINI_MODEL: str | None = None
 
@@ -96,8 +95,6 @@ class Settings(BaseSettings):
     MAX_LOOP_ITERATIONS: int = 3
     CHAT_HISTORY_MAX_MESSAGES: int = 24
     BENCHMARK_MODE: bool = False
-    FALLBACK_MODE: str = "none"
-    TAVILY_API_KEY: str | None = None
 
     QDRANT_HOST: str = "127.0.0.1"
     QDRANT_PORT: int = 6333
@@ -106,16 +103,15 @@ class Settings(BaseSettings):
     QDRANT_COLLECTION_NODE_RELATIONSHIPS: str = "node_relationships"
     QDRANT_COLLECTION_NODE_ISOLATED_CONTEXTS: str = "node_isolated_contexts"
 
-    TYPESENSE_HOST: str = "127.0.0.1"  # deprecated alias → MEILI_HOST
-    TYPESENSE_PORT: int = 7700  # deprecated; Meilisearch default port
-    TYPESENSE_API_KEY: str = "orb-dev-key"
-    TYPESENSE_COLLECTION_NAME: str = "orb_nodes"
-
-    # Meilisearch (replaces Typesense — has native Windows binary)
+    # Meilisearch (keyword / BM25). TYPESENSE_* kept as env aliases for older installs.
     MEILI_HOST: str = "127.0.0.1"
     MEILI_PORT: int = 7700
     MEILI_MASTER_KEY: str = "orb-dev-key"
     MEILI_INDEX_NAME: str = "orb_nodes"
+    TYPESENSE_HOST: str = "127.0.0.1"
+    TYPESENSE_PORT: int = 7700
+    TYPESENSE_API_KEY: str = "orb-dev-key"
+    TYPESENSE_COLLECTION_NAME: str = "orb_nodes"
 
     MODEL_FLORENCE_HF: str = "microsoft/Florence-2-large"
     MODEL_FLORENCE_LOCAL: str = "florence-2-large"
@@ -123,8 +119,7 @@ class Settings(BaseSettings):
     MODEL_WHISPER_LOCAL: str = "whisper-large-v3-turbo"
     MODEL_MARLIN_HF: str = "lunahr/Marlin-2B-ungated"
     MODEL_MARLIN_LOCAL: str = "marlin-2b"
-    # Multimodal (Florence / Whisper / Marlin) — loaded in-process, not via HTTP.
-    # Optional until first multimedia ingest; Setup / supervisor can pip-install these.
+    # Multimodal — loaded in-process (optional until first multimedia ingest).
     FLORENCE_MAX_IMAGE_PIXELS: int = 1500000
     MODEL_RERANKER_LOCAL: str = "qwen3-reranker-0.6b"
 
@@ -147,23 +142,32 @@ class Settings(BaseSettings):
     HUGGINGFACE_API_KEY: str | None = None
     HUGGINGFACE_MODEL: str | None = None
 
-    BUCKET_NAME: str = "orb-assets"
-    BUCKET_ACCESS_KEY_ID: str = "rustfsadmin"
-    BUCKET_SECRET_ACCESS_KEY: str = "rustfsadmin"
-    R2_ENDPOINT_URL: str = "http://127.0.0.1:9000"
-    FILES_URL: str = "/vault-files"
-    BUCKET_TOKEN: str | None = None
-    STORAGE_BACKEND: str = "local"
-
+    # Contributor Postgres only — leave unset for Orb desktop (SQLite).
     DATABASE_TRANSACTION_POOLER_URL: str | None = None
     DATABASE_SESSION_POOLER_URL: str | None = None
     DATABASE_DIRECT_CONNECTION_URL: str | None = None
 
-    LOG_LEVEL: str = "DEBUG"
+    LOG_LEVEL: str = "INFO"
     INGESTION_AGENT_CONCURRENCY: int = 2
     INGESTION_PIPELINE_CONCURRENCY: int = 1
     MULTIMEDIA_CONCURRENCY: int = 1
     USE_DYNAMIC_EMBEDDING_INSTRUCTION: bool = True
+
+    @model_validator(mode="after")
+    def _apply_typesense_aliases(self) -> "Settings":
+        """Copy legacy TYPESENSE_* onto MEILI_* when Meili still has defaults."""
+        if self.MEILI_HOST == "127.0.0.1" and self.TYPESENSE_HOST != "127.0.0.1":
+            self.MEILI_HOST = self.TYPESENSE_HOST
+        if self.MEILI_PORT == 7700 and self.TYPESENSE_PORT != 7700:
+            self.MEILI_PORT = self.TYPESENSE_PORT
+        if self.MEILI_MASTER_KEY == "orb-dev-key" and self.TYPESENSE_API_KEY != "orb-dev-key":
+            self.MEILI_MASTER_KEY = self.TYPESENSE_API_KEY
+        if (
+            self.MEILI_INDEX_NAME == "orb_nodes"
+            and self.TYPESENSE_COLLECTION_NAME != "orb_nodes"
+        ):
+            self.MEILI_INDEX_NAME = self.TYPESENSE_COLLECTION_NAME
+        return self
 
 
 settings = Settings()

@@ -8,7 +8,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --dev",
+    "dev": "electron .",
     "prefetch-binaries": "node scripts/prefetch-binaries.js",
     "prefetch-firefly": "node scripts/prefetch-firefly.js",
     "build-frontend": "node scripts/build-frontend.js",

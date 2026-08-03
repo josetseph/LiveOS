@@ -371,17 +371,6 @@ def ensure_gguf(model_id: str, on_progress=None) -> Path:
     return dest
 
 
-def selected_ids() -> dict[str, str]:
-    """Return selected model catalog ids from manifest (or empty)."""
-    man = load_manifest()
-    sel = man.get("selection") or {}
-    return {
-        "chat": sel.get("chat_id") or "",
-        "embed": sel.get("embed_id") or "",
-        "reranker": sel.get("reranker_id") or "",
-    }
-
-
 def save_selection(
     chat_id: str,
     embed_id: str,
@@ -1270,9 +1259,6 @@ class LocalLlamaRuntime:
 
 
 local_llama_runtime = LocalLlamaRuntime()
-
-# Back-compat alias so any leftover imports do not hard-crash at import time
-llama_server_manager = local_llama_runtime
 
 
 _RERANK_SYSTEM = (

@@ -1,3 +1,0 @@
-# Did You Ever See a Lassie?
-
-"Did You Ever See a Lassie?"  is a folk song, nursery rhyme, and singing game.  It has a Roud Folk Song Index number of 5040.

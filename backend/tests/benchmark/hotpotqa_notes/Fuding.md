@@ -1,3 +1,0 @@
-# Fuding
-
-   () is a county-level city in northeastern Ningde prefecture level city, on Fujian's border with Zhejiang province.
