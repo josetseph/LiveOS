@@ -353,7 +353,17 @@ export function useNoteRestoreEffects({
       return;
     }
 
+    // Only cold-restore when nothing is selected yet. Visibility / bfcache
+    // handlers below refresh an already-open note; calling refresh on every
+    // effect run used to amplify into a GET storm when callbacks were unstable.
     const restoreSelection = () => {
+      if (selectedNoteRef.current) return;
+      const noteId = sessionStorage.getItem(lastNoteStorageKey(currentKB));
+      if (!noteId) return;
+      void openNoteById(noteId);
+    };
+
+    const refreshOpenNote = () => {
       const noteId =
         selectedNoteRef.current?.id ??
         sessionStorage.getItem(lastNoteStorageKey(currentKB));
@@ -368,13 +378,13 @@ export function useNoteRestoreEffects({
     const handlePageShow = (event: PageTransitionEvent) => {
       if (event.persisted) {
         void fetchNotes(searchQuery, processedFilter);
-        restoreSelection();
+        refreshOpenNote();
       }
     };
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        restoreSelection();
+        refreshOpenNote();
       }
     };
 

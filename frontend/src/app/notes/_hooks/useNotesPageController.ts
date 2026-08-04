@@ -42,6 +42,8 @@ export function useNotesPageController() {
   }, [currentKB]);
 
   // Bridge circular hook deps (list ↔ selection ↔ vault ↔ ingest).
+  // Stable wrappers are required — inline lambdas recreate every render and
+  // would retrigger restore/refresh effects into an infinite GET /notes/{id} loop.
   const setNotesBridge = useRef<Dispatch<SetStateAction<Note[]>>>(() => {});
   const syncBridge = useRef<(data: Note[]) => void>(() => {});
   const clearBridge = useRef<() => void>(() => {});
@@ -51,9 +53,26 @@ export function useNotesPageController() {
     () => {},
   );
 
+  const setNotesStable = useCallback<Dispatch<SetStateAction<Note[]>>>(
+    (u) => setNotesBridge.current(u),
+    [],
+  );
+  const syncSelectedNoteFromListStable = useCallback((d: Note[]) => {
+    syncBridge.current(d);
+  }, []);
+  const setIngestingNoteIdsStable = useCallback<
+    Dispatch<SetStateAction<Set<string>>>
+  >((u) => setIngestingBridge.current(u), []);
+  const onVaultListingStable = useCallback((l: VaultListing) => {
+    onVaultListingBridge.current(l);
+  }, []);
+  const clearSelectionForKBSwitchStable = useCallback(() => {
+    clearBridge.current();
+  }, []);
+
   const selection = useNoteSelection({
     currentKB,
-    setNotes: (u) => setNotesBridge.current(u),
+    setNotes: setNotesStable,
   });
   syncBridge.current = selection.syncSelectedNoteFromList;
   clearBridge.current = selection.clearSelectionForKBSwitch;
@@ -61,10 +80,10 @@ export function useNotesPageController() {
   const list = useNotesList({
     currentKB,
     isHydrated,
-    syncSelectedNoteFromList: (d) => syncBridge.current(d),
-    setIngestingNoteIds: (u) => setIngestingBridge.current(u),
-    onVaultListing: (l) => onVaultListingBridge.current(l),
-    clearSelectionForKBSwitch: () => clearBridge.current(),
+    syncSelectedNoteFromList: syncSelectedNoteFromListStable,
+    setIngestingNoteIds: setIngestingNoteIdsStable,
+    onVaultListing: onVaultListingStable,
+    clearSelectionForKBSwitch: clearSelectionForKBSwitchStable,
   });
   setNotesBridge.current = list.setNotes;
 

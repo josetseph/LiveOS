@@ -87,17 +87,66 @@ export function useNoteSelection({ currentKB, setNotes }: UseNoteSelectionArgs) 
       try {
         const fresh = await api.getNote(noteId, currentKB);
         if (!fresh) return;
+
+        const prev = selectedNoteRef.current;
+        // Always select when nothing is open; otherwise only patch the matching note.
+        if (prev && prev.id !== fresh.id) return;
+
+        const hasUnsavedEdits =
+          !!prev &&
+          (prev.content !== contentBeforeEditRef.current ||
+            (prev.title || "") !== titleBeforeEditRef.current);
+
+        if (hasUnsavedEdits) {
+          // Keep local body/title; only re-render if server metadata moved.
+          if (
+            prev &&
+            prev.processed === fresh.processed &&
+            prev.failed === fresh.failed &&
+            (prev.processing_stage || "") === (fresh.processing_stage || "") &&
+            (prev.processing_model || "") === (fresh.processing_model || "") &&
+            (prev.rel_path || "") === (fresh.rel_path || "") &&
+            prev.updated_at === fresh.updated_at
+          ) {
+            return;
+          }
+          const next = {
+            ...fresh,
+            content: prev!.content,
+            title: prev!.title,
+          };
+          setNotes((notes) =>
+            notes.some((n) => n.id === next.id)
+              ? notes.map((n) => (n.id === next.id ? next : n))
+              : notes,
+          );
+          setSelectedNote(next);
+          return;
+        }
+
+        // No local edits — skip setState when the server copy is unchanged.
+        if (
+          prev &&
+          prev.content === fresh.content &&
+          (prev.title || "") === (fresh.title || "") &&
+          prev.processed === fresh.processed &&
+          prev.failed === fresh.failed &&
+          (prev.processing_stage || "") === (fresh.processing_stage || "") &&
+          (prev.processing_model || "") === (fresh.processing_model || "") &&
+          (prev.rel_path || "") === (fresh.rel_path || "") &&
+          prev.updated_at === fresh.updated_at
+        ) {
+          return;
+        }
+
         contentBeforeEditRef.current = fresh.content;
         titleBeforeEditRef.current = fresh.title || "";
-        // Always select when nothing is open; otherwise only patch the matching note.
-        setNotes((prev) =>
-          prev.some((n) => n.id === fresh.id)
-            ? prev.map((n) => (n.id === fresh.id ? fresh : n))
-            : prev,
+        setNotes((notes) =>
+          notes.some((n) => n.id === fresh.id)
+            ? notes.map((n) => (n.id === fresh.id ? fresh : n))
+            : notes,
         );
-        setSelectedNote((prev) =>
-          !prev || prev.id === fresh.id ? fresh : prev,
-        );
+        setSelectedNote(fresh);
       } catch (error) {
         console.error("Error refreshing note:", error);
       }
@@ -184,7 +233,8 @@ export function useNoteSelectHandler({
       // Save previous note if it has changes
       if (
         selectedNote &&
-        contentBeforeEditRef.current !== selectedNote.content
+        (contentBeforeEditRef.current !== selectedNote.content ||
+          titleBeforeEditRef.current !== (selectedNote.title || ""))
       ) {
         await handleSaveNote(selectedNote);
       }
