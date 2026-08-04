@@ -125,21 +125,91 @@ function downloadFile(url, dest, onProgress) {
   });
 }
 
-function extractArchive(archivePath, destDir, archiveType) {
-  fs.mkdirSync(destDir, { recursive: true });
-  if (archiveType === "zip") {
-    const python = process.platform === "win32" ? "python" : "python3";
-    // Pass paths via argv (not string-interpolated into -c) to avoid quote injection.
+function psSingleQuoted(value) {
+  // PowerShell single-quoted string: escape ' by doubling.
+  return String(value).replace(/'/g, "''");
+}
+
+function extractZipWindows(archivePath, destDir) {
+  // Prefer Expand-Archive — available on all supported Windows builds and does
+  // not require a system Python on PATH (prefetch-firefly used to fail here).
+  try {
     execFileSync(
-      python,
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        `Expand-Archive -LiteralPath '${psSingleQuoted(archivePath)}' -DestinationPath '${psSingleQuoted(destDir)}' -Force`,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+    );
+    return;
+  } catch (psErr) {
+    const psDetail = [psErr.stderr, psErr.stdout, psErr.message]
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    // Windows 10+ tar (bsdtar) can extract zip as a fallback.
+    try {
+      execFileSync("tar", ["-xf", archivePath, "-C", destDir], {
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf8",
+      });
+      return;
+    } catch (tarErr) {
+      const tarDetail = [tarErr.stderr, tarErr.stdout, tarErr.message]
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+      throw new Error(
+        `Failed to extract zip on Windows (${archivePath}).\n` +
+          `PowerShell: ${psDetail || "unknown error"}\n` +
+          `tar: ${tarDetail || "unknown error"}`,
+      );
+    }
+  }
+}
+
+function extractZipUnix(archivePath, destDir) {
+  try {
+    execFileSync("unzip", ["-o", "-q", archivePath, "-d", destDir], {
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+    });
+    return;
+  } catch (_) {
+    /* fall through to python3 */
+  }
+  try {
+    execFileSync(
+      "python3",
       [
         "-c",
         "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])",
         archivePath,
         destDir,
       ],
-      { stdio: "ignore" },
+      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
     );
+  } catch (err) {
+    const detail = [err.stderr, err.stdout, err.message].filter(Boolean).join("\n").trim();
+    throw new Error(
+      `Failed to extract zip (${archivePath}). Tried unzip and python3.\n${detail || "unknown error"}`,
+    );
+  }
+}
+
+function extractArchive(archivePath, destDir, archiveType) {
+  fs.mkdirSync(destDir, { recursive: true });
+  if (archiveType === "zip") {
+    if (process.platform === "win32") {
+      extractZipWindows(archivePath, destDir);
+    } else {
+      extractZipUnix(archivePath, destDir);
+    }
     return;
   }
   execFileSync("tar", ["-xf", archivePath, "-C", destDir], { stdio: "ignore" });
