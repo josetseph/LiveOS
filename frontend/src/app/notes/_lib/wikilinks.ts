@@ -21,12 +21,16 @@ export function noteVaultPath(note: Note): string {
   return (note.title || "").trim();
 }
 
-/** Basename / title shown in the editor and suggestion list. */
+/** Name shown in the editor and suggestion list.
+ *
+ * Prefers the display title: vault filenames can lag behind a retitle
+ * (e.g. still ``Untitled 3.md``), and the title is what the user knows. */
 export function noteDisplayName(note: Note): string {
+  const title = (note.title || "").trim();
+  if (title) return title;
   const path = noteVaultPath(note);
   if (!path) return "Untitled";
-  const base = path.split("/").pop() || path;
-  return base || note.title || "Untitled";
+  return path.split("/").pop() || path;
 }
 
 /**
@@ -42,10 +46,14 @@ export function wikilinkInsertTarget(note: Note, notes: Note[]): string {
   for (const other of notes) {
     if (normalizeLink(noteDisplayName(other)) === key) {
       collisions += 1;
-      if (collisions > 1) return path;
+      if (collisions > 1) break;
     }
   }
-  return base;
+  if (collisions <= 1) return base;
+  // Names collide, so link by exact vault path. When the filename still lags
+  // behind the title (pre-rename vaults), alias so the editor shows the title.
+  const stem = path.split("/").pop() || path;
+  return normalizeLink(stem) === key ? path : `${path}|${base}`;
 }
 
 export type WikilinkSuggestion = {

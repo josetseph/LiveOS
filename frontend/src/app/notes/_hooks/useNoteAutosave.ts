@@ -71,6 +71,11 @@ export function useNoteAutosave({
           // reset the controlled editor to the saved snapshot and silently
           // wipe those keystrokes — skip the patch; the moved baseline makes
           // the autosave effect re-save the newer edits.
+          if ((nextNote.rel_path ?? null) !== (live.rel_path ?? null)) {
+            // Retitling renames the vault file server-side; carry the fresh
+            // path over without touching the newer content/title.
+            patchLocalNote({ ...live, rel_path: nextNote.rel_path });
+          }
           return;
         }
         patchLocalNote(nextNote);

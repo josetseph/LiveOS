@@ -12,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.note import Note
 from app.services.kb_registry import KBContext
 from app.services.note_files import note_body, persist_note_body
-from app.services.vault import mark_self_write, title_from_filename
+from app.services.vault import mark_self_write, sanitize_title, title_from_filename
+from app.services.wikilinks import WikilinkResolver, _normalize_link
 
 
 def _norm(rel: str) -> str:
@@ -89,24 +90,36 @@ def rewrite_refs_in_text(content: str, old_rel: str, new_rel: str, kb_id: str) -
     return text
 
 
-async def rewrite_refs_across_notes(
-    db: AsyncSession,
-    kb: KBContext,
-    old_rel: str,
-    new_rel: str,
-) -> int:
-    """Update every note body that referenced ``old_rel``."""
-    notes = list(
-        (await db.execute(select(Note).where(Note.kb_id == kb.kb_id))).scalars().all()
-    )
-    changed = 0
-    for note in notes:
-        body = note_body(note, kb)
-        updated = rewrite_refs_in_text(body, old_rel, new_rel, kb.kb_id)
-        if updated != body:
-            persist_note_body(note, kb, updated)
-            changed += 1
-    return changed
+_WIKILINK_TARGET_RE = re.compile(r"\[\[([^\]|#]+)((?:#[^\]|]*)?(?:\|[^\]]*)?)\]\]")
+
+
+def rewrite_wikilinks_in_text(
+    content: str,
+    resolver: WikilinkResolver,
+    source_rel_path: str | None,
+    moved_note_id: str,
+    bare_target: str,
+    path_target: str,
+) -> str:
+    """Repoint ``[[links]]`` that resolved to the moved note at its new name.
+
+    ``resolver`` must be built from the pre-move note set so old targets still
+    resolve. Bare targets are rewritten to ``bare_target``, path-style targets
+    to ``path_target``; headings and aliases are preserved.
+    """
+    if not content or "[[" not in content:
+        return content
+
+    def _sub(match: re.Match[str]) -> str:
+        target = match.group(1).strip()
+        if not target or resolver.resolve(target, source_rel_path) != moved_note_id:
+            return match.group(0)
+        new_target = path_target if "/" in target else bare_target
+        if new_target == target:
+            return match.group(0)
+        return f"[[{new_target}{match.group(2) or ''}]]"
+
+    return _WIKILINK_TARGET_RE.sub(_sub, content)
 
 
 def strip_refs_in_text(content: str, rel: str, kb_id: str) -> str:
@@ -223,22 +236,56 @@ async def move_vault_file(
     mark_self_write(vault, dst_rel)
     shutil.move(str(src), str(dst))
 
+    all_notes = list(
+        (await db.execute(select(Note).where(Note.kb_id == kb.kb_id))).scalars().all()
+    )
+
     # If this is a note markdown file, update its row
     note_row = None
+    resolver = None
     if src_rel.lower().endswith(".md"):
-        note_row = (
-            await db.execute(
-                select(Note).where(Note.kb_id == kb.kb_id, Note.rel_path == src_rel)
-            )
-        ).scalar_one_or_none()
+        note_row = next(
+            (n for n in all_notes if _norm(n.rel_path or "") == src_rel), None
+        )
         if note_row:
+            # Snapshot resolution before the path changes so wikilinks that
+            # pointed at the old name can follow the note to its new one.
+            resolver = WikilinkResolver(all_notes)
             note_row.rel_path = dst_rel
             # Keep the existing display title — never overwrite from filename
             # (users often rename the title without renaming the .md file).
             if not (note_row.title or "").strip():
                 note_row.title = title_from_filename(dst_rel)
 
-    rewritten = await rewrite_refs_across_notes(db, kb, src_rel, dst_rel)
+    bare_target = ""
+    path_target = ""
+    if note_row and resolver:
+        path_target = dst_rel[:-3] if dst_rel.lower().endswith(".md") else dst_rel
+        new_stem = Path(dst_rel).stem
+        stem_key = _normalize_link(new_stem)
+        # Bare-name links stay bare only while the new name is unambiguous.
+        ambiguous = any(
+            n.id != note_row.id
+            and stem_key
+            in {
+                _normalize_link(n.title),
+                _normalize_link(n.rel_path).rsplit("/", 1)[-1],
+            }
+            for n in all_notes
+        )
+        bare_target = path_target if ambiguous else new_stem
+
+    rewritten = 0
+    for n in all_notes:
+        body = note_body(n, kb)
+        updated = rewrite_refs_in_text(body, src_rel, dst_rel, kb.kb_id)
+        if note_row and resolver:
+            updated = rewrite_wikilinks_in_text(
+                updated, resolver, n.rel_path, note_row.id, bare_target, path_target
+            )
+        if updated != body:
+            persist_note_body(n, kb, updated)
+            rewritten += 1
     await db.commit()
     if note_row:
         await db.refresh(note_row)
@@ -249,6 +296,32 @@ async def move_vault_file(
         "note_id": note_row.id if note_row else None,
         "links_rewritten": rewritten,
     }
+
+
+async def rename_note_file_for_title(
+    db: AsyncSession,
+    kb: KBContext,
+    note: Note,
+    title: str | None,
+) -> bool:
+    """Keep the vault filename in sync with the note title (Obsidian parity).
+
+    Renames ``note``'s .md file to the sanitized title in the same folder and
+    rewrites markdown refs + wikilinks across the vault. No-op when the stem
+    already matches (case-insensitively — a case-only rename on APFS would trip
+    the uniquifier into appending `` 2``; the display title keeps the casing).
+    """
+    current = _norm(note.rel_path or "")
+    new_title = (title or "").strip()
+    if not current or not new_title or not current.lower().endswith(".md"):
+        return False
+    desired_stem = sanitize_title(new_title)
+    if desired_stem.lower() == Path(current).stem.lower():
+        return False
+    folder = current.rsplit("/", 1)[0] if "/" in current else ""
+    desired_rel = f"{folder}/{desired_stem}.md" if folder else f"{desired_stem}.md"
+    await move_vault_file(db, kb, current, desired_rel)
+    return True
 
 
 async def move_note_to_folder(

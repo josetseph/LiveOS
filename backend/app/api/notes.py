@@ -378,6 +378,13 @@ async def update_note(
         title=(note_input.title or "").strip() or None,
     )
 
+    # Retitling renames the vault .md to match (Obsidian-style), rewriting
+    # markdown refs and wikilinks that pointed at the old filename.
+    if note_input.title is not None:
+        from app.services.vault_ops import rename_note_file_for_title
+
+        await rename_note_file_for_title(db, kb, existing_note, note_input.title)
+
     if note_input.created_at:
         existing_note.created_at = _parse_date_str(note_input.created_at)
 
