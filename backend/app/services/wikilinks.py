@@ -53,9 +53,9 @@ class _Candidate:
 class WikilinkResolver:
     """Resolve ``[[targets]]`` to note ids, disambiguating duplicate names by folder.
 
-    Notes in different folders may share a name, so a bare ``[[photosynthesis]]``
-    resolves against the linking note's own folder first (Obsidian's
-    shortest-path behaviour) instead of whichever duplicate the DB returned first.
+    Exact vault paths win first (so ``[[photosynthesis]]`` and
+    ``[[meow/photosynthesis]]`` stay distinct). Bare names with no exact path
+    match fall back to same-folder, then nearest-folder proximity.
 
     Build once per note set, then call :meth:`resolve` for every link.
     """
@@ -86,11 +86,12 @@ class WikilinkResolver:
             return None
         source_dir = _folder_of(_normalize_link(source_rel_path))
 
-        # An explicit path is an exact request; a bare name is not, so it must not
-        # match a root-level note ahead of a same-named note beside the source.
+        # Exact vault path (incl. root-level basename) always wins so
+        # ``[[photosynthesis]]`` and ``[[meow/photosynthesis]]`` stay distinct.
+        if key in self._by_path:
+            return self._by_path[key]
+
         if "/" in key:
-            if key in self._by_path:
-                return self._by_path[key]
             suffix = f"/{key}"
             partial = [c for c in self._candidates if c.rel_path.endswith(suffix)]
             best = self._best(partial, source_dir)

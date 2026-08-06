@@ -37,13 +37,23 @@ import {
 } from "./markdownCommands";
 import {
   createEntityDecorations,
-  entityAutocomplete,
   entityClickHandler,
+  entityCompletionSource,
   type EntitySuggestion,
 } from "./entityExtension";
-import { createWikilinkDecorations, wikilinkClickHandler, wikilinkHoverHandler } from "./wikilinkExtension";
+import {
+  createWikilinkDecorations,
+  wikilinkClickHandler,
+  wikilinkCompletionSource,
+  wikilinkHoverHandler,
+} from "./wikilinkExtension";
 import { createMediaEmbedDecorations } from "./mediaEmbedExtension";
 import { MarkdownToolbar } from "./MarkdownToolbar";
+import type { Note } from "@/lib/types";
+import {
+  autocompletion,
+  completionKeymap,
+} from "@codemirror/autocomplete";
 
 export interface MarkdownNoteEditorProps {
   value: string;
@@ -57,6 +67,8 @@ export interface MarkdownNoteEditorProps {
   onDropFiles?: (files: FileList | File[]) => void | Promise<void>;
   attachDisabled?: boolean;
   kb?: string;
+  /** Vault notes for `[[` wikilink autocomplete. */
+  notes?: Note[];
   placeholder?: string;
   className?: string;
   /** Show formatting toolbar above the editor (default true). */
@@ -189,6 +201,7 @@ const MarkdownNoteEditor = forwardRef<
     onDropFiles,
     attachDisabled,
     kb = "default",
+    notes = [],
     placeholder = "Start writing...",
     className,
     showToolbar = true,
@@ -207,6 +220,9 @@ const MarkdownNoteEditor = forwardRef<
   const attachDisabledRef = useRef(attachDisabled);
   attachDisabledRef.current = attachDisabled;
   const dragDepthRef = useRef(0);
+  // Keep autocomplete in sync without rebuilding the whole extension set.
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
 
   const hasOsFileDrag = useCallback((e: DragEvent | React.DragEvent) => {
     const types = e.dataTransfer?.types;
@@ -291,7 +307,16 @@ const MarkdownNoteEditor = forwardRef<
       entityDecorationsCompartment.of(
         createEntityDecorations(scannedEntities),
       ),
-      ...entityAutocomplete(kb),
+      autocompletion({
+        override: [
+          wikilinkCompletionSource(() => notesRef.current),
+          entityCompletionSource(kb),
+        ],
+        closeOnBlur: true,
+        activateOnTyping: true,
+        maxRenderedOptions: 12,
+      }),
+      Prec.highest(keymap.of(completionKeymap)),
       entityClickHandler(onEntityClick),
       wikilinkClickHandler(onWikilinkClick),
       wikilinkHoverHandler(onWikilinkHover, onWikilinkLeave),

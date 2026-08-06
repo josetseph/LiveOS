@@ -17,13 +17,13 @@ export function WikilinkHoverCard({ preview }: WikilinkHoverCardProps) {
           {preview.title}
         </p>
         {preview.missing && (
-          <p className="text-[11px] text-red-300/80">Note not found</p>
+          <p className="text-[11px] text-teal-300/80">Click to create</p>
         )}
       </div>
       <div className="max-h-44 overflow-hidden px-3 py-2">
         <p className="whitespace-pre-wrap text-xs leading-relaxed text-white/70 line-clamp-[10]">
           {preview.missing
-            ? "Create this note or check the [[wikilink]] target."
+            ? "This note does not exist yet. Click the link to create it."
             : preview.content.slice(0, 600) || "Empty note"}
         </p>
       </div>

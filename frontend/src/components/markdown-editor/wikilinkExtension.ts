@@ -6,9 +6,100 @@ import {
   EditorView,
   WidgetType,
 } from "@codemirror/view";
+import {
+  type Completion,
+  type CompletionContext,
+  type CompletionResult,
+} from "@codemirror/autocomplete";
+import type { Note } from "@/lib/types";
+import {
+  suggestWikilinkNotes,
+  type WikilinkSuggestion,
+} from "@/app/notes/_lib/wikilinks";
 import { visibleLineChunks } from "./visibleLineChunks";
 
 const WIKILINK_RE = /\[\[([^\]|#]+)(?:\|([^\]]+))?\]\]/g;
+
+/** True when the cursor is inside an unclosed `[[wikilink` (not the alias). */
+export function wikilinkQueryAt(
+  lineText: string,
+  posInLine: number,
+): { fromInLine: number; query: string } | null {
+  const before = lineText.slice(0, posInLine);
+  const open = before.lastIndexOf("[[");
+  if (open === -1) return null;
+  const inner = before.slice(open + 2);
+  if (inner.includes("]]") || inner.includes("|")) return null;
+  return { fromInLine: open + 2, query: inner };
+}
+
+function applyWikilinkInsert(insert: string): Completion["apply"] {
+  return (view, _completion, from, to) => {
+    const after = view.state.doc.sliceString(
+      to,
+      Math.min(to + 2, view.state.doc.length),
+    );
+    const needsClose = after !== "]]";
+    const text = needsClose ? `${insert}]]` : insert;
+    view.dispatch({
+      changes: { from, to, insert: text },
+      // After the target text; skip past auto-inserted `]]`.
+      selection: { anchor: from + insert.length + (needsClose ? 2 : 0) },
+    });
+  };
+}
+
+function suggestionToCompletion(s: WikilinkSuggestion): Completion {
+  return {
+    label: s.label,
+    detail: s.detail || undefined,
+    type: "text",
+    boost: s.detail ? -1 : 0,
+    apply: applyWikilinkInsert(s.insert),
+  };
+}
+
+/**
+ * Completions for `[[...` — suggestions show the note name with a folder/path
+ * detail when names collide, and insert a target that resolves to that note.
+ */
+export function wikilinkCompletionSource(getNotes: () => Note[]) {
+  return (context: CompletionContext): CompletionResult | null => {
+    const line = context.state.doc.lineAt(context.pos);
+    const local = wikilinkQueryAt(line.text, context.pos - line.from);
+    if (!local) return null;
+
+    const from = line.from + local.fromInLine;
+    const query = local.query;
+    // Activate as soon as `[[` is typed (empty query still lists notes).
+    if (!context.explicit && query.includes("\n")) return null;
+
+    const notes = getNotes();
+    const matches = suggestWikilinkNotes(notes, query, 12);
+    const options: Completion[] = matches.map(suggestionToCompletion);
+
+    const trimmed = query.trim();
+    if (trimmed) {
+      const exact = matches.some(
+        (m) =>
+          m.insert.toLowerCase() === trimmed.toLowerCase() ||
+          m.label.toLowerCase() === trimmed.toLowerCase(),
+      );
+      if (!exact) {
+        options.push({
+          label: trimmed,
+          detail: "Create note",
+          type: "text",
+          boost: -10,
+          apply: applyWikilinkInsert(trimmed),
+        });
+      }
+    }
+
+    if (!options.length) return null;
+    return { from, options, filter: false };
+  };
+}
 
 class WikilinkWidget extends WidgetType {
   constructor(

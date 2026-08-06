@@ -15,6 +15,7 @@ import {
 import { Prec } from "@codemirror/state";
 import { api } from "@/lib/api";
 import { visibleLineChunks } from "./visibleLineChunks";
+import { wikilinkQueryAt } from "./wikilinkExtension";
 
 export interface EntitySuggestion {
   node_id: string;
@@ -147,6 +148,8 @@ export function entityCompletionSource(kb: string) {
     // Words never span lines, so only the cursor's line needs inspecting
     // (doc.toString() on every keystroke is wasteful for large notes).
     const line = context.state.doc.lineAt(context.pos);
+    // Defer to wikilink completions while typing inside `[[...`.
+    if (wikilinkQueryAt(line.text, context.pos - line.from)) return null;
     const local = getWordBefore(line.text, context.pos - line.from);
     const wordInfo = local && {
       word: local.word,

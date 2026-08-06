@@ -173,6 +173,9 @@ export function useNotesPageController() {
     notes: list.notes,
     onNoteSelect: handleNoteSelect,
     sourceNote: selection.selectedNote,
+    kb: currentKB,
+    onNotesChanged: () =>
+      list.fetchNotes(list.searchQuery, list.processedFilter),
   });
 
   const handleEntityClick = useCallback((nodeId: string, name: string) => {

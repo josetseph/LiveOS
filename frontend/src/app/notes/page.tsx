@@ -132,6 +132,7 @@ export default function NotesPage() {
                   onDropFiles={media.attachFiles}
                   attachDisabled={media.isUploading}
                   kb={currentKB}
+                  notes={list.notes}
                   placeholder="Start writing..."
                   className="h-full w-full"
                 />

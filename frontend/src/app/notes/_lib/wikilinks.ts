@@ -1,15 +1,135 @@
 import type { Note } from "@/lib/types";
 
-function normalizeLink(value: string | null | undefined): string {
+export function normalizeLink(value: string | null | undefined): string {
   let text = (value || "").replace(/\\/g, "/").trim().toLowerCase();
   text = text.replace(/^\/+|\/+$/g, "");
   while (text.startsWith("./")) text = text.slice(2);
   return text.endsWith(".md") ? text.slice(0, -3) : text;
 }
 
-function folderOf(relPath: string): string {
+export function folderOf(relPath: string): string {
   const cut = relPath.lastIndexOf("/");
   return cut === -1 ? "" : relPath.slice(0, cut);
+}
+
+/** Vault path without `.md`, preserving original casing for inserts. */
+export function noteVaultPath(note: Note): string {
+  const rel = (note.rel_path || "").replace(/\\/g, "/").trim();
+  if (rel) {
+    return rel.replace(/\.md$/i, "").replace(/^\/+|\/+$/g, "");
+  }
+  return (note.title || "").trim();
+}
+
+/** Basename / title shown in the editor and suggestion list. */
+export function noteDisplayName(note: Note): string {
+  const path = noteVaultPath(note);
+  if (!path) return "Untitled";
+  const base = path.split("/").pop() || path;
+  return base || note.title || "Untitled";
+}
+
+/**
+ * What to write inside `[[...]]` for this note (Obsidian-style):
+ * bare name when unique, full vault-relative path when the basename collides.
+ */
+export function wikilinkInsertTarget(note: Note, notes: Note[]): string {
+  const path = noteVaultPath(note);
+  const base = noteDisplayName(note);
+  if (!path) return base;
+  const key = normalizeLink(base);
+  let collisions = 0;
+  for (const other of notes) {
+    if (normalizeLink(noteDisplayName(other)) === key) {
+      collisions += 1;
+      if (collisions > 1) return path;
+    }
+  }
+  return base;
+}
+
+export type WikilinkSuggestion = {
+  note: Note;
+  /** Text shown as the primary label. */
+  label: string;
+  /** Folder / path hint (empty for unique root notes). */
+  detail: string;
+  /** Exact text to place inside `[[...]]`. */
+  insert: string;
+};
+
+/** Filter notes for `[[` autocomplete, preferring prefix matches then includes. */
+export function suggestWikilinkNotes(
+  notes: Note[],
+  query: string,
+  limit = 12,
+): WikilinkSuggestion[] {
+  const q = normalizeLink(query);
+  const scored: { score: number; suggestion: WikilinkSuggestion }[] = [];
+
+  for (const note of notes) {
+    const path = noteVaultPath(note);
+    const label = noteDisplayName(note);
+    const pathKey = normalizeLink(path);
+    const labelKey = normalizeLink(label);
+    if (!pathKey && !labelKey) continue;
+
+    let score = -1;
+    if (!q) {
+      score = 0;
+    } else if (labelKey === q || pathKey === q) {
+      score = 0;
+    } else if (labelKey.startsWith(q) || pathKey.startsWith(q)) {
+      score = 1;
+    } else if (labelKey.includes(q) || pathKey.includes(q)) {
+      score = 2;
+    } else {
+      continue;
+    }
+
+    const folder = folderOf(path);
+    const insert = wikilinkInsertTarget(note, notes);
+    const baseKey = normalizeLink(label);
+    let sameName = 0;
+    for (const other of notes) {
+      if (normalizeLink(noteDisplayName(other)) === baseKey) {
+        sameName += 1;
+        if (sameName > 1) break;
+      }
+    }
+    // When names collide, always show where the note lives (Obsidian-style).
+    const detail = folder || (sameName > 1 ? "vault root" : "");
+
+    scored.push({
+      score,
+      suggestion: { note, label, detail, insert },
+    });
+  }
+
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return a.score - b.score;
+    const byLabel = a.suggestion.label.localeCompare(b.suggestion.label);
+    if (byLabel !== 0) return byLabel;
+    return a.suggestion.insert.localeCompare(b.suggestion.insert);
+  });
+
+  return scored.slice(0, limit).map((s) => s.suggestion);
+}
+
+/** Split a wikilink target into `{ folder, title }` for creating a missing note. */
+export function parseWikilinkCreateTarget(target: string): {
+  folder: string;
+  title: string;
+} {
+  const path = (target || "").replace(/\\/g, "/").trim().replace(/\.md$/i, "");
+  const cleaned = path.replace(/^\/+|\/+$/g, "");
+  if (!cleaned) return { folder: "", title: "Untitled" };
+  const slash = cleaned.lastIndexOf("/");
+  if (slash === -1) return { folder: "", title: cleaned };
+  return {
+    folder: cleaned.slice(0, slash),
+    title: cleaned.slice(slash + 1) || "Untitled",
+  };
 }
 
 /**
@@ -77,11 +197,13 @@ export class WikilinkResolver {
     if (!key) return undefined;
     const sourceDir = folderOf(normalizeLink(sourceNote?.rel_path));
 
-    // An explicit path is an exact request; a bare name is not, so it must not
-    // match a root-level note ahead of a same-named note beside the source.
+    // Exact vault path (incl. root-level basename) always wins. That lets
+    // `[[photosynthesis]]` and `[[meow/photosynthesis]]` address two different
+    // notes when both exist — matching what autocomplete inserts.
+    const exact = this.byPath.get(key);
+    if (exact) return exact;
+
     if (key.includes("/")) {
-      const exact = this.byPath.get(key);
-      if (exact) return exact;
       const suffix = `/${key}`;
       const partial = this.candidates.filter((c) => c.relPath.endsWith(suffix));
       const best = pickClosest(partial, sourceDir);
