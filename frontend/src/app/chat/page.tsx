@@ -40,67 +40,18 @@ import type { Message } from "@/lib/chat-context";
 import { SegmentedNoteContent } from "@/components/segmented-note-content";
 import { EntityDetailPanel } from "@/components/entity-detail-panel";
 import type { FilePreview, NotePreview } from "@/lib/types";
+import {
+  MarkdownAnchor,
+  flattenLinkText,
+  injectEntityLinks,
+  urlTransform,
+  useScannedEntities,
+} from "@/lib/markdown-entities";
 
-type ScannedEntity = { node_id: string; name: string; node_type: string };
-
-/** Scans message text for entity mentions once on mount (result is stable). */
-function useScannedEntities(content: string, kb: string): ScannedEntity[] {
-  const [entities, setEntities] = useState<ScannedEntity[]>([]);
-  useEffect(() => {
-    if (!content.trim()) return;
-    let cancelled = false;
-    api.scanTextEntities(content, kb).then((e) => {
-      if (!cancelled) setEntities(e);
-    }).catch(() => { });
-    return () => { cancelled = true; };
-  }, [content, kb]);
-  return entities;
-}
-
-/** Allow entity:// pseudo-links through react-markdown's URL sanitizer. */
-function urlTransform(url: string): string {
-  if (url.startsWith("entity://")) return url;
-  return /^(https?|ircs?|mailto|xmpp):/i.test(url) || !url.includes(":") ? url : "";
-}
-
-/** Injects entity:// pseudo-links directly into plain text for ReactMarkdown.
- * Uses a single-pass range-collection approach so no entity name is ever
- * matched inside an already-injected link (avoids nested/broken markdown). */
-function injectEntityLinks(text: string, entities: ScannedEntity[]): string {
-  if (!entities.length) return text;
-  const sorted = [...entities].sort((a, b) => b.name.length - a.name.length);
-
-  function replacePlain(plain: string): string {
-    // Collect non-overlapping ranges against the ORIGINAL text, longest-match wins
-    const ranges: { start: number; end: number; name: string; node_id: string }[] = [];
-    for (const { name, node_id } of sorted) {
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const re = new RegExp(`\\b${escaped}\\b`, "gi");
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(plain)) !== null) {
-        const start = m.index;
-        const end = start + m[0].length;
-        if (ranges.some((r) => start < r.end && end > r.start)) continue;
-        ranges.push({ start, end, name, node_id });
-      }
-    }
-    // Single left-to-right substitution pass
-    ranges.sort((a, b) => a.start - b.start);
-    let result = "";
-    let last = 0;
-    for (const { start, end, name, node_id } of ranges) {
-      result += plain.slice(last, start);
-      result += `[${name}](entity://${node_id})`;
-      last = end;
-    }
-    return result + plain.slice(last);
-  }
-
-  return text
-    .split(/(\[[^\]]+\]\([^)]+\))/)
-    .map((part, i) => (i % 2 === 1 ? part : replacePlain(part)))
-    .join("");
-}
+// Only the most recent assistant messages get an entity scan — long
+// conversations used to fire one POST /graph/entities/scan-text per message
+// on load. Older messages render without highlights (cached ones still show).
+const ENTITY_SCAN_RECENT_LIMIT = 5;
 
 /** Prose classes shared by the two inline message renderers. */
 const PROSE_CLASSNAME =
@@ -123,7 +74,7 @@ function makeLinkRenderer(
       href,
       ...props
     }: React.ComponentPropsWithoutRef<"a"> & { node?: unknown }) => {
-      const text = children?.toString() || "";
+      const text = flattenLinkText(children).trim();
       if (href?.startsWith("entity://") && onEntityClick) {
         const nodeId = href.slice("entity://".length);
         return (
@@ -146,19 +97,10 @@ function makeLinkRenderer(
           </button>
         );
       }
-      // External links open outside the app window — web-ingested content
-      // must not be able to navigate the Electron renderer away from Orb.
-      const isExternal = /^https?:\/\//i.test(href || "");
       return (
-        <a
-          href={href}
-          {...(isExternal
-            ? { target: "_blank", rel: "noopener noreferrer" }
-            : {})}
-          {...props}
-        >
+        <MarkdownAnchor href={href} {...props}>
           {children}
-        </a>
+        </MarkdownAnchor>
       );
     },
   };
@@ -168,6 +110,7 @@ function makeLinkRenderer(
 function AssistantMessageBody({
   message,
   kb,
+  scanEnabled,
   onEntityClick,
   onFileClick,
   expandedThinking,
@@ -175,12 +118,17 @@ function AssistantMessageBody({
 }: {
   message: Message;
   kb: string;
+  /** Whether this message may issue an entity scan (recent messages only). */
+  scanEnabled: boolean;
   onEntityClick: (nodeId: string, name: string) => void;
   onFileClick: (url: string, filename: string) => void;
   expandedThinking: Set<string>;
   onToggleThinking: (id: string) => void;
 }) {
-  const scannedEntities = useScannedEntities(message.content, kb);
+  const scannedEntities = useScannedEntities(message.content, kb, {
+    enabled: scanEnabled,
+    cacheKey: message.id,
+  });
 
   const processContent = useCallback(
     (text: string) => {
@@ -320,6 +268,20 @@ export default function ChatPage() {
     setEntityPanelNodeId(nodeId);
     setEntityPanelName(name);
   }, []);
+
+  // Only the last few assistant messages may trigger entity scans; older
+  // ones render highlight-free (or from the module-level scan cache).
+  const scannableMessageIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (
+      let i = messages.length - 1;
+      i >= 0 && ids.size < ENTITY_SCAN_RECENT_LIMIT;
+      i--
+    ) {
+      if (messages[i].role === "assistant") ids.add(messages[i].id);
+    }
+    return ids;
+  }, [messages]);
   const [greeting, setGreeting] = useState("Hello!");
   useEffect(() => {
     const hour = new Date().getHours();
@@ -583,6 +545,7 @@ export default function ChatPage() {
                         <AssistantMessageBody
                           message={message}
                           kb={currentKB}
+                          scanEnabled={scannableMessageIds.has(message.id)}
                           onEntityClick={handleEntityClick}
                           onFileClick={handleFileClick}
                           expandedThinking={expandedThinking}

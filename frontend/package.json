@@ -17,6 +17,7 @@
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.6",
     "@lezer/highlight": "^1.2.3",
+    "@tanstack/react-virtual": "^3.14.9",
     "@types/three": "^0.184.1",
     "@uiw/react-codemirror": "^4.25.11",
     "axios": "^1.16.0",

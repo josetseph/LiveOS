@@ -229,6 +229,7 @@ export default function NotesGraphPage() {
   const graphRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const loadGenRef = useRef(0);
+  const loadAbortRef = useRef<AbortController | null>(null);
   const detailRequestRef = useRef(0);
   // Fit once on first settle — onEngineStop / resize used to re-fire zoomToFit
   // and yank the camera back whenever the user zoomed out.
@@ -278,11 +279,18 @@ export default function NotesGraphPage() {
 
   const loadGraph = useCallback(async () => {
     const gen = ++loadGenRef.current;
+    // Cancel the previous in-flight load (KB switch / rapid reloads) so the
+    // backend stops building a payload nobody will render.
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
     setLoading(true);
     hasFittedRef.current = false;
     userNavigatedRef.current = false;
     try {
-      const payload = await api.getNotesGraph(currentKB);
+      const payload = await api.getNotesGraph(currentKB, {
+        signal: controller.signal,
+      });
       if (gen !== loadGenRef.current) return;
       setRaw(toForceGraphData(payload));
     } catch (error) {

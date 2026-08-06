@@ -38,12 +38,19 @@ function kbQuery(kb: string): string {
   return kb && kb !== "default" ? `?kb=${encodeURIComponent(kb)}` : "";
 }
 
+/** Optional per-request options (cancellation). */
+export type RequestOpts = { signal?: AbortSignal };
+
 /** Thin wrappers so each method is one line instead of three. */
 const http = {
-  get: (path: string, params?: Record<string, unknown>) =>
-    axios.get(`${API_BASE_URL}${path}`, { params }).then((r) => r.data),
-  post: (path: string, data?: unknown) =>
-    axios.post(`${API_BASE_URL}${path}`, data).then((r) => r.data),
+  get: (path: string, params?: Record<string, unknown>, opts?: RequestOpts) =>
+    axios
+      .get(`${API_BASE_URL}${path}`, { params, signal: opts?.signal })
+      .then((r) => r.data),
+  post: (path: string, data?: unknown, opts?: RequestOpts) =>
+    axios
+      .post(`${API_BASE_URL}${path}`, data, { signal: opts?.signal })
+      .then((r) => r.data),
   put: (path: string, data?: unknown) =>
     axios.put(`${API_BASE_URL}${path}`, data).then((r) => r.data),
   patch: (path: string, data?: unknown) =>
@@ -51,6 +58,14 @@ const http = {
   del: (path: string) =>
     axios.delete(`${API_BASE_URL}${path}`).then((r) => r.data),
 };
+
+/** True when an error is an axios/DOM cancellation (aborted request). */
+export function isRequestCancelled(error: unknown): boolean {
+  return (
+    axios.isCancel(error) ||
+    (error instanceof DOMException && error.name === "AbortError")
+  );
+}
 
 export const api = {
   // ── Chat ────────────────────────────────────────────────────────────────
@@ -102,12 +117,18 @@ export const api = {
 
   // ── Notes (vault markdown + SQLite metadata) ─────────────────────────────
 
-  async getNotes(search?: string, processed?: boolean, failed?: boolean, kb = "default") {
+  async getNotes(
+    search?: string,
+    processed?: boolean,
+    failed?: boolean,
+    kb = "default",
+    opts?: RequestOpts,
+  ) {
     const params: Record<string, unknown> = {};
     if (search) params.search = search;
     if (processed !== undefined) params.processed = processed;
     if (failed !== undefined) params.failed = failed;
-    return http.get(`/notes`, withKb(kb, params));
+    return http.get(`/notes`, withKb(kb, params), opts);
   },
 
   async getNote(id: string, kb = "default") {
@@ -225,7 +246,7 @@ export const api = {
 
   // ── 3D Exploration graph ──────────────────────────────────────────────────
 
-  async getGraph3DFull(kb = "default"): Promise<{
+  async getGraph3DFull(kb = "default", opts?: RequestOpts): Promise<{
     nodes: Array<{
       node_id: string;
       name: string;
@@ -243,7 +264,7 @@ export const api = {
       type: string;
     }>;
   }> {
-    return http.get(`/graph/3d/full`, withKb(kb));
+    return http.get(`/graph/3d/full`, withKb(kb), opts);
   },
 
   async getNodeDetail(nodeId: string, kb = "default"): Promise<{
@@ -284,10 +305,9 @@ export const api = {
   async scanTextEntities(
     text: string,
     kb = "default",
+    opts?: RequestOpts,
   ): Promise<{ node_id: string; name: string; node_type: string }[]> {
-    const params: Record<string, unknown> = {};
-    if (kb && kb !== "default") params.kb = kb;
-    return http.post(`/graph/entities/scan-text${kbQuery(kb)}`, { text });
+    return http.post(`/graph/entities/scan-text${kbQuery(kb)}`, { text }, opts);
   },
 
   // ── Knowledge-base management ─────────────────────────────────────────────
@@ -379,22 +399,28 @@ export const api = {
 
   // ── Notes graph / vault ───────────────────────────────────────────────────
 
-  async getNotesGraph(kb = "default"): Promise<NotesGraphPayload> {
-    return http.get(`/graph/notes`, withKb(kb));
+  async getNotesGraph(kb = "default", opts?: RequestOpts): Promise<NotesGraphPayload> {
+    return http.get(`/graph/notes`, withKb(kb), opts);
   },
 
   async getNoteNeighbors(
     noteId: string,
     kb = "default",
+    opts?: RequestOpts,
   ): Promise<NotesGraphPayload> {
-    return http.get(`/graph/notes/${encodeURIComponent(noteId)}/neighbors${kbQuery(kb)}`);
+    return http.get(
+      `/graph/notes/${encodeURIComponent(noteId)}/neighbors${kbQuery(kb)}`,
+      undefined,
+      opts,
+    );
   },
 
   async getNoteEntitySubgraph(
     text: string,
     kb = "default",
+    opts?: RequestOpts,
   ): Promise<NotesGraphPayload> {
-    return http.post(`/graph/entities/note-subgraph${kbQuery(kb)}`, { text });
+    return http.post(`/graph/entities/note-subgraph${kbQuery(kb)}`, { text }, opts);
   },
 
   async rebuildNotesGraph(kb = "default") {

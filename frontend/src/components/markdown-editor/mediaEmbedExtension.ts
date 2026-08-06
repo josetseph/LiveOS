@@ -17,6 +17,7 @@ import {
   youtubeEmbedUrl,
   vimeoEmbedUrl,
 } from "@/lib/utils";
+import { visibleLineChunks } from "./visibleLineChunks";
 
 /** Markdown images + paperclip/mic attachment links + plain links to embeddable video.
  * URLs may contain spaces (unencoded filenames) — match until `)`.
@@ -184,60 +185,62 @@ export function createMediaEmbedDecorations(kbId = "default") {
 
       build(view: EditorView): DecorationSet {
         const marks: ReturnType<Decoration["range"]>[] = [];
-        const doc = view.state.doc.toString();
         const activeLine = view.state.doc.lineAt(
           view.state.selection.main.head,
         ).number;
 
-        MEDIA_RE.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = MEDIA_RE.exec(doc)) !== null) {
-          const from = m.index;
-          const to = m.index + m[0].length;
-          const isMdImage = m[0].startsWith("![");
-          const label = (isMdImage ? m[1] : m[3] || "").replace(
-            /^[📎🖇🎤]\s*/,
-            "",
-          );
-          const rawUrl = (isMdImage ? m[2] : m[4] || "").trim();
-          if (!rawUrl) continue;
+        // Only scan the visible viewport — media markdown is single-line.
+        for (const chunk of visibleLineChunks(view)) {
+          MEDIA_RE.lastIndex = 0;
+          let m: RegExpExecArray | null;
+          while ((m = MEDIA_RE.exec(chunk.text)) !== null) {
+            const from = chunk.offset + m.index;
+            const to = from + m[0].length;
+            const isMdImage = m[0].startsWith("![");
+            const label = (isMdImage ? m[1] : m[3] || "").replace(
+              /^[📎🖇🎤]\s*/,
+              "",
+            );
+            const rawUrl = (isMdImage ? m[2] : m[4] || "").trim();
+            if (!rawUrl) continue;
 
-          const kind = kindForUrl(rawUrl);
-          if (!kind) continue;
+            const kind = kindForUrl(rawUrl);
+            if (!kind) continue;
 
-          // Plain markdown links (no 📎/🖇/🎤 / image) only embed for YouTube/Vimeo
-          if (
-            !isMdImage &&
-            !(m[3] || "").match(/^[📎🖇🎤]/) &&
-            kind !== "youtube" &&
-            kind !== "vimeo"
-          ) {
-            continue;
+            // Plain markdown links (no 📎/🖇/🎤 / image) only embed for YouTube/Vimeo
+            if (
+              !isMdImage &&
+              !(m[3] || "").match(/^[📎🖇🎤]/) &&
+              kind !== "youtube" &&
+              kind !== "vimeo"
+            ) {
+              continue;
+            }
+
+            const line = view.state.doc.lineAt(from).number;
+            if (line === activeLine) continue;
+
+            let src: string;
+            if (kind === "youtube") {
+              src = youtubeEmbedUrl(rawUrl) || rawUrl;
+            } else if (kind === "vimeo") {
+              src = vimeoEmbedUrl(rawUrl) || rawUrl;
+            } else {
+              src = encodeFileUrl(resolveFileUrl(rawUrl.trim(), kbId));
+            }
+
+            marks.push(
+              Decoration.replace({
+                widget: new MediaWidget(
+                  kind,
+                  src,
+                  label || rawUrl.trim(),
+                  kbId,
+                ),
+                block: false,
+              }).range(from, to),
+            );
           }
-
-          const line = view.state.doc.lineAt(from).number;
-          if (line === activeLine) continue;
-
-          let src: string;
-          if (kind === "youtube") {
-            src = youtubeEmbedUrl(rawUrl) || rawUrl;
-          } else if (kind === "vimeo") {
-            src = vimeoEmbedUrl(rawUrl) || rawUrl;
-          } else {
-            src = encodeFileUrl(resolveFileUrl(rawUrl.trim(), kbId));
-          }
-
-          marks.push(
-            Decoration.replace({
-              widget: new MediaWidget(
-                kind,
-                src,
-                label || rawUrl.trim(),
-                kbId,
-              ),
-              block: false,
-            }).range(from, to),
-          );
         }
 
         return Decoration.set(marks, true);

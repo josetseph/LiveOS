@@ -14,6 +14,7 @@ import {
 } from "@codemirror/autocomplete";
 import { Prec } from "@codemirror/state";
 import { api } from "@/lib/api";
+import { visibleLineChunks } from "./visibleLineChunks";
 
 export interface EntitySuggestion {
   node_id: string;
@@ -75,17 +76,19 @@ export function createEntityDecorations(entities: EntitySuggestion[]) {
 
       build(view: EditorView): DecorationSet {
         const marks: ReturnType<Decoration["range"]>[] = [];
-        const doc = view.state.doc.toString();
-        for (const r of findEntityRanges(doc, entities)) {
-          marks.push(
-            Decoration.mark({
-              class: "cm-entity-mention",
-              attributes: {
-                "data-node-id": r.entity.node_id,
-                "data-name": r.entity.name,
-              },
-            }).range(r.from, r.to),
-          );
+        // Only scan the visible viewport — entity names are single-line.
+        for (const chunk of visibleLineChunks(view)) {
+          for (const r of findEntityRanges(chunk.text, entities)) {
+            marks.push(
+              Decoration.mark({
+                class: "cm-entity-mention",
+                attributes: {
+                  "data-node-id": r.entity.node_id,
+                  "data-name": r.entity.name,
+                },
+              }).range(chunk.offset + r.from, chunk.offset + r.to),
+            );
+          }
         }
         return Decoration.set(marks, true);
       }
@@ -141,10 +144,15 @@ export function entityCompletionSource(kb: string) {
   return async (
     context: CompletionContext,
   ): Promise<CompletionResult | null> => {
-    const wordInfo = getWordBefore(
-      context.state.doc.toString(),
-      context.pos,
-    );
+    // Words never span lines, so only the cursor's line needs inspecting
+    // (doc.toString() on every keystroke is wasteful for large notes).
+    const line = context.state.doc.lineAt(context.pos);
+    const local = getWordBefore(line.text, context.pos - line.from);
+    const wordInfo = local && {
+      word: local.word,
+      from: line.from + local.from,
+      to: line.from + local.to,
+    };
     if (!wordInfo) return null;
     if (!context.explicit && wordInfo.word.length < 3) return null;
 

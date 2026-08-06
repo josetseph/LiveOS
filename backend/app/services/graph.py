@@ -947,25 +947,49 @@ class GraphService:
     def store_node_positions(
         self, positions: dict[str, tuple[float, float, float]]
     ) -> None:
-        """Persist pre-computed 3-D (x, y, z) positions for a batch of nodes."""
+        """Persist pre-computed 3-D (x, y, z) positions for a batch of nodes.
+
+        Writes are batched via UNWIND (one statement per chunk instead of one
+        per node); if a batch fails we fall back to per-node writes for that
+        chunk so a single bad row can't drop the whole layout.
+        """
         if not positions:
             return
-        for nid, xyz in positions.items():
+        rows = [
+            {
+                "node_id": nid,
+                "x": float(xyz[0]),
+                "y": float(xyz[1]),
+                "z": float(xyz[2]),
+            }
+            for nid, xyz in positions.items()
+        ]
+        batch_query = """
+            UNWIND $rows AS row
+            MATCH (n:Node {id: row.node_id})
+            SET n.pos_x = row.x, n.pos_y = row.y, n.pos_z = row.z
+        """
+        single_query = """
+            MATCH (n:Node {id: $node_id})
+            SET n.pos_x = $x, n.pos_y = $y, n.pos_z = $z
+        """
+        chunk_size = 500
+        for i in range(0, len(rows), chunk_size):
+            chunk = rows[i : i + chunk_size]
             try:
-                self.execute_query(
-                    """
-                    MATCH (n:Node {id: $node_id})
-                    SET n.pos_x = $x, n.pos_y = $y, n.pos_z = $z
-                    """,
-                    {
-                        "node_id": nid,
-                        "x": float(xyz[0]),
-                        "y": float(xyz[1]),
-                        "z": float(xyz[2]),
-                    },
-                )
+                self.execute_query(batch_query, {"rows": chunk})
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                logger.debug(f"[Graph] store_node_positions skipped {nid}: {exc}")
+                logger.debug(
+                    f"[Graph] store_node_positions batch of {len(chunk)} failed "
+                    f"({exc}); retrying per-node"
+                )
+                for row in chunk:
+                    try:
+                        self.execute_query(single_query, row)
+                    except Exception as row_exc:  # pylint: disable=broad-exception-caught
+                        logger.debug(
+                            f"[Graph] store_node_positions skipped {row['node_id']}: {row_exc}"
+                        )
 
     def get_node_connections(self, node_id: str, *, limit: int = 16) -> list[dict]:
         """1-hop neighbours for a node id (semantic + REFERENCES)."""

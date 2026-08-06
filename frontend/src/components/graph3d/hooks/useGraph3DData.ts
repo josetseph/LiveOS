@@ -44,11 +44,12 @@ export function useGraph3DData(currentKB: string, isHydrated: boolean) {
   useEffect(() => {
     if (!isHydrated) return;
     let cancelled = false;
+    const controller = new AbortController();
     hasFittedRef.current = false;
     userNavigatedRef.current = false;
     setLoading(true);
     api
-      .getGraph3DFull(currentKB)
+      .getGraph3DFull(currentKB, { signal: controller.signal })
       .then(({ nodes, edges }) => {
         if (cancelled) return;
         const nodeIdSet = new Set(nodes.map((n) => n.node_id));
@@ -82,6 +83,7 @@ export function useGraph3DData(currentKB: string, isHydrated: boolean) {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [currentKB, isHydrated]);
 

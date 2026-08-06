@@ -1839,19 +1839,24 @@ class IngestionWorkflow:
 
             # Refresh ES relationship_natural_language for nodes whose membership changed.
             # Community fields are no longer stored on regular nodes — only the NL sentence
-            # written above carries that signal for retrieval.
+            # written above carries that signal for retrieval. Collected into a
+            # single batched Meili write (one task wait instead of one per node).
+            community_rows: list[dict] = []
             for node_id in level_assignments:
                 payload = self._graph.get_node_storage_payload(node_id)
                 if not payload:
                     continue
                 relationship_nl = payload.get("relationship_natural_language") or []
-                self._meili.update_node_community(
-                    node_id=node_id,
-                    relationship_natural_language=" ".join(
-                        sentence for sentence in relationship_nl if sentence
-                    ),
-                    name=payload.get("name") or "",
+                community_rows.append(
+                    {
+                        "node_id": node_id,
+                        "relationship_natural_language": " ".join(
+                            sentence for sentence in relationship_nl if sentence
+                        ),
+                        "name": payload.get("name") or "",
+                    }
                 )
+            self._meili.update_nodes_community(community_rows)
 
             # ── Compute & store 3D positions for the new layout ──────────────────
             try:

@@ -1,19 +1,19 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Image as ImageIcon, FileText, Mic, Film } from "lucide-react";
-import { api } from "@/lib/api";
 import { resolveFileUrl, isImageUrl, isVideoUrl, isPdfUrl } from "@/lib/utils";
 import { BlobMediaPlayer } from "@/components/blob-media-player";
-
-/** Allow entity:// pseudo-links through react-markdown's URL sanitizer. */
-function urlTransform(url: string): string {
-    if (url.startsWith("entity://")) return url;
-    // Reproduce react-markdown's defaultUrlTransform for all other schemes
-    return /^(https?|ircs?|mailto|xmpp):/i.test(url) || !url.includes(":") ? url : "";
-}
+import {
+    MarkdownAnchor,
+    flattenLinkText,
+    injectEntityLinks,
+    isAttachmentHref,
+    urlTransform,
+    useScannedEntities,
+} from "@/lib/markdown-entities";
 
 // ── Segment types ────────────────────────────────────────────────────────────
 
@@ -23,63 +23,6 @@ interface Segment {
     type: SegmentType;
     label: string; // e.g. "Votex 365 Ad", "Offer Letter.pdf", "Voice Recording"
     content: string;
-}
-
-// ── Entity mention helpers ───────────────────────────────────────────────────
-
-type ScannedEntity = { node_id: string; name: string; node_type: string };
-
-function escapeRegex(s: string) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Injects entity:// pseudo-links directly into plain text for scanned entities.
- * Uses a single-pass range-collection approach so no entity name is ever
- * matched inside an already-injected link (avoids nested/broken markdown).
- */
-function injectEntityLinks(text: string, entities: ScannedEntity[]): string {
-    if (!entities.length) return text;
-    const sorted = [...entities].sort((a, b) => b.name.length - a.name.length);
-
-    function replacePlain(plain: string): string {
-        // Collect non-overlapping ranges against the ORIGINAL text, longest-match wins
-        const ranges: { start: number; end: number; name: string; node_id: string }[] = [];
-        for (const { name, node_id } of sorted) {
-            const re = new RegExp(`\\b${escapeRegex(name)}\\b`, "gi");
-            let m: RegExpExecArray | null;
-            while ((m = re.exec(plain)) !== null) {
-                const start = m.index;
-                const end = start + m[0].length;
-                if (ranges.some((r) => start < r.end && end > r.start)) continue;
-                ranges.push({ start, end, name, node_id });
-            }
-        }
-        // Single left-to-right substitution pass
-        ranges.sort((a, b) => a.start - b.start);
-        let result = "";
-        let last = 0;
-        for (const { start, end, name, node_id } of ranges) {
-            result += plain.slice(last, start);
-            result += `[${name}](entity://${node_id})`;
-            last = end;
-        }
-        return result + plain.slice(last);
-    }
-
-    // Split on existing links/markers so attachment links never get nested
-    // entity markdown injected into their label or URL.
-    const parts = text.split(/(\[[^\]]+\]\([^)]+\)|\[\[[^\]]*\]\])/);
-    return parts
-        .map((part, i) => {
-            if (i % 2 === 1) {
-                if (/^\[[^\]]+\]\([^)]+\)$/.test(part)) return part;
-                const m = part.match(/\[\[([^\]|]+)\|([^\]]+)\]\]/);
-                return m ? `[${m[1]}](entity://${m[2]})` : part;
-            }
-            return replacePlain(part);
-        })
-        .join("");
 }
 
 // ── Marker parser ────────────────────────────────────────────────────────────
@@ -200,34 +143,6 @@ function SegmentDivider({
     );
 }
 
-/** Extract display text from react-markdown link children (handles nested nodes). */
-function flattenLinkText(children: React.ReactNode): string {
-    if (children == null) return "";
-    if (typeof children === "string" || typeof children === "number") {
-        return String(children);
-    }
-    if (Array.isArray(children)) {
-        return children.map(flattenLinkText).join("");
-    }
-    if (typeof children === "object" && "props" in children) {
-        return flattenLinkText(
-            (children as React.ReactElement<{ children?: React.ReactNode }>).props
-                .children,
-        );
-    }
-    return "";
-}
-
-/** True when href points at an uploaded vault attachment. */
-function isAttachmentHref(href: string): boolean {
-    return (
-        /\/files\//.test(href) ||
-        /\/uploads\//.test(href) ||
-        /\/vault-files\//.test(href) ||
-        /^attachments\//.test(href)
-    );
-}
-
 // ── Link renderer ─────────────────────────────────────────────────────────────
 
 function makeLinkComponent(
@@ -323,19 +238,10 @@ function makeLinkComponent(
                 </button>
             );
         }
-        // External links open outside the app window — web-ingested content
-        // must not be able to navigate the Electron renderer away from Orb.
-        const isExternal = /^https?:\/\//i.test(href || "");
         return (
-            <a
-                href={href}
-                {...(isExternal
-                    ? { target: "_blank", rel: "noopener noreferrer" }
-                    : {})}
-                {...props}
-            >
+            <MarkdownAnchor href={href} {...props}>
                 {children}
-            </a>
+            </MarkdownAnchor>
         );
     };
 }
@@ -358,16 +264,9 @@ export function SegmentedNoteContent({
     proseClassName,
     kb = "default",
 }: Props) {
-    const [scannedEntities, setScannedEntities] = useState<ScannedEntity[]>([]);
-
-    useEffect(() => {
-        if (!content?.trim() || !onEntityClick) return;
-        let cancelled = false;
-        api.scanTextEntities(content, kb)
-            .then((e) => { if (!cancelled) setScannedEntities(e); })
-            .catch(() => { });
-        return () => { cancelled = true; };
-    }, [content, kb, onEntityClick]);
+    const scannedEntities = useScannedEntities(content || "", kb, {
+        enabled: Boolean(onEntityClick),
+    });
 
     const segments = useMemo(() => parseSegments(content || "*Empty note*"), [content]);
     const LinkComponent = useMemo(

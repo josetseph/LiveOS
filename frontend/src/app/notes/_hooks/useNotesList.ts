@@ -8,7 +8,7 @@ import {
   type Dispatch,
   type SetStateAction,
 } from "react";
-import { api } from "@/lib/api";
+import { api, isRequestCancelled } from "@/lib/api";
 import type { Note } from "@/lib/types";
 import { isActiveProcessingNote } from "../_lib/processing-status";
 import type { ProcessedFilter, VaultFileEntry } from "../_lib/types";
@@ -44,11 +44,17 @@ export function useNotesList({
   const [isLoading, setIsLoading] = useState(false);
   const searchTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const fetchNotesRequestRef = useRef(0);
+  const fetchAbortRef = useRef<AbortController | null>(null);
   const prevKBRef = useRef(currentKB);
 
   const fetchNotes = useCallback(
     async (search?: string, filter?: ProcessedFilter) => {
       const requestId = ++fetchNotesRequestRef.current;
+      // Abort the superseded request so the backend stops scanning the vault
+      // for a response that will be discarded anyway.
+      fetchAbortRef.current?.abort();
+      const controller = new AbortController();
+      fetchAbortRef.current = controller;
       try {
         setIsLoading(true);
         let processed: boolean | undefined;
@@ -66,7 +72,9 @@ export function useNotesList({
           failed = false;
         }
         // "all" → no filters
-        const data = await api.getNotes(search, processed, failed, currentKB);
+        const data = await api.getNotes(search, processed, failed, currentKB, {
+          signal: controller.signal,
+        });
         if (requestId !== fetchNotesRequestRef.current) return;
         setNotes(data);
         syncSelectedNoteFromList(data);
@@ -94,7 +102,9 @@ export function useNotesList({
           return next;
         });
       } catch (error) {
-        console.error("Error fetching notes:", error);
+        if (!isRequestCancelled(error)) {
+          console.error("Error fetching notes:", error);
+        }
       } finally {
         if (requestId === fetchNotesRequestRef.current) {
           setIsLoading(false);

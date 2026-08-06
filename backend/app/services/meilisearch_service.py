@@ -187,19 +187,40 @@ class MeilisearchService:
         relationship_natural_language: str = "",
         name: str = "",
     ) -> None:
-        if not self.is_available():
+        self.update_nodes_community(
+            [
+                {
+                    "node_id": node_id,
+                    "relationship_natural_language": relationship_natural_language,
+                    "name": name,
+                }
+            ]
+        )
+
+    def update_nodes_community(self, rows: list[dict]) -> None:
+        """Batch community-field refresh: one add_documents call (and one task
+        wait) for the whole set, instead of one HTTP write per node."""
+        if not self.is_available() or not rows:
             return
-        existing = self.get_node(node_id) or {"node_id": node_id}
-        if name:
-            existing["name"] = name
-        if relationship_natural_language:
-            existing["relationship_natural_language"] = relationship_natural_language
-        existing["node_id"] = node_id
+        docs: list[dict[str, Any]] = []
+        for row in rows:
+            node_id = row["node_id"]
+            existing = self.get_node(node_id) or {"node_id": node_id}
+            if row.get("name"):
+                existing["name"] = row["name"]
+            if row.get("relationship_natural_language"):
+                existing["relationship_natural_language"] = row[
+                    "relationship_natural_language"
+                ]
+            existing["node_id"] = node_id
+            docs.append(existing)
         try:
-            task = self._index().add_documents([existing], primary_key="node_id")
-            self.client.wait_for_task(task.task_uid, timeout_in_ms=5000)
+            task = self._index().add_documents(docs, primary_key="node_id")
+            self.client.wait_for_task(task.task_uid, timeout_in_ms=30000)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.debug(f"Meili update_node_community failed for {node_id}: {exc}")
+            logger.debug(
+                f"Meili update_nodes_community failed for {len(docs)} node(s): {exc}"
+            )
 
     def delete_node(self, node_id: str) -> None:
         if not self.is_available():

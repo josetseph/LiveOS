@@ -1,5 +1,6 @@
 "use client";
 
+import { useRef } from "react";
 import {
   FolderPlus,
   Loader2,
@@ -100,6 +101,7 @@ export function NotesSidebar({
     processedFilter === "ingesting"
       ? notes.filter(isActiveProcessingNote)
       : notes;
+  const treeScrollRef = useRef<HTMLDivElement>(null);
 
   return (
     <div className="relative z-10 flex w-56 shrink-0 flex-col border-r border-white/10 bg-black/50 backdrop-blur-xl sm:w-64 md:w-72 lg:w-80">
@@ -178,7 +180,7 @@ export function NotesSidebar({
         />
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div ref={treeScrollRef} className="flex-1 overflow-y-auto">
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="h-6 w-6 animate-spin text-white/40" />
@@ -186,9 +188,10 @@ export function NotesSidebar({
         ) : notes.length === 0 && vaultFolders.length === 0 ? (
           <NotesEmptyState variant="sidebar" searchQuery={searchQuery} />
         ) : (
-          <div className="space-y-0.5 p-2">
+          <div className="p-2">
             <VaultFolderTree
               notes={visibleNotes}
+              scrollRef={treeScrollRef}
               vaultFolders={vaultFolders}
               vaultName={vaultName}
               mediaFiles={mediaFiles}

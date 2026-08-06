@@ -70,10 +70,11 @@ export function ConnectedNotesPanel({
   useEffect(() => {
     if (mode !== "note") return;
     let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
     api
-      .getNoteNeighbors(noteId, kb)
+      .getNoteNeighbors(noteId, kb, { signal: controller.signal })
       .then((payload) => {
         if (cancelled) return;
         setData(payload);
@@ -87,6 +88,7 @@ export function ConnectedNotesPanel({
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [mode, noteId, kb]);
 
@@ -94,11 +96,12 @@ export function ConnectedNotesPanel({
   useEffect(() => {
     if (mode !== "nodes") return;
     let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
     const timer = setTimeout(() => {
       api
-        .getNoteEntitySubgraph(noteContent, kb)
+        .getNoteEntitySubgraph(noteContent, kb, { signal: controller.signal })
         .then((payload) => {
           if (cancelled) return;
           setData(payload);
@@ -113,6 +116,7 @@ export function ConnectedNotesPanel({
     }, 500);
     return () => {
       cancelled = true;
+      controller.abort();
       clearTimeout(timer);
     };
   }, [mode, noteContent, kb]);
