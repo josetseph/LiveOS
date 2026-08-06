@@ -146,8 +146,17 @@ function makeLinkRenderer(
           </button>
         );
       }
+      // External links open outside the app window — web-ingested content
+      // must not be able to navigate the Electron renderer away from Orb.
+      const isExternal = /^https?:\/\//i.test(href || "");
       return (
-        <a href={href} {...props}>
+        <a
+          href={href}
+          {...(isExternal
+            ? { target: "_blank", rel: "noopener noreferrer" }
+            : {})}
+          {...props}
+        >
           {children}
         </a>
       );

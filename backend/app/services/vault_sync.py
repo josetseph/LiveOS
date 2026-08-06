@@ -108,6 +108,21 @@ async def sync_vault_notes(db: AsyncSession, kb: KBContext) -> dict[str, int]:
     )
     by_rel = { (n.rel_path or "").replace("\\", "/"): n for n in existing if n.rel_path }
     by_title = { (n.title or "").lower(): n for n in existing if n.title }
+    on_disk = set(rels)
+
+    def adoptable(stem: str) -> Note | None:
+        """A root-level note whose own file is gone — this nested file is it, moved.
+
+        Without the on-disk check a second note of the same name in another folder
+        would steal the root note's row and orphan the root file.
+        """
+        row = by_title.get(stem)
+        if row is None or not row.rel_path:
+            return None
+        current = row.rel_path.replace("\\", "/")
+        if "/" in current or current in on_disk:
+            return None
+        return row
 
     created = 0
     updated = 0
@@ -116,8 +131,9 @@ async def sync_vault_notes(db: AsyncSession, kb: KBContext) -> dict[str, int]:
         row = by_rel.get(rel)
         if row is None:
             stem = Path(rel).stem.lower()
-            row = by_title.get(stem)
-            if row is not None and row.rel_path and "/" not in row.rel_path.replace("\\", "/"):
+            row = adoptable(stem)
+            if row is not None:
+                by_title.pop(stem, None)
                 row.rel_path = rel
                 if not (row.title or "").strip():
                     row.title = title

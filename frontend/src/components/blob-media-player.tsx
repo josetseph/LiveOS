@@ -25,6 +25,7 @@ export function BlobMediaPlayer({
   const [error, setError] = useState<string | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const blobTriedRef = useRef(false);
+  const disposedRef = useRef(false);
   const yt = youtubeEmbedUrl(url);
   const vimeo = vimeoEmbedUrl(url);
 
@@ -43,8 +44,10 @@ export function BlobMediaPlayer({
     // Prefer direct URL (Range + faststart). Blob-fetch only if playback fails.
     if (!cancelled) setSrc(direct);
 
+    disposedRef.current = false;
     return () => {
       cancelled = true;
+      disposedRef.current = true;
       if (objectUrlRef.current) {
         URL.revokeObjectURL(objectUrlRef.current);
         objectUrlRef.current = null;
@@ -64,6 +67,11 @@ export function BlobMediaPlayer({
     blobTriedRef.current = true;
     void fetchMediaObjectUrl(url, kbId)
       .then((blobUrl) => {
+        if (disposedRef.current) {
+          // Resolved after unmount/url change — revoke now or the blob leaks.
+          if (blobUrl.startsWith("blob:")) URL.revokeObjectURL(blobUrl);
+          return;
+        }
         if (blobUrl.startsWith("blob:")) {
           if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
           objectUrlRef.current = blobUrl;
@@ -71,11 +79,13 @@ export function BlobMediaPlayer({
         setSrc(blobUrl);
       })
       .catch(() => {
-        setError(
-          kind === "video"
-            ? "Could not play this video."
-            : "Could not play this audio.",
-        );
+        if (!disposedRef.current) {
+          setError(
+            kind === "video"
+              ? "Could not play this video."
+              : "Could not play this audio.",
+          );
+        }
       });
   };
 

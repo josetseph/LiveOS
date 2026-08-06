@@ -60,7 +60,9 @@ export async function resolveApiBaseUrl(fallback: string): Promise<string> {
       cachedDesktopApiBase = url;
       return url || fallback;
     } catch {
-      cachedDesktopApiBase = null;
+      // Bridge not ready yet (e.g. early startup) — don't cache the failure,
+      // so the next call retries instead of routing every upload through the
+      // Next proxy for the whole session.
       return fallback;
     }
   }

@@ -98,9 +98,33 @@ export default function SettingsPage() {
     }, []);
 
     useEffect(() => {
+        let cancelled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+
+        // The sidebar indicator already polls this endpoint globally — here
+        // poll fast only while a user-triggered job runs, back off when idle,
+        // and pause while the window is hidden.
+        const schedule = (active: boolean) => {
+            if (cancelled) return;
+            timer = setTimeout(poll, active ? 3000 : 15000);
+        };
+
         const poll = async () => {
+            if (cancelled) return;
+            if (document.visibilityState === "hidden") {
+                schedule(false);
+                return;
+            }
+            let active = false;
             try {
                 const status = await api.getMaintenanceStatus(currentKB);
+                if (cancelled) return;
+                active = Boolean(
+                    status.community_detection.running ||
+                        status.temporal_digests.running ||
+                        communityTriggeredRef.current ||
+                        digestTriggeredRef.current,
+                );
                 if (status.community_detection.running) {
                     setCommunityStatus("running");
                 } else {
@@ -130,10 +154,23 @@ export default function SettingsPage() {
             } catch {
                 // Silently ignore poll failures.
             }
+            schedule(active);
         };
-        poll();
-        const interval = setInterval(poll, 3000);
-        return () => clearInterval(interval);
+
+        const onVisibility = () => {
+            if (document.visibilityState === "visible") {
+                clearTimeout(timer);
+                void poll();
+            }
+        };
+
+        document.addEventListener("visibilitychange", onVisibility);
+        void poll();
+        return () => {
+            cancelled = true;
+            clearTimeout(timer);
+            document.removeEventListener("visibilitychange", onVisibility);
+        };
     }, [currentKB]);
 
     const isLocal = LOCAL_PROVIDERS.has(form.provider);

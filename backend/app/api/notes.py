@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
@@ -275,7 +276,10 @@ async def get_notes(
     query = base_query.order_by(Note.created_at.desc())
     result = await db.execute(query)
     notes = result.scalars().all()
-    return [_note_response(n, kb) for n in notes]
+    # _note_response reads each note body from the vault (one file read per
+    # note) — run the whole batch off the event loop so a large vault on
+    # OneDrive/NAS doesn't stall every other request.
+    return await asyncio.to_thread(lambda: [_note_response(n, kb) for n in notes])
 
 
 @router.get("/api/v1/notes/{note_id}")
@@ -492,14 +496,14 @@ async def _delete_note_impl(
             "already_gone": True,
         }
 
-    body = note_body(note_obj, kb)
+    body = await asyncio.to_thread(note_body, note_obj, kb)
     rel_path = note_obj.rel_path
     attached_rels = _attachment_rels_from_note_body(body)
 
     vault = _Path(kb.vault_path).expanduser().resolve() if kb.vault_path else None
     if vault and rel_path:
         try:
-            delete_note_file(vault, rel_path)
+            await asyncio.to_thread(delete_note_file, vault, rel_path)
             logger.info("[delete_note] Removed vault file %s", rel_path)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # Do not fall back to raw path joins — that undoes safe_vault_join.
@@ -519,7 +523,8 @@ async def _delete_note_impl(
 
     orphan_ids: list[str] = []
     try:
-        rows = kb.graph.execute_query(
+        rows = await asyncio.to_thread(
+            kb.graph.execute_query,
             """
             MATCH (note:Node {id: $note_id, kind: 'note'})-[:REFERENCES]->(entity:Node)
             WHERE entity.kind <> 'note'
@@ -536,18 +541,20 @@ async def _delete_note_impl(
         logger.warning("[delete_note] Graph orphan query failed: %s", exc)
 
     try:
-        kb.graph.execute_query(
+        await asyncio.to_thread(
+            kb.graph.execute_query,
             "MATCH (n:Node {id: $id}) WHERE n.kind = 'note' DETACH DELETE n",
             {"id": note_id},
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning("[delete_note] Graph note delete failed: %s", exc)
 
-    _best_effort_delete_index_node(kb, note_id, "note")
+    await asyncio.to_thread(_best_effort_delete_index_node, kb, note_id, "note")
 
     for entity_id in orphan_ids:
         try:
-            kb.graph.execute_query(
+            await asyncio.to_thread(
+                kb.graph.execute_query,
                 "MATCH (n:Node {id: $id}) DETACH DELETE n",
                 {"id": entity_id},
             )
@@ -555,7 +562,7 @@ async def _delete_note_impl(
             logger.warning(
                 "[delete_note] Graph orphan delete failed (%s): %s", entity_id, exc
             )
-        _best_effort_delete_index_node(kb, entity_id, "orphan")
+        await asyncio.to_thread(_best_effort_delete_index_node, kb, entity_id, "orphan")
 
     logger.info(
         "[delete_note] Deleted note %s; removed %s orphaned entity nodes.",

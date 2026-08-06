@@ -86,6 +86,43 @@ class MultimediaService:
             return False
         return True
 
+    # Remote attachments are media files; anything past this is more likely a
+    # hostile/exhausting URL than a legitimate embed.
+    _MAX_REMOTE_DOWNLOAD_BYTES = 512 * 1024 * 1024
+
+    @staticmethod
+    def _assert_public_http_url(url: str) -> None:
+        """Reject URLs that resolve to loopback/private/link-local addresses.
+
+        Note markdown can contain arbitrary links (including web-ingested
+        content), so ingest-time fetches must not be able to reach local
+        services (API, Qdrant, Meilisearch, Firefly) or the LAN.
+        """
+        import ipaddress
+        import socket
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(f"Unsupported attachment URL: {url}")
+        try:
+            infos = socket.getaddrinfo(parsed.hostname, parsed.port or 0)
+        except socket.gaierror as exc:
+            raise ValueError(f"Cannot resolve attachment host: {parsed.hostname}") from exc
+        for info in infos:
+            addr = ipaddress.ip_address(info[4][0])
+            if (
+                addr.is_loopback
+                or addr.is_private
+                or addr.is_link_local
+                or addr.is_reserved
+                or addr.is_multicast
+                or addr.is_unspecified
+            ):
+                raise ValueError(
+                    f"Refusing to fetch non-public address for {parsed.hostname}: {addr}"
+                )
+
     def _download_temp_file(self, path_or_url: str) -> str:
         """Resolve vault/local/remote attachments to a local file path."""
         import tempfile
@@ -103,13 +140,27 @@ class MultimediaService:
         if not path_or_url.startswith("http"):
             raise FileNotFoundError(f"Attachment not found: {path_or_url}")
 
+        self._assert_public_http_url(path_or_url)
         logger.info(f"Downloading remote file: {path_or_url}...")
-        response = requests.get(path_or_url, timeout=300)
-        response.raise_for_status()
         suffix = "." + path_or_url.split(".")[-1] if "." in path_or_url else ".tmp"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(response.content)
-            return tmp.name
+        with requests.get(path_or_url, timeout=300, stream=True) as response:
+            response.raise_for_status()
+            written = 0
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                try:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        written += len(chunk)
+                        if written > self._MAX_REMOTE_DOWNLOAD_BYTES:
+                            raise ValueError(
+                                f"Remote attachment exceeds "
+                                f"{self._MAX_REMOTE_DOWNLOAD_BYTES} bytes: {path_or_url}"
+                            )
+                        tmp.write(chunk)
+                except Exception:
+                    tmp.close()
+                    os.unlink(tmp.name)
+                    raise
+                return tmp.name
 
     def _describe_image_local(self, local_path: str) -> str:
         """Florence caption via in-process multimodal runtime."""

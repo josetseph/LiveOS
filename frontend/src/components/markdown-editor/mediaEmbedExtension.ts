@@ -10,6 +10,7 @@ import {
   isImageUrl,
   isVideoUrl,
   isAudioUrl,
+  isPdfUrl,
   resolveFileUrl,
   encodeFileUrl,
   fetchMediaObjectUrl,
@@ -19,11 +20,12 @@ import {
 
 /** Markdown images + paperclip/mic attachment links + plain links to embeddable video.
  * URLs may contain spaces (unencoded filenames) — match until `)`.
+ * Accepts 📎 (paperclip) and 🖇 (paperclips) markers used by older/newer inserts.
  */
 const MEDIA_RE =
-  /(?:!\[([^\]]*)\]\(([^)\n]+)\)|\[([📎🎤]?[^\]]*)\]\(([^)\n]+)\))/g;
+  /(?:!\[([^\]]*)\]\(([^)\n]+)\)|\[([📎🖇🎤]?[^\]]*)\]\(([^)\n]+)\))/g;
 
-type MediaKind = "image" | "video" | "audio" | "youtube" | "vimeo";
+type MediaKind = "image" | "video" | "audio" | "pdf" | "youtube" | "vimeo";
 
 function kindForUrl(url: string): MediaKind | null {
   const cleaned = url.trim();
@@ -32,6 +34,7 @@ function kindForUrl(url: string): MediaKind | null {
   if (isImageUrl(cleaned)) return "image";
   if (isVideoUrl(cleaned)) return "video";
   if (isAudioUrl(cleaned)) return "audio";
+  if (isPdfUrl(cleaned)) return "pdf";
   return null;
 }
 
@@ -69,6 +72,20 @@ class MediaWidget extends WidgetType {
       iframe.allowFullscreen = true;
       iframe.loading = "lazy";
       iframe.referrerPolicy = "strict-origin-when-cross-origin";
+      wrap.appendChild(iframe);
+      return wrap;
+    }
+
+    if (this.kind === "pdf") {
+      const caption = document.createElement("div");
+      caption.className = "cm-media-embed-caption";
+      caption.textContent = this.label || "PDF";
+      const iframe = document.createElement("iframe");
+      iframe.src = this.src;
+      iframe.title = this.label || "PDF";
+      iframe.className = "cm-media-embed-pdf";
+      iframe.loading = "lazy";
+      wrap.appendChild(caption);
       wrap.appendChild(iframe);
       return wrap;
     }
@@ -142,7 +159,7 @@ class MediaWidget extends WidgetType {
 }
 
 /**
- * Live-preview embeds for images / video / audio / YouTube / Vimeo.
+ * Live-preview embeds for images / video / audio / PDF / YouTube / Vimeo.
  * Inactive lines: replace markdown with the media widget.
  * Active (cursor) line: leave raw markdown for editing.
  */
@@ -179,7 +196,7 @@ export function createMediaEmbedDecorations(kbId = "default") {
           const to = m.index + m[0].length;
           const isMdImage = m[0].startsWith("![");
           const label = (isMdImage ? m[1] : m[3] || "").replace(
-            /^[📎🎤]\s*/,
+            /^[📎🖇🎤]\s*/,
             "",
           );
           const rawUrl = (isMdImage ? m[2] : m[4] || "").trim();
@@ -188,10 +205,10 @@ export function createMediaEmbedDecorations(kbId = "default") {
           const kind = kindForUrl(rawUrl);
           if (!kind) continue;
 
-          // Plain markdown links (no 📎/🎤 / image) only embed for YouTube/Vimeo
+          // Plain markdown links (no 📎/🖇/🎤 / image) only embed for YouTube/Vimeo
           if (
             !isMdImage &&
-            !(m[3] || "").match(/^[📎🎤]/) &&
+            !(m[3] || "").match(/^[📎🖇🎤]/) &&
             kind !== "youtube" &&
             kind !== "vimeo"
           ) {

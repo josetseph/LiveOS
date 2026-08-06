@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import delete, select
@@ -102,22 +104,25 @@ async def empty_knowledge_base(
 
     notes_removed = await _purge_kb_sql_notes(db, kb.kb_id)
 
+    # Off the event loop: Kuzu holds a process-wide lock and Qdrant/Meili/vault
+    # resets are network/disk-bound — inline they'd freeze chat streaming and
+    # status polls for the duration.
     try:
-        kb.graph.wipe_all_nodes()
+        await asyncio.to_thread(kb.graph.wipe_all_nodes)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning("[empty-kb] Graph wipe failed: %s", exc)
     try:
-        kb.qdrant.reset_all()
+        await asyncio.to_thread(kb.qdrant.reset_all)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning("[empty-kb] Qdrant reset failed: %s", exc)
     try:
-        kb.meili.reset_all()
+        await asyncio.to_thread(kb.meili.reset_all)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning("[empty-kb] Meili reset failed: %s", exc)
 
     if vault_path:
         try:
-            clear_vault_contents(vault_path)
+            await asyncio.to_thread(clear_vault_contents, vault_path)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("[empty-kb] Vault clear failed: %s", exc)
             try:

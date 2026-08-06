@@ -375,7 +375,8 @@ async def extraction_node(
 
     logs = state["logs"]
     logs.append(
-        f"[{datetime.now().strftime('%H:%M:%S')}] EXTRACT: Running Knowledge Architect ({llm_service.models_path})..."
+        f"[{datetime.now().strftime('%H:%M:%S')}] EXTRACT: Running Knowledge Architect "
+        f"({llm_service.get_ingestion_model() or llm_service.provider})..."
     )
     import time
 

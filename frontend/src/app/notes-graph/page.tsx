@@ -13,6 +13,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "@/lib/api";
 import { useKB } from "@/lib/kb-context";
+import { lastNoteStorageKey } from "@/app/notes/_lib/storage-keys";
 import {
   Calendar,
   ExternalLink,
@@ -228,15 +229,42 @@ export default function NotesGraphPage() {
   const graphRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const loadGenRef = useRef(0);
+  const detailRequestRef = useRef(0);
+  // Fit once on first settle — onEngineStop / resize used to re-fire zoomToFit
+  // and yank the camera back whenever the user zoomed out.
+  const hasFittedRef = useRef(false);
+  const userNavigatedRef = useRef(false);
+  const fittingRef = useRef(false);
   const [dims, setDims] = useState({ w: 0, h: 0 });
   const controlsRef = useRef(controls);
   controlsRef.current = controls;
 
+  const runZoomToFit = useCallback((duration = 400, padding = 80) => {
+    fittingRef.current = true;
+    hasFittedRef.current = true;
+    graphRef.current?.zoomToFit?.(duration, padding);
+    window.setTimeout(() => {
+      fittingRef.current = false;
+    }, duration + 80);
+  }, []);
+
+  const markUserNavigated = useCallback(() => {
+    if (fittingRef.current) return;
+    userNavigatedRef.current = true;
+  }, []);
+
+  // Tracks which KB the current `controls` state belongs to, so the save
+  // effect can't write the previous KB's controls under the new KB's key
+  // during the render where currentKB changed but setControls hasn't landed.
+  const controlsLoadedKbRef = useRef<string | null>(null);
+
   useEffect(() => {
     setControls(loadControls(currentKB));
+    controlsLoadedKbRef.current = currentKB;
   }, [currentKB]);
 
   useEffect(() => {
+    if (controlsLoadedKbRef.current !== currentKB) return;
     try {
       localStorage.setItem(controlsKey(currentKB), JSON.stringify(controls));
     } catch {
@@ -251,6 +279,8 @@ export default function NotesGraphPage() {
   const loadGraph = useCallback(async () => {
     const gen = ++loadGenRef.current;
     setLoading(true);
+    hasFittedRef.current = false;
+    userNavigatedRef.current = false;
     try {
       const payload = await api.getNotesGraph(currentKB);
       if (gen !== loadGenRef.current) return;
@@ -367,14 +397,24 @@ export default function NotesGraphPage() {
     dims.h,
   ]);
 
-  // Re-fit when canvas size or data set changes
+  // When filters change the visible set and the user hasn't taken over the
+  // camera, allow one fresh fit for the new topology.
+  useEffect(() => {
+    if (userNavigatedRef.current) return;
+    hasFittedRef.current = false;
+  }, [filtered.nodes.length, filtered.links.length]);
+
+  // Initial fit when canvas becomes ready or the filtered set first arrives.
+  // Never re-fit after the user has zoomed/panned — that was yanking zoom out.
   useEffect(() => {
     if (!dims.w || !dims.h || filtered.nodes.length === 0) return;
+    if (userNavigatedRef.current || hasFittedRef.current) return;
     const t = window.setTimeout(() => {
-      graphRef.current?.zoomToFit?.(400, 80);
+      if (userNavigatedRef.current || hasFittedRef.current) return;
+      runZoomToFit(400, 80);
     }, 250);
     return () => window.clearTimeout(t);
-  }, [dims.w, dims.h, filtered.nodes.length, filtered.links.length]);
+  }, [dims.w, dims.h, filtered.nodes.length, filtered.links.length, runZoomToFit]);
 
   const colorFor = useCallback(
     (node: GraphNode) => {
@@ -422,24 +462,34 @@ export default function NotesGraphPage() {
   );
 
   const handleNodeClick = async (node: GraphNode) => {
+    const requestId = ++detailRequestRef.current;
     setSelectedNode(node);
     setNodeDetails(null);
     setShowControls(false);
 
     if (typeof node.x === "number" && typeof node.y === "number") {
+      // Treat focus zoom as user navigation so a later engine-stop fit
+      // cannot undo it.
+      userNavigatedRef.current = true;
+      fittingRef.current = true;
       graphRef.current?.centerAt(node.x, node.y, 800);
       graphRef.current?.zoom(3.5, 800);
+      window.setTimeout(() => {
+        fittingRef.current = false;
+      }, 880);
     }
 
     if (node.group === "Note" && node.uuid) {
       setDetailLoading(true);
       try {
         const details = await api.getNote(node.uuid, currentKB);
-        setNodeDetails(details);
+        // Clicking A then B quickly can deliver A's response last — only the
+        // latest click may populate the panel.
+        if (requestId === detailRequestRef.current) setNodeDetails(details);
       } catch (error) {
         console.error("Failed to fetch note details", error);
       } finally {
-        setDetailLoading(false);
+        if (requestId === detailRequestRef.current) setDetailLoading(false);
       }
     }
   };
@@ -527,7 +577,12 @@ export default function NotesGraphPage() {
             onBackgroundClick={() => {
               setSelectedNode(null);
             }}
-            onEngineStop={() => graphRef.current?.zoomToFit?.(400, 80)}
+            onZoom={markUserNavigated}
+            onZoomEnd={markUserNavigated}
+            onEngineStop={() => {
+              if (hasFittedRef.current || userNavigatedRef.current) return;
+              runZoomToFit(400, 80);
+            }}
           />
         )}
       </div>
@@ -557,7 +612,11 @@ export default function NotesGraphPage() {
           </button>
           <button
             type="button"
-            onClick={() => graphRef.current?.zoomToFit?.(400, 60)}
+            onClick={() => {
+              userNavigatedRef.current = false;
+              hasFittedRef.current = false;
+              runZoomToFit(400, 60);
+            }}
             className="rounded-xl border border-white/10 bg-black/70 px-3 py-2 text-xs text-white/70 backdrop-blur-xl transition hover:bg-white/10 hover:text-white"
           >
             Fit
@@ -986,7 +1045,7 @@ export default function NotesGraphPage() {
                 onClick={() => {
                   if (selectedNode.uuid) {
                     sessionStorage.setItem(
-                      "orb:last-note-id",
+                      lastNoteStorageKey(currentKB),
                       selectedNode.uuid,
                     );
                   }

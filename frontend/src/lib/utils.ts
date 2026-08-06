@@ -40,6 +40,11 @@ export function isAudioUrl(url: string): boolean {
   return /\.(m4a|mp3|wav|ogg|aac|flac)(\?|$)/i.test(decodeURIComponentSafe(url));
 }
 
+/** Returns true if the URL points to a PDF. */
+export function isPdfUrl(url: string): boolean {
+  return /\.pdf(\?|$)/i.test(decodeURIComponentSafe(url));
+}
+
 
 /** Convert a YouTube watch/share URL into an embeddable iframe src, or null. */
 export function youtubeEmbedUrl(url: string): string | null {

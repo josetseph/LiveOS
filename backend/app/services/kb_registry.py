@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 import threading
@@ -376,8 +377,12 @@ class KBRegistry:
             ]
 
     def create_kb(self, name: str, vault_path: str | None = None) -> KBContext:
-        slug = name.lower().replace(" ", "_")
         kb_id = str(uuid.uuid4())
+        # The slug becomes filesystem paths and Qdrant/Meili collection names —
+        # a raw name containing `/` or `..` would escape DATA_DIR.
+        slug = re.sub(r"[^a-z0-9_-]", "-", name.lower().replace(" ", "_")).strip("-_")
+        if not slug:
+            slug = f"kb-{kb_id[:8]}"
         data = resolve_data_dir()
         if not vault_path:
             vault_path = str(data / "vaults" / slug)
@@ -485,9 +490,21 @@ class KBRegistry:
             self._cleanup_stores(meta)
         if delete_vault_files:
             try:
-                vp = Path(meta["vault_path"])
+                vp = Path(meta["vault_path"]).resolve()
+                # Only remove vaults Orb provisioned itself. A KB can point at a
+                # pre-existing user folder (OneDrive, NAS) that holds far more
+                # than Orb's notes — deleting the KB must never rmtree those.
+                app_vaults = (resolve_data_dir() / "vaults").resolve()
                 if vp.exists():
-                    shutil.rmtree(vp)
+                    if vp == app_vaults or app_vaults in vp.parents:
+                        shutil.rmtree(vp)
+                    else:
+                        logger.info(
+                            "[KBRegistry] Keeping external vault folder %s "
+                            "(outside %s)",
+                            vp,
+                            app_vaults,
+                        )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.warning(f"[KBRegistry] Vault delete failed: {exc}")
 
@@ -609,7 +626,17 @@ class KBRegistry:
             logger.warning(f"[KBRegistry] Meilisearch cleanup failed: {exc}")
 
         try:
-            kuzu_path = Path(normalize_kuzu_path(meta["kuzu_path"]))
+            kuzu_path = Path(normalize_kuzu_path(meta["kuzu_path"])).resolve()
+            kuzu_root = (resolve_data_dir() / "kuzu").resolve()
+            if kuzu_root not in kuzu_path.parents:
+                # A crafted KB name used to be able to point this at arbitrary
+                # paths — never delete outside DATA_DIR/kuzu.
+                logger.warning(
+                    "[KBRegistry] Skipping Kuzu cleanup outside %s: %s",
+                    kuzu_root,
+                    kuzu_path,
+                )
+                return
             wal = Path(f"{kuzu_path}.wal")
             if kuzu_path.is_file():
                 kuzu_path.unlink(missing_ok=True)

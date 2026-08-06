@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Image as ImageIcon, FileText, Mic, Film } from "lucide-react";
 import { api } from "@/lib/api";
-import { resolveFileUrl, isImageUrl, isVideoUrl } from "@/lib/utils";
+import { resolveFileUrl, isImageUrl, isVideoUrl, isPdfUrl } from "@/lib/utils";
 import { BlobMediaPlayer } from "@/components/blob-media-player";
 
 /** Allow entity:// pseudo-links through react-markdown's URL sanitizer. */
@@ -244,9 +244,12 @@ function makeLinkComponent(
         const resolvedUrl = href ? resolveFileUrl(href, kbId) : "";
         const isAttachment =
             Boolean(href) &&
-            (text.startsWith("📎") || text.startsWith("🎤") || isAttachmentHref(href!));
+            (text.startsWith("📎") ||
+                text.startsWith("🖇") ||
+                text.startsWith("🎤") ||
+                isAttachmentHref(href!));
         const filename =
-            text.replace(/^[📎🎤]\s*/, "").trim() ||
+            text.replace(/^[📎🖇🎤]\s*/, "").trim() ||
             (href ? decodeURIComponent(href.split("/").pop() ?? "file") : "file");
 
         // Entity mention pseudo-link: entity://node_id
@@ -263,7 +266,7 @@ function makeLinkComponent(
                 </button>
             );
         }
-        // Inline image/video rendering for 📎 file attachments
+        // Inline image/video/PDF rendering for 📎 file attachments
         if (href && isAttachment) {
             if (isImageUrl(href) || isImageUrl(resolvedUrl)) {
                 return (
@@ -291,6 +294,24 @@ function makeLinkComponent(
                     </span>
                 );
             }
+            if (isPdfUrl(href) || isPdfUrl(resolvedUrl)) {
+                return (
+                    <span className="block my-4 not-prose">
+                        <iframe
+                            src={resolvedUrl}
+                            title={filename}
+                            className="h-[480px] max-h-[70vh] w-full max-w-3xl rounded-xl border border-white/10 bg-black/40"
+                        />
+                        <button
+                            type="button"
+                            onClick={() => onFileClick(resolvedUrl, filename)}
+                            className="mt-1 block text-xs text-white/40 hover:text-white/70"
+                        >
+                            {filename} — open full preview
+                        </button>
+                    </span>
+                );
+            }
         }
         if (href && isAttachment) {
             return (
@@ -302,8 +323,17 @@ function makeLinkComponent(
                 </button>
             );
         }
+        // External links open outside the app window — web-ingested content
+        // must not be able to navigate the Electron renderer away from Orb.
+        const isExternal = /^https?:\/\//i.test(href || "");
         return (
-            <a href={href} {...props}>
+            <a
+                href={href}
+                {...(isExternal
+                    ? { target: "_blank", rel: "noopener noreferrer" }
+                    : {})}
+                {...props}
+            >
                 {children}
             </a>
         );

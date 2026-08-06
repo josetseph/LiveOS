@@ -122,9 +122,16 @@ export function useNotesList({
   }, [currentKB, isHydrated]);
 
   // Debounced search and filter — skip until localStorage is hydrated so we
-  // never fetch with the pre-hydration default KB slug.
+  // never fetch with the pre-hydration default KB slug. Skips its first run:
+  // the KB-hydration effect above already fetched, so running here too would
+  // double the initial notes fetch.
+  const searchEffectRanRef = useRef(false);
   useEffect(() => {
     if (!isHydrated) return;
+    if (!searchEffectRanRef.current) {
+      searchEffectRanRef.current = true;
+      return;
+    }
 
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);

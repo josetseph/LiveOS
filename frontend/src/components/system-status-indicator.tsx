@@ -115,24 +115,58 @@ export function SystemStatusIndicator() {
 
   useEffect(() => {
     let cancelled = false;
+    let timer: number | undefined;
+
+    // Poll fast only while a job is running; back off when idle and pause
+    // while the window is hidden — this indicator mounts on every page.
+    const isActive = (
+      data: Awaited<ReturnType<typeof api.getMaintenanceStatus>> | null,
+    ) =>
+      Boolean(
+        data &&
+          (Number(data.ingestion?.active || 0) > 0 ||
+            data.community_detection?.running ||
+            data.community_detection?.timer_armed ||
+            data.temporal_digests?.running),
+      );
+
+    const schedule = (active: boolean) => {
+      if (cancelled) return;
+      timer = window.setTimeout(poll, active ? 4000 : 30000);
+    };
 
     const poll = async () => {
+      if (cancelled) return;
+      if (document.visibilityState === "hidden") {
+        schedule(false);
+        return;
+      }
       try {
         const data = await api.getMaintenanceStatus(currentKB);
-        if (!cancelled) {
-          setPayload(data);
-          setFailed(false);
-        }
+        if (cancelled) return;
+        setPayload(data);
+        setFailed(false);
+        schedule(isActive(data));
       } catch {
-        if (!cancelled) setFailed(true);
+        if (cancelled) return;
+        setFailed(true);
+        schedule(false);
       }
     };
 
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        window.clearTimeout(timer);
+        void poll();
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
     void poll();
-    const id = window.setInterval(poll, 4000);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [currentKB]);
 

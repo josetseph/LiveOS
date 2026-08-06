@@ -76,19 +76,24 @@ function phpArchiveSpec() {
   throw new Error(`Unsupported platform for Firefly PHP runtime: ${process.platform}`);
 }
 
-function downloadFile(url, dest, onProgress) {
+function downloadFile(url, dest, onProgress, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
     const getter = url.startsWith("https") ? https.get : http.get;
     const req = getter(url, { timeout: 180000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        file.close();
-        try {
-          fs.unlinkSync(dest);
-        } catch (_) {
-          /* ignore */
+        file.close(() => fs.rmSync(dest, { force: true }));
+        const next = new URL(res.headers.location, url).toString();
+        if (redirectsLeft <= 0) {
+          reject(new Error(`Too many redirects downloading ${url}`));
+          return;
         }
-        downloadFile(res.headers.location, dest, onProgress).then(resolve).catch(reject);
+        if (!next.startsWith("https:")) {
+          // Never follow an https→http downgrade for executable payloads.
+          reject(new Error(`Refusing non-https redirect: ${next}`));
+          return;
+        }
+        downloadFile(next, dest, onProgress, redirectsLeft - 1).then(resolve).catch(reject);
         return;
       }
       if (res.statusCode !== 200) {
@@ -321,7 +326,17 @@ function stripQuarantine(filePath) {
 
 function writeJson(filePath, data) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  // runtime.json carries the Firefly password / API token / APP_KEY and the
+  // data dir may be cloud-synced — keep it owner-only.
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch (_) {
+    /* best effort on non-POSIX */
+  }
 }
 
 function readJson(filePath, fallback = null) {
@@ -384,7 +399,13 @@ function ensureFireflyEnv(dataDir) {
     AUTHENTICATION_GUARD: "web",
     APP_NAME: "Orb_Finance",
   };
-  fs.writeFileSync(envFile, `${renderEnv(env)}\n`, "utf8");
+  // .env carries APP_KEY — owner-only, same as runtime.json.
+  fs.writeFileSync(envFile, `${renderEnv(env)}\n`, { encoding: "utf8", mode: 0o600 });
+  try {
+    fs.chmodSync(envFile, 0o600);
+  } catch (_) {
+    /* best effort on non-POSIX */
+  }
   runtime.cronToken = String(env.STATIC_CRON_TOKEN);
   writeJson(fireflyRuntimeFile(dataDir), runtime);
 }
@@ -394,9 +415,16 @@ function runPhp(dataDir, args, options = {}) {
   const appDir = fireflyAppDir(dataDir);
   const result = spawnSync(php, args, {
     cwd: appDir,
-    env: { ...process.env, HOME: fireflyDataRoot(dataDir), USERPROFILE: fireflyDataRoot(dataDir) },
+    env: {
+      ...process.env,
+      HOME: fireflyDataRoot(dataDir),
+      USERPROFILE: fireflyDataRoot(dataDir),
+      ...(options.env || {}),
+    },
     encoding: "utf8",
     stdio: options.capture ? ["ignore", "pipe", "pipe"] : "pipe",
+    // Verbose migrations overflow the 1 MiB default and abort with ENOBUFS.
+    maxBuffer: 64 * 1024 * 1024,
   });
   if (result.status !== 0) {
     const stderr = (result.stderr || "").trim();
@@ -417,7 +445,8 @@ async function ensurePhpRuntime(dataDir, onStatus = () => {}) {
     normalizePhpIni(targetRoot);
     return phpPath;
   }
-  fs.rmSync(targetRoot, { recursive: true, force: true });
+  // Don't delete the working runtime until a replacement is staged — a failed
+  // download/extract used to leave Firefly with no PHP at all until back online.
   const bundledRoot = bundledFireflyRoot();
   const bundledPhpRoot = bundledRoot ? path.join(bundledRoot, "php") : null;
   const bundledMarker = bundledPhpRoot && fs.existsSync(phpRuntimeMarker(bundledPhpRoot))
@@ -425,6 +454,7 @@ async function ensurePhpRuntime(dataDir, onStatus = () => {}) {
     : "";
   if (bundledPhpRoot && bundledMarker === PHP_RUNTIME_ID) {
     fs.mkdirSync(fireflyDataRoot(dataDir), { recursive: true });
+    fs.rmSync(targetRoot, { recursive: true, force: true });
     fs.cpSync(bundledPhpRoot, targetRoot, { recursive: true });
     normalizeMacPhpLibs(targetRoot);
     normalizePhpIni(targetRoot);
@@ -454,6 +484,7 @@ async function ensurePhpRuntime(dataDir, onStatus = () => {}) {
     process.platform === "win32" ? "php.exe" : "php",
   );
   if (!found) throw new Error("Portable PHP executable not found after extraction");
+  fs.rmSync(targetRoot, { recursive: true, force: true });
   fs.cpSync(extractTo, targetRoot, { recursive: true });
   normalizeMacPhpLibs(targetRoot);
   normalizePhpIni(targetRoot);
@@ -464,12 +495,97 @@ async function ensurePhpRuntime(dataDir, onStatus = () => {}) {
   return phpBinaryPath(dataDir);
 }
 
+// Everything under app/storage is user state (sqlite DB, Passport keys, uploads).
+// Replacing the app tree must never take it with it.
+const PRESERVED_APP_PATHS = [
+  path.join("storage", "database"),
+  path.join("storage", "upload"),
+  path.join("storage", "oauth-private.key"),
+  path.join("storage", "oauth-public.key"),
+];
+
+function stashAppState(appDir) {
+  const stashDir = path.join(path.dirname(appDir), ".app-state-stash");
+  // Build the new stash beside the old one and swap only if we captured
+  // something: if a previous upgrade died after wiping appDir, the old stash
+  // is the ONLY copy of the finance DB — never clobber it with emptiness.
+  const building = `${stashDir}.new`;
+  fs.rmSync(building, { recursive: true, force: true });
+  const stashed = [];
+  for (const rel of PRESERVED_APP_PATHS) {
+    const source = path.join(appDir, rel);
+    if (!fs.existsSync(source)) continue;
+    const target = path.join(building, rel);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.cpSync(source, target, { recursive: true });
+    stashed.push(rel);
+  }
+  if (stashed.length) {
+    fs.rmSync(stashDir, { recursive: true, force: true });
+    fs.renameSync(building, stashDir);
+    return { stashDir, stashed };
+  }
+  fs.rmSync(building, { recursive: true, force: true });
+  if (fs.existsSync(stashDir)) {
+    const prior = PRESERVED_APP_PATHS.filter((rel) =>
+      fs.existsSync(path.join(stashDir, rel)),
+    );
+    return { stashDir, stashed: prior };
+  }
+  return { stashDir, stashed: [] };
+}
+
+function restoreAppState({ stashDir, stashed }, appDir) {
+  for (const rel of stashed) {
+    const source = path.join(stashDir, rel);
+    const target = path.join(appDir, rel);
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.cpSync(source, target, { recursive: true });
+  }
+  fs.rmSync(stashDir, { recursive: true, force: true });
+}
+
+/**
+ * Replace ``appDir`` with the tree produced by ``populate(appDir)``, keeping
+ * the old tree as ``app.bak`` until the copy succeeds. A mid-copy failure
+ * (disk full, cloud-sync lock) restores the previous tree instead of leaving
+ * nothing behind.
+ */
+function swapInAppTree(appDir, populate) {
+  const backup = `${appDir}.bak`;
+  fs.rmSync(backup, { recursive: true, force: true });
+  if (fs.existsSync(appDir)) fs.renameSync(appDir, backup);
+  try {
+    fs.mkdirSync(appDir, { recursive: true });
+    populate(appDir);
+  } catch (err) {
+    fs.rmSync(appDir, { recursive: true, force: true });
+    if (fs.existsSync(backup)) fs.renameSync(backup, appDir);
+    throw err;
+  }
+  fs.rmSync(backup, { recursive: true, force: true });
+}
+
+function passportKeysExist(dataDir) {
+  const storage = path.join(fireflyAppDir(dataDir), "storage");
+  return ["oauth-private.key", "oauth-public.key"].every((name) => {
+    const file = path.join(storage, name);
+    try {
+      return fs.statSync(file).size > 0;
+    } catch (_) {
+      return false;
+    }
+  });
+}
+
 async function ensureFireflyApp(dataDir, onStatus = () => {}) {
   const appDir = fireflyAppDir(dataDir);
   const versionMarker = path.join(appDir, ".orb-firefly-version");
   if (fs.existsSync(versionMarker) && fs.readFileSync(versionMarker, "utf8").trim() === FIREFLY_VERSION) {
     return appDir;
   }
+  const stash = stashAppState(appDir);
   const bundledRoot = bundledFireflyRoot();
   if (bundledRoot && fs.existsSync(path.join(bundledRoot, "app", ".orb-firefly-version"))) {
     const bundledVersion = fs.readFileSync(
@@ -477,9 +593,11 @@ async function ensureFireflyApp(dataDir, onStatus = () => {}) {
       "utf8",
     ).trim();
     if (bundledVersion === FIREFLY_VERSION) {
-      fs.rmSync(appDir, { recursive: true, force: true });
       fs.mkdirSync(path.dirname(appDir), { recursive: true });
-      fs.cpSync(path.join(bundledRoot, "app"), appDir, { recursive: true });
+      swapInAppTree(appDir, (dest) => {
+        fs.cpSync(path.join(bundledRoot, "app"), dest, { recursive: true });
+      });
+      restoreAppState(stash, appDir);
       onStatus("Using bundled Firefly app seed");
       return appDir;
     }
@@ -500,12 +618,14 @@ async function ensureFireflyApp(dataDir, onStatus = () => {}) {
   const extractTo = path.join(tmpDir, "firefly-app");
   fs.rmSync(extractTo, { recursive: true, force: true });
   extractArchive(archive, extractTo, "tar.gz");
-  fs.rmSync(appDir, { recursive: true, force: true });
-  fs.mkdirSync(appDir, { recursive: true });
   const entries = fs.readdirSync(extractTo);
-  for (const entry of entries) {
-    fs.cpSync(path.join(extractTo, entry), path.join(appDir, entry), { recursive: true });
-  }
+  if (!entries.length) throw new Error("Firefly archive extracted to an empty tree");
+  swapInAppTree(appDir, (dest) => {
+    for (const entry of entries) {
+      fs.cpSync(path.join(extractTo, entry), path.join(dest, entry), { recursive: true });
+    }
+  });
+  restoreAppState(stash, appDir);
   fs.writeFileSync(versionMarker, `${FIREFLY_VERSION}\n`, "utf8");
   onStatus("Firefly III app ready");
   return appDir;
@@ -530,14 +650,37 @@ function ensureRuntimeMetadata(dataDir) {
   return existing;
 }
 
-function bootstrapUserScript(email, password, groupTitle) {
+function bootstrapStateScript(email) {
+  const esc = (value) => String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  return [
+    "require 'vendor/autoload.php';",
+    "$app = require 'bootstrap/app.php';",
+    "$app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap();",
+    `$user = \\FireflyIII\\User::where('email', '${esc(email)}')->first();`,
+    "$clients = \\Illuminate\\Support\\Facades\\DB::table('oauth_clients')->count();",
+    "echo json_encode(['user_id' => $user?->id, 'group_id' => $user?->user_group_id, 'clients' => $clients], JSON_UNESCAPED_SLASHES);",
+  ].join(" ");
+}
+
+function readBootstrapState(dataDir, email) {
+  // Migrations already succeeded by the time this probe runs, so a failure
+  // here is real breakage. Treating it as "state absent" caused a fresh
+  // Passport client + token reset on every boot while hiding the error.
+  const raw = runPhp(dataDir, ["-r", bootstrapStateScript(email)], { capture: true }).trim();
+  const jsonStart = raw.lastIndexOf("{");
+  return JSON.parse(jsonStart >= 0 ? raw.slice(jsonStart) : raw);
+}
+
+function bootstrapUserScript(email, groupTitle) {
   const esc = (value) => String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
   return [
     "require 'vendor/autoload.php';",
     "$app = require 'bootstrap/app.php';",
     "$app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap();",
     `$email = '${esc(email)}';`,
-    `$password = '${esc(password)}';`,
+    // Via env, not argv — command lines are world-visible in `ps` output.
+    "$password = getenv('ORB_FIREFLY_BOOTSTRAP_PASSWORD');",
+    "if (!$password) { fwrite(STDERR, 'Missing bootstrap password env'); exit(1); }",
     `$groupTitle = '${esc(groupTitle)}';`,
     "$group = \\FireflyIII\\Models\\UserGroup::firstOrCreate(['title' => $groupTitle]);",
     "$role = \\FireflyIII\\Models\\Role::firstOrCreate(['name' => 'owner'], ['display_name' => 'Owner', 'description' => 'Orb desktop owner']);",
@@ -573,28 +716,34 @@ async function ensureFireflyRuntime(dataDir, onStatus = () => {}) {
   onStatus("Migrating Firefly database…");
   runPhp(dataDir, ["artisan", "migrate", "--force"]);
 
-  onStatus("Seeding Firefly currencies…");
-  runPhp(dataDir, [
-    "artisan",
-    "db:seed",
-    "--class=Database\\Seeders\\TransactionCurrencySeeder",
-    "--force",
-  ]);
+  // Full base seed (account types, currencies, transaction types, roles, …).
+  // Currency-only seeding left account_types empty and broke Asset account creates.
+  onStatus("Seeding Firefly base data…");
+  runPhp(dataDir, ["artisan", "db:seed", "--force"]);
 
-  if (!runtime.passportReady) {
+  // Trust the DB and key files, not the runtime flags: an app upgrade or a
+  // half-finished first run can leave the flags set while the state is gone.
+  const state = readBootstrapState(dataDir, runtime.email);
+  if (!passportKeysExist(dataDir)) {
     onStatus("Preparing Firefly API auth…");
     runPhp(dataDir, ["artisan", "passport:keys", "--force"]);
-    runPhp(dataDir, ["artisan", "passport:client", "--personal", "--no-interaction"]);
-    runtime.passportReady = true;
-    writeJson(fireflyRuntimeFile(dataDir), runtime);
+    // Tokens minted under the previous keypair no longer verify.
+    runtime.apiToken = null;
   }
+  if (!state.clients) {
+    onStatus("Preparing Firefly API auth…");
+    runPhp(dataDir, ["artisan", "passport:client", "--personal", "--no-interaction"]);
+    runtime.apiToken = null;
+  }
+  runtime.passportReady = true;
+  writeJson(fireflyRuntimeFile(dataDir), runtime);
 
-  if (!runtime.userReady || !runtime.apiToken) {
+  if (!state.user_id || !runtime.apiToken) {
     onStatus("Creating Firefly desktop user…");
     const raw = runPhp(
       dataDir,
-      ["-r", bootstrapUserScript(runtime.email, runtime.password, "Orb")],
-      { capture: true },
+      ["-r", bootstrapUserScript(runtime.email, "Orb")],
+      { capture: true, env: { ORB_FIREFLY_BOOTSTRAP_PASSWORD: runtime.password } },
     ).trim();
     const jsonStart = raw.lastIndexOf("{");
     const parsed = JSON.parse(jsonStart >= 0 ? raw.slice(jsonStart) : raw);

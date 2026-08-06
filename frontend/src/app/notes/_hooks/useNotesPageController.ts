@@ -172,6 +172,7 @@ export function useNotesPageController() {
   const wikilink = useWikilinkPreview({
     notes: list.notes,
     onNoteSelect: handleNoteSelect,
+    sourceNote: selection.selectedNote,
   });
 
   const handleEntityClick = useCallback((nodeId: string, name: string) => {

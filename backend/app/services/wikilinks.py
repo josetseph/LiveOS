@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,57 +16,132 @@ from app.services.note_files import note_body
 from app.services.vault import extract_wikilinks
 
 
-def _note_lookup(notes: list[Note]) -> dict[str, str]:
-    """Map common wikilink target forms → note id."""
-    by_title: dict[str, str] = {}
-    for n in notes:
-        if n.title:
-            by_title.setdefault(n.title.lower().strip(), n.id)
-        if n.rel_path:
-            rel = n.rel_path.replace("\\", "/")
-            stem = Path(rel).stem.lower()
-            by_title.setdefault(stem, n.id)
-            without_ext = rel[:-3] if rel.lower().endswith(".md") else rel
-            by_title.setdefault(without_ext.lower(), n.id)
-            by_title.setdefault(Path(rel).name.lower().replace(".md", ""), n.id)
-    return by_title
+def _normalize_link(value: str | None) -> str:
+    """Lowercase, forward-slashed, extension-less form used for matching."""
+    text = (value or "").replace("\\", "/").strip().strip("/").lower()
+    while text.startswith("./"):
+        text = text[2:]
+    if text.endswith(".md"):
+        text = text[:-3]
+    return text
 
 
-def _resolve_target(by_title: dict[str, str], key: str) -> str | None:
-    if key in by_title:
-        return by_title[key]
-    # Obsidian-style path without extension
-    alt = key[:-3] if key.endswith(".md") else key
-    if alt in by_title:
-        return by_title[alt]
-    # Match by basename only
-    base = Path(key).name.lower().replace(".md", "")
-    return by_title.get(base)
+def _folder_of(rel_path: str) -> str:
+    return rel_path.rsplit("/", 1)[0] if "/" in rel_path else ""
+
+
+def _folder_proximity(source_dir: str, target_dir: str) -> tuple[int, int]:
+    """Closeness of two vault folders as ``(steps, -shared_depth)``, lower is nearer.
+
+    Steps are tree hops (same folder 0, parent/child 1, sibling 2); shared depth
+    breaks ties so a sibling folder beats an unrelated one the same distance away.
+    """
+    a = source_dir.split("/") if source_dir else []
+    b = target_dir.split("/") if target_dir else []
+    shared = 0
+    while shared < len(a) and shared < len(b) and a[shared] == b[shared]:
+        shared += 1
+    return (len(a) - shared) + (len(b) - shared), -shared
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    note_id: str
+    rel_path: str  # normalized, extension-less; "" when the note has no path
+
+
+class WikilinkResolver:
+    """Resolve ``[[targets]]`` to note ids, disambiguating duplicate names by folder.
+
+    Notes in different folders may share a name, so a bare ``[[photosynthesis]]``
+    resolves against the linking note's own folder first (Obsidian's
+    shortest-path behaviour) instead of whichever duplicate the DB returned first.
+
+    Build once per note set, then call :meth:`resolve` for every link.
+    """
+
+    def __init__(self, notes: list[Note]) -> None:
+        self._by_path: dict[str, str] = {}
+        self._by_name: dict[str, list[_Candidate]] = {}
+        self._candidates: list[_Candidate] = []
+        self._rel_by_id: dict[str, str | None] = {}
+        for note in notes:
+            rel = _normalize_link(note.rel_path)
+            candidate = _Candidate(note_id=note.id, rel_path=rel)
+            self._candidates.append(candidate)
+            self._rel_by_id[note.id] = note.rel_path
+            if rel:
+                self._by_path.setdefault(rel, note.id)
+            names = {rel.rsplit("/", 1)[-1] if rel else "", _normalize_link(note.title)}
+            for name in names:
+                if name:
+                    self._by_name.setdefault(name, []).append(candidate)
+
+    def source_rel_path(self, source_note_id: str) -> str | None:
+        return self._rel_by_id.get(source_note_id)
+
+    def resolve(self, target: str, source_rel_path: str | None = None) -> str | None:
+        key = _normalize_link(target)
+        if not key:
+            return None
+        source_dir = _folder_of(_normalize_link(source_rel_path))
+
+        # An explicit path is an exact request; a bare name is not, so it must not
+        # match a root-level note ahead of a same-named note beside the source.
+        if "/" in key:
+            if key in self._by_path:
+                return self._by_path[key]
+            suffix = f"/{key}"
+            partial = [c for c in self._candidates if c.rel_path.endswith(suffix)]
+            best = self._best(partial, source_dir)
+            if best:
+                return best
+
+        # Paths written relative to the linking note's own folder.
+        if source_dir and f"{source_dir}/{key}" in self._by_path:
+            return self._by_path[f"{source_dir}/{key}"]
+
+        return self._best(self._by_name.get(key.rsplit("/", 1)[-1], []), source_dir)
+
+    @staticmethod
+    def _best(candidates: list[_Candidate], source_dir: str) -> str | None:
+        if not candidates:
+            return None
+        # Nearest folder wins; shallower and then alphabetical keep it deterministic.
+        ranked = sorted(
+            candidates,
+            key=lambda c: (
+                *_folder_proximity(source_dir, _folder_of(c.rel_path)),
+                c.rel_path.count("/"),
+                c.rel_path,
+            ),
+        )
+        return ranked[0].note_id
 
 
 def _apply_note_links(
     *,
-    kb_id: str,
     source_note_id: str,
     content: str,
-    notes: list[Note],
-    clear_existing,
-    add_link,
+    resolver: WikilinkResolver,
+    add_link: Callable[[str, str | None], None],
 ) -> None:
-    clear_existing()
+    """Parse ``content`` and emit one link per unique target via ``add_link``.
+
+    Callers clear existing rows for ``source_note_id`` before invoking this.
+    """
     links = extract_wikilinks(content)
     if not links:
         return
 
-    by_title = _note_lookup(notes)
-
+    source_rel = resolver.source_rel_path(source_note_id)
     seen: set[str] = set()
     for target_title, _alias in links:
-        key = target_title.lower().strip()
-        if key in seen:
+        key = _normalize_link(target_title)
+        if not key or key in seen:
             continue
         seen.add(key)
-        add_link(target_title, _resolve_target(by_title, key))
+        add_link(target_title, resolver.resolve(target_title, source_rel))
 
 
 async def refresh_note_links(
@@ -73,10 +149,17 @@ async def refresh_note_links(
     kb_id: str,
     source_note_id: str,
     content: str,
+    *,
+    notes: list[Note] | None = None,
+    resolver: WikilinkResolver | None = None,
 ) -> None:
     """Replace all outgoing wikilinks for a note."""
-    result = await db.execute(select(Note).where(Note.kb_id == kb_id))
-    notes = list(result.scalars().all())
+    if notes is None:
+        notes = list(
+            (await db.execute(select(Note).where(Note.kb_id == kb_id))).scalars().all()
+        )
+    if resolver is None:
+        resolver = WikilinkResolver(notes)
 
     await db.execute(
         delete(NoteLink).where(
@@ -84,24 +167,23 @@ async def refresh_note_links(
             NoteLink.source_note_id == source_note_id,
         )
     )
-    links = extract_wikilinks(content)
-    if not links:
-        return
-    by_title = _note_lookup(notes)
-    seen: set[str] = set()
-    for target_title, _alias in links:
-        key = target_title.lower().strip()
-        if key in seen:
-            continue
-        seen.add(key)
+
+    def add_link(target_title: str, target_note_id: str | None) -> None:
         db.add(
             NoteLink(
                 kb_id=kb_id,
                 source_note_id=source_note_id,
                 target_title=target_title,
-                target_note_id=_resolve_target(by_title, key),
+                target_note_id=target_note_id,
             )
         )
+
+    _apply_note_links(
+        source_note_id=source_note_id,
+        content=content,
+        resolver=resolver,
+        add_link=add_link,
+    )
 
 
 def refresh_note_links_sync(
@@ -109,17 +191,24 @@ def refresh_note_links_sync(
     kb_id: str,
     source_note_id: str,
     content: str,
+    *,
+    notes: list[Note] | None = None,
+    resolver: WikilinkResolver | None = None,
 ) -> None:
     """Sync variant for vault watcher / non-async contexts."""
-    notes = list(session.execute(select(Note).where(Note.kb_id == kb_id)).scalars().all())
-
-    def clear_existing() -> None:
-        session.execute(
-            delete(NoteLink).where(
-                NoteLink.kb_id == kb_id,
-                NoteLink.source_note_id == source_note_id,
-            )
+    if notes is None:
+        notes = list(
+            session.execute(select(Note).where(Note.kb_id == kb_id)).scalars().all()
         )
+    if resolver is None:
+        resolver = WikilinkResolver(notes)
+
+    session.execute(
+        delete(NoteLink).where(
+            NoteLink.kb_id == kb_id,
+            NoteLink.source_note_id == source_note_id,
+        )
+    )
 
     def add_link(target_title: str, target_note_id: str | None) -> None:
         session.add(
@@ -132,11 +221,9 @@ def refresh_note_links_sync(
         )
 
     _apply_note_links(
-        kb_id=kb_id,
         source_note_id=source_note_id,
         content=content,
-        notes=notes,
-        clear_existing=clear_existing,
+        resolver=resolver,
         add_link=add_link,
     )
 
@@ -146,18 +233,23 @@ async def rebuild_kb_note_links(db: AsyncSession, kb: KBContext) -> dict[str, in
     notes = list(
         (await db.execute(select(Note).where(Note.kb_id == kb.kb_id))).scalars().all()
     )
+    # One index + one notes query for the whole vault — not per note.
+    resolver = WikilinkResolver(notes)
     for note in notes:
         content = note_body(note, kb)
-        await refresh_note_links(db, kb.kb_id, note.id, content)
-    await db.commit()
-    link_count = len(
-        list(
-            (
-                await db.execute(select(NoteLink).where(NoteLink.kb_id == kb.kb_id))
-            ).scalars().all()
+        await refresh_note_links(
+            db,
+            kb.kb_id,
+            note.id,
+            content,
+            notes=notes,
+            resolver=resolver,
         )
-    )
-    return {"notes": len(notes), "links": link_count}
+    await db.commit()
+    link_count = (
+        await db.execute(select(NoteLink).where(NoteLink.kb_id == kb.kb_id))
+    ).scalars().all()
+    return {"notes": len(notes), "links": len(list(link_count))}
 
 
 async def notes_graph_payload(db: AsyncSession, kb_id: str) -> dict:

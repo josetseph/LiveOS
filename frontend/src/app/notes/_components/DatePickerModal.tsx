@@ -51,7 +51,6 @@ export function DatePickerModal({
           onChange={(e) => {
             if (e.target.value) {
               const isoDate = new Date(e.target.value).toISOString();
-              console.log("Date changed to:", isoDate);
               onPendingChange(isoDate);
             }
           }}

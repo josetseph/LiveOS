@@ -65,18 +65,40 @@ export function ConnectedNotesPanel({
   const w = 320;
   const h = 420;
 
+  // "note" mode keys on the note id only — depending on noteContent here
+  // would refetch the neighbor graph on every keystroke.
   useEffect(() => {
+    if (mode !== "note") return;
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
+    setLoading(true);
+    setError(null);
+    api
+      .getNoteNeighbors(noteId, kb)
+      .then((payload) => {
+        if (cancelled) return;
+        setData(payload);
+        setLayoutNonce((n) => n + 1);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Could not load graph.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, noteId, kb]);
 
-    const run = () => {
-      setLoading(true);
-      setError(null);
-      const load =
-        mode === "note"
-          ? api.getNoteNeighbors(noteId, kb)
-          : api.getNoteEntitySubgraph(noteContent, kb);
-      load
+  // "nodes" mode derives from the note text — debounced while typing.
+  useEffect(() => {
+    if (mode !== "nodes") return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const timer = setTimeout(() => {
+      api
+        .getNoteEntitySubgraph(noteContent, kb)
         .then((payload) => {
           if (cancelled) return;
           setData(payload);
@@ -88,20 +110,12 @@ export function ConnectedNotesPanel({
         .finally(() => {
           if (!cancelled) setLoading(false);
         });
-    };
-
-    // Debounce entity scan while typing; note-graph can load immediately.
-    if (mode === "nodes") {
-      timer = setTimeout(run, 500);
-    } else {
-      run();
-    }
-
+    }, 500);
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
     };
-  }, [noteId, kb, mode, noteContent]);
+  }, [mode, noteContent, kb]);
 
   useEffect(() => {
     if (!data) {

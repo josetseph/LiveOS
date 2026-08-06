@@ -326,10 +326,14 @@ async def notes_graph(
 @router.get("/api/v1/graph/notes/{note_id}/neighbors")
 async def notes_graph_neighbors(
     note_id: str,
-    rebuild: bool = True,
+    rebuild: bool = False,
     db: AsyncSession = Depends(get_db),
     kb: KBContext = Depends(get_kb),
 ):
+    # Default False: this endpoint is hit from the notes editor (connected
+    # panel) — a full vault re-parse per call is wasteful. The vault watcher
+    # keeps note_links current; pass rebuild=true or POST /graph/notes/rebuild
+    # to force a full re-resolve.
     if rebuild:
         await rebuild_kb_note_links(db, kb)
     return await note_neighborhood_payload(db, kb.kb_id, note_id)
@@ -361,8 +365,10 @@ async def reingest_vault(
         n.processing_model = None
     await db.commit()
 
-    for n in notes:
-        body = note_body(n, kb)
+    # Read all bodies off the event loop — one sync file read per note inline
+    # would stall every other request for the duration of a large vault scan.
+    bodies = await asyncio.to_thread(lambda: [note_body(n, kb) for n in notes])
+    for n, body in zip(notes, bodies):
         payload = NoteInput(
             content=body,
             created_at=n.created_at.isoformat() if n.created_at else None,

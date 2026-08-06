@@ -74,15 +74,26 @@ function platformTriple() {
   throw new Error(`Unsupported platform: ${process.platform}/${process.arch}`);
 }
 
-function downloadFile(url, dest, onProgress) {
+function downloadFile(url, dest, onProgress, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
     const get = url.startsWith("https") ? https.get : http.get;
     const req = get(url, { timeout: 180000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        file.close();
-        fs.unlinkSync(dest);
-        downloadFile(res.headers.location, dest, onProgress).then(resolve).catch(reject);
+        // unlink inside close(): the handle is still open here and Windows
+        // blocks deletion of open files.
+        file.close(() => fs.rmSync(dest, { force: true }));
+        const next = new URL(res.headers.location, url).toString();
+        if (redirectsLeft <= 0) {
+          reject(new Error(`Too many redirects downloading ${url}`));
+          return;
+        }
+        if (!next.startsWith("https:")) {
+          // Never follow an https→http downgrade for executable payloads.
+          reject(new Error(`Refusing non-https redirect: ${next}`));
+          return;
+        }
+        downloadFile(next, dest, onProgress, redirectsLeft - 1).then(resolve).catch(reject);
         return;
       }
       if (res.statusCode !== 200) {

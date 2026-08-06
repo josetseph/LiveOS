@@ -16,6 +16,7 @@ import {
   encodeFileUrl,
   isAudioUrl,
   isImageUrl,
+  isPdfUrl,
   isVideoUrl,
   resolveFileUrl,
 } from "@/lib/utils";
@@ -119,27 +120,34 @@ export function useNoteMedia({
     ],
   );
 
-  const handleFileAttach = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file || !selectedNote) return;
+  const attachFiles = useCallback(
+    async (files: FileList | File[]) => {
+      if (!selectedNote) return;
+      const list = Array.from(files);
+      if (list.length === 0) return;
 
       try {
         setIsUploading(true);
-        const response = await api.upload(file, currentKB);
-        const linkUrl = encodeFileUrl(response.url || response.href);
-        if (!linkUrl) throw new Error("Upload returned no URL");
+        const chunks: string[] = [];
+        for (const file of list) {
+          const response = await api.upload(file, currentKB);
+          const linkUrl = encodeFileUrl(response.url || response.href);
+          if (!linkUrl) throw new Error("Upload returned no URL");
 
-        const lower = file.name.toLowerCase();
-        const isImage =
-          file.type.startsWith("image/") ||
-          /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(lower);
+          const lower = file.name.toLowerCase();
+          const isImage =
+            file.type.startsWith("image/") ||
+            /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(lower);
 
-        // Images stay as markdown image embeds so the editor previews them;
-        // ingestion also discovers ![alt](/vault-files/...) for Florence.
-        const markdownLink = isImage
-          ? `\n![${file.name}](${linkUrl})\n`
-          : `\n[📎 ${file.name}](${linkUrl})\n`;
+          // Images stay as markdown image embeds so the editor previews them;
+          // ingestion also discovers ![alt](/vault-files/...) for Florence.
+          chunks.push(
+            isImage
+              ? `![${file.name}](${linkUrl})`
+              : `[📎 ${file.name}](${linkUrl})`,
+          );
+        }
+        const markdownLink = `\n${chunks.join("\n")}\n`;
         if (editorRef.current) {
           editorRef.current.insertAtCursor(markdownLink);
         } else {
@@ -155,7 +163,6 @@ export function useNoteMedia({
         alert(msg || "Failed to upload file");
       } finally {
         setIsUploading(false);
-        e.target.value = "";
       }
     },
     [
@@ -165,6 +172,16 @@ export function useNoteMedia({
       handleContentChange,
       refreshVaultFiles,
     ],
+  );
+
+  const handleFileAttach = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files?.length) return;
+      await attachFiles(files);
+      e.target.value = "";
+    },
+    [attachFiles],
   );
 
   const startRecording = useCallback(async () => {
@@ -237,7 +254,7 @@ export function useNoteMedia({
 
       if (isImageUrl(resolvedUrl) || isImageUrl(filename)) {
         type = "image";
-      } else if (/\.pdf(\?|$)/i.test(resolvedUrl) || /\.pdf$/i.test(filename)) {
+      } else if (isPdfUrl(resolvedUrl) || isPdfUrl(filename)) {
         type = "pdf";
       } else if (isVideoUrl(resolvedUrl) || isVideoUrl(filename)) {
         type = "video";
@@ -272,12 +289,10 @@ export function useNoteMedia({
     async (dateString: string) => {
       if (!selectedNote) return;
 
-      console.log("handleDateChange called with:", dateString);
       try {
         setIsSaving(true);
 
         // Save to backend with the new date
-        console.log("Sending PUT request to update note date...");
         await api.updateNote(
           selectedNote.id,
           selectedNote.content,
@@ -285,11 +300,9 @@ export function useNoteMedia({
           currentKB,
           selectedNote.title || undefined,
         );
-        console.log("PUT request successful");
 
         // Refresh the note from backend to get the updated data
         const updatedNote = await api.getNote(selectedNote.id, currentKB);
-        console.log("Refreshed note from backend:", updatedNote);
         setSelectedNote(updatedNote);
         contentBeforeEditRef.current = updatedNote.content;
         titleBeforeEditRef.current = updatedNote.title || "";
@@ -319,7 +332,6 @@ export function useNoteMedia({
   const handleCloseDatePicker = useCallback(async () => {
     // Save the date if it was changed
     if (pendingDateChange && selectedNote) {
-      console.log("Saving date change:", pendingDateChange);
       await handleDateChange(pendingDateChange);
     }
     setPendingDateChange(null);
@@ -336,6 +348,7 @@ export function useNoteMedia({
     pendingDateChange,
     setPendingDateChange,
     handleDeleteFile,
+    attachFiles,
     handleFileAttach,
     startRecording,
     stopRecording,

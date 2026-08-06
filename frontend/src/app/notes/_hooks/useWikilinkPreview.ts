@@ -1,35 +1,40 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { Note } from "@/lib/types";
-import { resolveNoteByWikilink } from "../_lib/wikilinks";
+import { WikilinkResolver } from "../_lib/wikilinks";
 import type { WikilinkPreviewState } from "../_lib/types";
 
 type UseWikilinkPreviewArgs = {
   notes: Note[];
   onNoteSelect: (note: Note) => void;
+  sourceNote?: Note | null;
 };
 
 export function useWikilinkPreview({
   notes,
   onNoteSelect,
+  sourceNote,
 }: UseWikilinkPreviewArgs) {
   const [wikilinkPreview, setWikilinkPreview] =
     useState<WikilinkPreviewState | null>(null);
 
+  // Index once per notes list — hover fires often and must not re-scan the vault.
+  const resolver = useMemo(() => new WikilinkResolver(notes), [notes]);
+
   const handleWikilinkClick = useCallback(
     (target: string) => {
-      const match = resolveNoteByWikilink(notes, target);
+      const match = resolver.resolve(target, sourceNote);
       if (match) {
         void onNoteSelect(match);
       }
     },
-    [notes, onNoteSelect],
+    [resolver, onNoteSelect, sourceNote],
   );
 
   const handleWikilinkHover = useCallback(
     (target: string, rect: DOMRect) => {
-      const match = resolveNoteByWikilink(notes, target);
+      const match = resolver.resolve(target, sourceNote);
       setWikilinkPreview({
         title: match?.title || target,
         content: match?.content || "",
@@ -38,7 +43,7 @@ export function useWikilinkPreview({
         missing: !match,
       });
     },
-    [notes],
+    [resolver, sourceNote],
   );
 
   const handleWikilinkLeave = useCallback(() => {

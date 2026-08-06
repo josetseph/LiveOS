@@ -198,37 +198,52 @@ class IngestionWorkflow:
             finally:
                 # Always decrement the active counter and potentially schedule
                 # community recompute, regardless of success or failure.
-                # Free whatever model the note left resident (chat/embed/HF).
-                try:
-                    from app.services.local_models import (
-                        local_gguf_reranker,
-                        local_llama_runtime,
-                    )
-                    from app.services.multimodal_runtime import multimodal_runtime
-
-                    local_llama_runtime.unload()
-                    local_gguf_reranker.unload()
-                    multimodal_runtime.unload(None)
-                except Exception as unload_exc:  # pylint: disable=broad-exception-caught
-                    logger.debug("Post-ingestion model unload skipped: %s", unload_exc)
                 await _tracker.end_ingestion(self.rebuild_leiden_communities)
+                # Free resident models only once the whole batch has drained —
+                # unloading per note would re-read multi-GB GGUFs from disk for
+                # every note in a batch re-ingest.
+                if not _tracker.has_active_ingestions():
+                    try:
+                        from app.services.local_models import (
+                            local_gguf_reranker,
+                            local_llama_runtime,
+                        )
+                        from app.services.multimodal_runtime import multimodal_runtime
 
-    async def _update_note_processing_status(
-        self, note_id: str, stage: str | None, model: str | None = None
-    ) -> None:
-        """Persist a user-facing ingestion stage/model for status polling."""
+                        local_llama_runtime.unload()
+                        local_gguf_reranker.unload()
+                        multimodal_runtime.unload(None)
+                    except Exception as unload_exc:  # pylint: disable=broad-exception-caught
+                        logger.debug(
+                            "Post-ingestion model unload skipped: %s", unload_exc
+                        )
+
+    async def _update_note_fields(self, note_id: str, log_message: str, **values) -> None:
+        """Single UPDATE helper behind all note-metadata status writes."""
         from sqlalchemy import update
 
         from app.core.database import AsyncSessionLocal
         from app.models.note import Note
 
         async with AsyncSessionLocal() as session:
-            await session.execute(
-                update(Note)
-                .where(Note.id == note_id)
-                .values(processing_stage=stage, processing_model=model)
-            )
-            await session.commit()
+            try:
+                await session.execute(
+                    update(Note).where(Note.id == note_id).values(**values)
+                )
+                await session.commit()
+                if log_message:
+                    logger.info(log_message)
+            except Exception as e:
+                logger.error(f"Error updating note {note_id} fields {values}: {e}")
+                raise
+
+    async def _update_note_processing_status(
+        self, note_id: str, stage: str | None, model: str | None = None
+    ) -> None:
+        """Persist a user-facing ingestion stage/model for status polling."""
+        await self._update_note_fields(
+            note_id, "", processing_stage=stage, processing_model=model
+        )
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
@@ -270,79 +285,39 @@ class IngestionWorkflow:
     )
     async def _update_note_title(self, note_id: str, title: str):
         """Update the note title in SQLite metadata."""
-        from sqlalchemy import update
-
-        from app.core.database import AsyncSessionLocal
-        from app.models.note import Note
-
-        async with AsyncSessionLocal() as session:
-            try:
-                await session.execute(
-                    update(Note).where(Note.id == note_id).values(title=title)
-                )
-                await session.commit()
-                logger.info(
-                    f"[Ingestion] Updated title for Note {note_id}: '{title}'"
-                )
-            except Exception as e:
-                logger.error(f"Error updating note title: {repr(e)}")
-                raise e
+        await self._update_note_fields(
+            note_id,
+            f"[Ingestion] Updated title for Note {note_id}: '{title}'",
+            title=title,
+        )
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
     async def _mark_note_processed(self, note_id: str):
         """Set processed=True in SQLite metadata to prevent re-runs."""
-        from sqlalchemy import update
-
-        from app.core.database import AsyncSessionLocal
-        from app.models.note import Note
-
-        async with AsyncSessionLocal() as session:
-            try:
-                await session.execute(
-                    update(Note)
-                    .where(Note.id == note_id)
-                    .values(
-                        processed=True,
-                        failed=False,
-                        processing_stage="Ingestion complete",
-                        processing_model=None,
-                    )
-                )
-                await session.commit()
-                logger.info(f"[Ingestion] Marked Note {note_id} as Processed.")
-            except Exception as e:
-                logger.error(f"Error marking note processed: {e}")
-                raise e
+        await self._update_note_fields(
+            note_id,
+            f"[Ingestion] Marked Note {note_id} as Processed.",
+            processed=True,
+            failed=False,
+            processing_stage="Ingestion complete",
+            processing_model=None,
+        )
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10)
     )
     async def _mark_note_failed(self, note_id: str):
         """Set failed=True in SQLite so callers can distinguish permanent failure."""
-        from sqlalchemy import update
-
-        from app.core.database import AsyncSessionLocal
-        from app.models.note import Note
-
-        async with AsyncSessionLocal() as session:
-            try:
-                await session.execute(
-                    update(Note)
-                    .where(Note.id == note_id)
-                    .values(
-                        processed=False,
-                        failed=True,
-                        processing_stage="Ingestion failed",
-                        processing_model=None,
-                    )
-                )
-                await session.commit()
-                logger.info(f"[Ingestion] Marked Note {note_id} as Failed.")
-            except Exception as e:
-                logger.error(f"Error marking note failed: {e}")
-                raise e
+        await self._update_note_fields(
+            note_id,
+            f"[Ingestion] Marked Note {note_id} as Failed.",
+            processed=False,
+            failed=True,
+            processing_stage="Ingestion failed",
+            processing_model=None,
+        )
 
     def _write_ontology(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self,

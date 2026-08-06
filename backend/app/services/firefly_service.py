@@ -34,6 +34,14 @@ def _php_escape(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace("'", "\\'")
 
 
+class FireflyHTTPError(RuntimeError):
+    """Firefly API returned an error response (carries the HTTP status code)."""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class FireflyService:
     """Thin typed proxy over the embedded Firefly III REST API."""
 
@@ -41,6 +49,9 @@ class FireflyService:
         self.base_url = (settings.FIREFLY_BASE_URL or "").rstrip("/")
         self.runtime_file = settings.FIREFLY_RUNTIME_FILE or ""
         self._scope_lock = asyncio.Lock()
+        # Last group activated via the PHP switch script — lets _run_scoped
+        # skip the ~1s Laravel bootstrap when the scope hasn't changed.
+        self._switched_group_id: int | None = None
 
     def _load_runtime(self) -> dict[str, Any]:
         if not self.runtime_file:
@@ -292,6 +303,8 @@ class FireflyService:
             return {"destroyed": False, "reason": "no_group"}
 
         async with self._scope_lock:
+            if self._switched_group_id == group_id:
+                self._switched_group_id = None
             try:
                 result = await asyncio.to_thread(
                     self._run_php, self._php_destroy_group_script(group_id)
@@ -393,8 +406,9 @@ class FireflyService:
                         )
                 except Exception:
                     pass
-                raise RuntimeError(
-                    f"Firefly {method} {path} failed ({response.status_code}): {detail}"
+                raise FireflyHTTPError(
+                    f"Firefly {method} {path} failed ({response.status_code}): {detail}",
+                    status_code=response.status_code,
                 )
             # 204 / empty bodies are common for enable/primary currency endpoints.
             if response.status_code == 204 or not (response.content or b"").strip():
@@ -1847,7 +1861,11 @@ class FireflyService:
                 group_id = int(created["group_id"])
                 kb_registry.set_firefly_group(kb.kb_id, group_id, title)
 
-        await asyncio.to_thread(self._run_php, self._php_switch_group_script(group_id))
+        if self._switched_group_id != group_id:
+            await asyncio.to_thread(
+                self._run_php, self._php_switch_group_script(group_id)
+            )
+            self._switched_group_id = group_id
         return group_id
 
     async def _run_scoped(self, kb: KBContext, callback):
@@ -1886,13 +1904,12 @@ class FireflyService:
                 "about": payload.get("data") if isinstance(payload, dict) else None,
                 "url": self.base_url,
             }
-        except httpx.HTTPStatusError as exc:
-            detail = exc.response.text.strip() or exc.response.reason_phrase
+        except FireflyHTTPError as exc:
             return {
                 "ready": False,
                 "exists": False,
-                "status": "auth_mismatch" if exc.response.status_code in (401, 403) else "error",
-                "detail": detail,
+                "status": "auth_mismatch" if exc.status_code in (401, 403) else "error",
+                "detail": str(exc),
                 "url": self.base_url,
             }
         except Exception as exc:  # pylint: disable=broad-exception-caught

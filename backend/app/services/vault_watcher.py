@@ -16,16 +16,33 @@ logger = get_logger("VaultWatcher")
 
 _watcher_thread: threading.Thread | None = None
 _stop = threading.Event()
+_engine = None
+_engine_lock = threading.Lock()
+
+
+def _get_engine():
+    """Shared sync engine — a OneDrive sync burst of hundreds of file events
+    must not create one engine per event."""
+    global _engine  # noqa: PLW0603
+    if _engine is None:
+        with _engine_lock:
+            if _engine is None:
+                from sqlalchemy import create_engine
+
+                from app.core.paths import sqlite_url
+
+                url = sqlite_url().replace("sqlite+aiosqlite://", "sqlite://")
+                _engine = create_engine(url, future=True)
+    return _engine
 
 
 def _sync_vault_file(kb_id: str, vault: Path, rel: str, event: str) -> None:
     """Best-effort sync of a single vault file into SQLite metadata."""
     from datetime import datetime, timezone
 
-    from sqlalchemy import create_engine, select
+    from sqlalchemy import select
     from sqlalchemy.orm import Session
 
-    from app.core.paths import sqlite_url
     from app.models.note import Note
     from app.services.vault import is_recent_self_write, read_note_file, title_from_filename
 
@@ -33,10 +50,7 @@ def _sync_vault_file(kb_id: str, vault: Path, rel: str, event: str) -> None:
         logger.debug(f"[VaultWatcher] ignore self-write {kb_id}:{rel}")
         return
 
-    url = sqlite_url().replace("sqlite+aiosqlite://", "sqlite://")
-    engine = create_engine(url, future=True)
-
-    with Session(engine) as session:
+    with Session(_get_engine()) as session:
         if event == "deleted":
             row = session.execute(
                 select(Note).where(Note.kb_id == kb_id, Note.rel_path == rel)

@@ -58,14 +58,24 @@ function loadPaths(appRoot) {
       if (j.models_dir) modelsDir = j.models_dir;
       if (j.default_vault_path) defaultVault = j.default_vault_path;
     }
-  } catch (_) {
-    /* ignore */
+  } catch (err) {
+    // Silently falling back to defaults here made a truncated/conflicted
+    // paths.json look like total data loss (empty vault, empty indexes).
+    console.error(`Unreadable paths file ${loc}: ${err.message}`);
   }
   return { pathsFile: loc, dataDir, modelsDir, defaultVault, appRoot: appRoot || repoRoot };
 }
 
 function needsWizard(pathsFile) {
-  return !fs.existsSync(pathsFile);
+  if (!fs.existsSync(pathsFile)) return true;
+  // A corrupt file (truncated write, cloud-sync conflict copy) re-opens setup
+  // so the user re-picks their real dirs instead of silently booting defaults.
+  try {
+    JSON.parse(fs.readFileSync(pathsFile, "utf8"));
+    return false;
+  } catch (_) {
+    return true;
+  }
 }
 
 function resolveBinary(repoRoot, dataDir, name) {
@@ -141,7 +151,20 @@ function waitHttp(url, timeoutMs = 120000, child = null, logPath = null) {
       }
       const req = http.get(url, { timeout: 2000 }, (res) => {
         res.resume();
-        resolve();
+        // A 5xx here is a service that bound its port but is broken —
+        // resolving on it closed the splash onto a dead app.
+        if (res.statusCode && res.statusCode < 500) {
+          resolve();
+          return;
+        }
+        if (Date.now() - start > timeoutMs) {
+          const tail = tailLog(logPath);
+          reject(
+            new Error(
+              `${url} responding with ${res.statusCode}${tail ? `\n\n${tail}` : ""}`,
+            ),
+          );
+        } else setTimeout(tick, 1000);
       });
       req.on("error", () => {
         if (Date.now() - start > timeoutMs) {
@@ -274,7 +297,12 @@ function resolveMeiliMasterKey(dataDir) {
     key = "orb-dev-key";
   }
   fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(keyFile, `${key}\n`, "utf8");
+  fs.writeFileSync(keyFile, `${key}\n`, { encoding: "utf8", mode: 0o600 });
+  try {
+    fs.chmodSync(keyFile, 0o600);
+  } catch (_) {
+    /* best effort on non-POSIX */
+  }
   return key;
 }
 
@@ -607,6 +635,49 @@ class Supervisor {
     }
     this.children = [];
     // Belt-and-suspenders: free any leftover listeners on our port block.
+    freeDesktopPorts();
+  }
+
+  /**
+   * Awaitable shutdown for `before-quit`: SIGTERM everything, wait, SIGKILL
+   * stragglers. The sync `stopAll` schedules its SIGKILL on a timer that never
+   * fires once Electron exits, so children ignoring SIGTERM were orphaned.
+   */
+  async stopAllAsync(graceMs = 1500) {
+    const children = this.children.reverse();
+    this.children = [];
+    for (const { label, child } of children) {
+      try {
+        if (process.platform === "win32") {
+          spawn("taskkill", ["/pid", String(child.pid), "/f", "/t"]);
+        } else if (child.pid) {
+          try {
+            process.kill(-child.pid, "SIGTERM");
+          } catch (_) {
+            child.kill("SIGTERM");
+          }
+        }
+      } catch (_) {
+        /* ignore */
+      }
+      this.onStatus(`Stopping ${label}…`);
+    }
+    if (process.platform !== "win32" && children.length) {
+      await new Promise((r) => setTimeout(r, graceMs));
+      for (const { child } of children) {
+        const pid = child.pid;
+        if (!pid) continue;
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch (_) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch (__) {
+            /* already gone */
+          }
+        }
+      }
+    }
     freeDesktopPorts();
   }
 }

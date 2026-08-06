@@ -181,6 +181,25 @@ export const api = {
     return http.put(`/notes/${id}${kbQuery(kb)}`, { content, created_at, title });
   },
 
+  /**
+   * Best-effort save during window unload. `fetch(..., { keepalive: true })`
+   * survives the window closing but caps the body at ~64KB, so large notes
+   * fall back to a plain PUT (which may be killed with the window).
+   */
+  updateNoteOnUnload(id: string, content: string, kb = "default", title?: string) {
+    const body = JSON.stringify({ content, title });
+    if (body.length < 60_000 && typeof fetch === "function") {
+      void fetch(`${API_BASE_URL}/notes/${id}${kbQuery(kb)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+      return;
+    }
+    void http.put(`/notes/${id}${kbQuery(kb)}`, { content, title }).catch(() => {});
+  },
+
   /** Ingest an existing note into the given KB (default KB if omitted). */
   async ingestNote(id: string, kb = "default") {
     return http.post(`/notes/${id}/ingest${kbQuery(kb)}`);

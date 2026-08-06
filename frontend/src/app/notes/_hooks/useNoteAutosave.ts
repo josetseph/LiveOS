@@ -55,8 +55,24 @@ export function useNoteAutosave({
           note.title || undefined,
         );
         const nextNote = savedNote ?? note;
+        const live = selectedNoteRef.current;
+        if (!live || live.id !== note.id) {
+          // Note switched while the PUT was in flight — nothing to patch.
+          return;
+        }
+        // Move the baseline to what actually got saved.
         contentBeforeEditRef.current = nextNote.content;
         titleBeforeEditRef.current = nextNote.title || "";
+        if (
+          live.content !== note.content ||
+          (live.title || "") !== (note.title || "")
+        ) {
+          // The user kept typing during the PUT. Replacing the note now would
+          // reset the controlled editor to the saved snapshot and silently
+          // wipe those keystrokes — skip the patch; the moved baseline makes
+          // the autosave effect re-save the newer edits.
+          return;
+        }
         patchLocalNote(nextNote);
       } catch (error) {
         console.error("Error saving note:", error);
@@ -64,7 +80,7 @@ export function useNoteAutosave({
         setIsSaving(false);
       }
     },
-    [patchLocalNote, currentKB, contentBeforeEditRef, titleBeforeEditRef],
+    [patchLocalNote, currentKB, contentBeforeEditRef, titleBeforeEditRef, selectedNoteRef],
   );
 
   // Auto-save: Debounced save 1.5 seconds after user stops typing
@@ -118,22 +134,29 @@ export function useNoteAutosave({
     };
   }, [selectedNoteRef, contentBeforeEditRef, titleBeforeEditRef, currentKBRef]);
 
-  // Save locally on page unload (backup)
+  // Save on window unload. A plain XHR is killed with the window, so use the
+  // keepalive path which the browser lets finish after close.
   useEffect(() => {
     const handleBeforeUnload = () => {
+      const note = selectedNoteRef.current;
       if (
-        selectedNote &&
-        (contentBeforeEditRef.current !== selectedNote.content ||
-          titleBeforeEditRef.current !== (selectedNote.title || ""))
+        note &&
+        (contentBeforeEditRef.current !== note.content ||
+          titleBeforeEditRef.current !== (note.title || ""))
       ) {
-        handleSaveNote(selectedNote);
+        api.updateNoteOnUnload(
+          note.id,
+          note.content,
+          currentKBRef.current,
+          note.title || undefined,
+        );
       }
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () =>
       window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [selectedNote, handleSaveNote, contentBeforeEditRef, titleBeforeEditRef]);
+  }, [selectedNoteRef, currentKBRef, contentBeforeEditRef, titleBeforeEditRef]);
 
   return {
     isSaving,

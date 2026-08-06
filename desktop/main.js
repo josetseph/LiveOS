@@ -28,7 +28,63 @@ const AI_SETUP_MODES = new Set(["none", "local", "cloud"]);
 
 let mainWindow = null;
 let splashWindow = null;
+let wizardWindow = null;
 let supervisor = null;
+let quitting = false;
+
+/**
+ * The shell windows render user note content, so navigation is locked down:
+ * only the local UI origin and the packaged file:// pages may load in-window;
+ * everything else (including target=_blank) goes to the system browser.
+ */
+function isTrustedShellUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === "file:") {
+      return url.pathname.startsWith(__dirname);
+    }
+    const appOrigin = new URL(APP_URL).origin;
+    return url.origin === appOrigin;
+  } catch (_) {
+    return false;
+  }
+}
+
+function openExternally(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === "https:" || url.protocol === "http:" || url.protocol === "mailto:") {
+      shell.openExternal(rawUrl).catch(() => {});
+    }
+  } catch (_) {
+    /* unparseable — drop */
+  }
+}
+
+app.on("web-contents-created", (_event, contents) => {
+  contents.setWindowOpenHandler(({ url }) => {
+    openExternally(url);
+    return { action: "deny" };
+  });
+  contents.on("will-navigate", (event, url) => {
+    if (!isTrustedShellUrl(url)) {
+      event.preventDefault();
+      openExternally(url);
+    }
+  });
+});
+
+/** Only the packaged wizard page may drive setup IPC. */
+function isWizardSender(event) {
+  const frameUrl = event.senderFrame?.url || "";
+  return (
+    wizardWindow &&
+    !wizardWindow.isDestroyed() &&
+    event.sender === wizardWindow.webContents &&
+    frameUrl.startsWith("file:") &&
+    frameUrl.endsWith("wizard.html")
+  );
+}
 
 function sendStatus(message) {
   if (splashWindow && !splashWindow.isDestroyed()) {
@@ -86,6 +142,10 @@ function createWizard() {
     webPreferences: shellWebPreferences(),
   });
   win.loadFile(path.join(__dirname, "wizard.html"));
+  wizardWindow = win;
+  win.on("closed", () => {
+    if (wizardWindow === win) wizardWindow = null;
+  });
   return win;
 }
 
@@ -97,11 +157,7 @@ function createMainWindow(initialPath = "/") {
     title: "Orb",
     backgroundColor: "#0a0a0f",
     ...(icon ? { icon } : {}),
-    webPreferences: {
-      preload: PRELOAD,
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: shellWebPreferences(),
   });
   const url =
     initialPath && initialPath !== "/"
@@ -253,7 +309,12 @@ ipcMain.handle("get-app-info", () => {
   };
 });
 
-ipcMain.handle("save-wizard", async (_e, payload) => {
+ipcMain.handle("save-wizard", async (event, payload) => {
+  if (!isWizardSender(event)) {
+    // Renderer pages showing note content must never be able to repoint the
+    // data dir — that path leads to executing binaries from arbitrary folders.
+    throw new Error("save-wizard is only available to the setup wizard");
+  }
   if (!payload || typeof payload !== "object") {
     throw new Error("Invalid wizard payload");
   }
@@ -279,7 +340,11 @@ ipcMain.handle("save-wizard", async (_e, payload) => {
     ai_setup_mode: aiMode,
   };
   if (defaultVault) data.default_vault_path = defaultVault;
-  fs.writeFileSync(loc, JSON.stringify(data, null, 2), "utf8");
+  // Atomic write — a truncated paths.json used to boot the app with default
+  // dirs and look like total data loss.
+  const tmp = `${loc}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
+  fs.renameSync(tmp, loc);
   process.env.AI_SETUP_MODE = aiMode;
 
   try {
@@ -319,10 +384,13 @@ app.whenReady().then(async () => {
   ) {
     const wizard = createWizard();
     await new Promise((resolve) => {
-      ipcMain.once("wizard-done", () => {
+      const onDone = (event) => {
+        if (!isWizardSender(event)) return;
+        ipcMain.removeListener("wizard-done", onDone);
         if (!wizard.isDestroyed()) wizard.close();
         resolve();
-      });
+      };
+      ipcMain.on("wizard-done", onDone);
     });
   }
 
@@ -350,12 +418,20 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
-  if (supervisor) supervisor.stopAll();
+  // macOS: keep services running so reopening from the Dock works; stopping
+  // them here left the app pointing at dead ports until a full relaunch.
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
-  if (supervisor) supervisor.stopAll();
+app.on("before-quit", (event) => {
+  if (quitting || !supervisor) return;
+  // Give children a real SIGTERM→SIGKILL window; a sync stop here races app
+  // exit and leaves orphans that only die on the next launch's port sweep.
+  quitting = true;
+  event.preventDefault();
+  Promise.resolve(supervisor.stopAllAsync?.() ?? supervisor.stopAll()).finally(
+    () => app.exit(0),
+  );
 });
 
 app.on("activate", () => {

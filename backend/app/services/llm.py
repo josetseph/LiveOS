@@ -19,7 +19,7 @@ logger = get_logger("LLMService")
 class LLMService:
     """Multi-provider LLM client supporting structured extraction, generation, and ingestion routing."""
 
-    def __init__(self):
+    def __init__(self, provider: str | None = None):
         # Declare client attributes upfront so they are always present on the
         # instance regardless of which provider branch _init_clients() takes.
         self.extraction_client = None
@@ -27,7 +27,7 @@ class LLMService:
         self.async_chat_client = None
 
         # Map deprecated sidecar names onto in-process local GGUF.
-        raw = settings.LLM_PROVIDER.lower()
+        raw = (provider or settings.LLM_PROVIDER).lower()
         if raw in ("ollama", "lm_studio"):
             logger.warning(
                 "LLM_PROVIDER=%s is deprecated; using in-process llama-cpp-python",
@@ -35,7 +35,10 @@ class LLMService:
             )
             raw = "local"
         self.provider = raw
-        self.fallback_provider = settings.LLM_FALLBACK_PROVIDER
+        # Explicit-provider instances (fallback services) get no fallback of
+        # their own, so a failing fallback cannot recurse.
+        self.fallback_provider = None if provider else settings.LLM_FALLBACK_PROVIDER
+        self._fallback_service: "LLMService | None" = None
 
         logger.info(f"Primary LLM Provider: {self.provider.upper()}")
         if self.fallback_provider:
@@ -122,7 +125,7 @@ class LLMService:
                             elif msg["role"] == "user":
                                 prompt_parts.append(msg["content"])
 
-                        prompt = "\\n\\n".join(prompt_parts)
+                        prompt = "\n\n".join(prompt_parts)
 
                         # Call native Gemini SDK
                         response = self.native_client.models.generate_content(
@@ -431,27 +434,23 @@ class LLMService:
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error(f"Extraction failed with {self.provider}: {e}")
 
-            # Try fallback provider if configured
+            # Try fallback provider if configured. Uses a dedicated service
+            # instance — mutating the shared singleton's provider/clients would
+            # race with concurrent chat/ingestion calls.
             if self.fallback_provider:
                 logger.info(f"Attempting fallback to {self.fallback_provider}")
                 try:
-                    original_provider = self.provider
-                    self.provider = self.fallback_provider
-                    self.init_clients()
-                    result = self.extract_structured(
+                    if self._fallback_service is None:
+                        self._fallback_service = LLMService(
+                            provider=self.fallback_provider
+                        )
+                    return self._fallback_service.extract_structured(
                         prompt, response_model, temperature
                     )
-                    # Restore original provider
-                    self.provider = original_provider
-                    self.init_clients()
-                    return result
                 except (
                     Exception
                 ) as fallback_error:  # pylint: disable=broad-exception-caught
                     logger.error(f"Fallback extraction failed: {fallback_error}")
-                    # Restore original provider
-                    self.provider = original_provider
-                    self.init_clients()
 
             # Fail closed — empty Extraction would silently corrupt the graph.
             return None
@@ -685,8 +684,10 @@ class LLMService:
             except Exception as e:
                 err = str(e)
                 if "PROHIBITED_CONTENT" in err or "content_filter" in err.lower():
-                    logger.warning("[Gemini] Content filtered. Returning empty model.")
-                    return response_model()
+                    # Fail closed: an empty-but-valid Extraction upstream would
+                    # silently erase entities for this chunk in the graph.
+                    logger.warning("[Gemini] Content filtered; failing extraction.")
+                    raise ValueError("Gemini content filter blocked extraction") from e
 
                 is_retryable = any(code in err for code in _retryable)
                 if is_retryable and attempt < max_retries:

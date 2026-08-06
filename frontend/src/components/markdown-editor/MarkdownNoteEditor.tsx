@@ -53,6 +53,8 @@ export interface MarkdownNoteEditorProps {
   onWikilinkHover?: (target: string, rect: DOMRect, alias?: string) => void;
   onWikilinkLeave?: () => void;
   onAttachFile?: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  /** Upload files dropped onto the editor (OS drag-and-drop). */
+  onDropFiles?: (files: FileList | File[]) => void | Promise<void>;
   attachDisabled?: boolean;
   kb?: string;
   placeholder?: string;
@@ -184,6 +186,7 @@ const MarkdownNoteEditor = forwardRef<
     onWikilinkHover,
     onWikilinkLeave,
     onAttachFile,
+    onDropFiles,
     attachDisabled,
     kb = "default",
     placeholder = "Start writing...",
@@ -196,6 +199,26 @@ const MarkdownNoteEditor = forwardRef<
   const entityDecorationsCompartment = useRef(new Compartment()).current;
   const [view, setView] = useState<EditorView | null>(null);
   const [scannedEntities, setScannedEntities] = useState<EntitySuggestion[]>(
+    [],
+  );
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const onDropFilesRef = useRef(onDropFiles);
+  onDropFilesRef.current = onDropFiles;
+  const attachDisabledRef = useRef(attachDisabled);
+  attachDisabledRef.current = attachDisabled;
+  const dragDepthRef = useRef(0);
+
+  const hasOsFileDrag = useCallback((e: DragEvent | React.DragEvent) => {
+    const types = e.dataTransfer?.types;
+    if (!types) return false;
+    return Array.from(types).includes("Files");
+  }, []);
+
+  const handleOsFileDrop = useCallback(
+    (files: FileList | null | undefined) => {
+      if (!files?.length || attachDisabledRef.current) return;
+      void onDropFilesRef.current?.(files);
+    },
     [],
   );
 
@@ -272,6 +295,25 @@ const MarkdownNoteEditor = forwardRef<
       entityClickHandler(onEntityClick),
       wikilinkClickHandler(onWikilinkClick),
       wikilinkHoverHandler(onWikilinkHover, onWikilinkLeave),
+      // OS file drops → upload into the note (don't insert the path as text).
+      EditorView.domEventHandlers({
+        dragover(event) {
+          if (!event.dataTransfer?.types || !Array.from(event.dataTransfer.types).includes("Files")) {
+            return false;
+          }
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+          return true;
+        },
+        drop(event) {
+          if (!event.dataTransfer?.files?.length) return false;
+          event.preventDefault();
+          if (!attachDisabledRef.current) {
+            void onDropFilesRef.current?.(event.dataTransfer.files);
+          }
+          return true;
+        },
+      }),
       Prec.high(formattingKeymap()),
       keymap.of([
         ...defaultKeymap,
@@ -305,7 +347,33 @@ const MarkdownNoteEditor = forwardRef<
   );
 
   return (
-    <div className={`flex h-full min-h-0 flex-col ${className ?? ""}`}>
+    <div
+      className={`relative flex h-full min-h-0 flex-col ${className ?? ""}`}
+      onDragEnter={(e) => {
+        if (!hasOsFileDrag(e) || attachDisabled) return;
+        e.preventDefault();
+        dragDepthRef.current += 1;
+        setIsDraggingFiles(true);
+      }}
+      onDragOver={(e) => {
+        if (!hasOsFileDrag(e) || attachDisabled) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={(e) => {
+        if (!hasOsFileDrag(e)) return;
+        e.preventDefault();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setIsDraggingFiles(false);
+      }}
+      onDrop={(e) => {
+        if (!hasOsFileDrag(e)) return;
+        e.preventDefault();
+        dragDepthRef.current = 0;
+        setIsDraggingFiles(false);
+        handleOsFileDrop(e.dataTransfer.files);
+      }}
+    >
       {showToolbar && (
         <MarkdownToolbar
           view={view}
@@ -313,7 +381,7 @@ const MarkdownNoteEditor = forwardRef<
           attachDisabled={attachDisabled}
         />
       )}
-      <div className="min-h-0 flex-1 overflow-hidden px-4 py-3">
+      <div className="relative min-h-0 flex-1 overflow-hidden px-4 py-3">
         <CodeMirror
           ref={cmRef}
           value={value}
@@ -325,6 +393,13 @@ const MarkdownNoteEditor = forwardRef<
           onCreateEditor={handleCreateEditor}
           className="h-full [&_.cm-editor]:h-full"
         />
+        {isDraggingFiles && (
+          <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-teal-400/60 bg-teal-500/10 backdrop-blur-[2px]">
+            <p className="rounded-lg bg-black/70 px-4 py-2 text-sm font-medium text-teal-100">
+              Drop files to attach
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );

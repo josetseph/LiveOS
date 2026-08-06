@@ -160,34 +160,33 @@ export function useNoteSelection({ currentKB, setNotes }: UseNoteSelectionArgs) 
     titleBeforeEditRef.current = "";
   }, []);
 
+  // Note: setNotes must NOT be called inside the setSelectedNote updater —
+  // impure updaters double-fire under StrictMode. Use the ref (kept current
+  // synchronously below) so rapid keystrokes never read stale state.
   const handleContentChange = useCallback(
     (content: string) => {
-      setSelectedNote((prev) => {
-        if (!prev) return null;
-        const updatedNote = { ...prev, content };
-        setNotes((notes) =>
-          notes.map((note) =>
-            note.id === updatedNote.id ? updatedNote : note,
-          ),
-        );
-        return updatedNote;
-      });
+      const prev = selectedNoteRef.current;
+      if (!prev) return;
+      const updatedNote = { ...prev, content };
+      selectedNoteRef.current = updatedNote;
+      setSelectedNote(updatedNote);
+      setNotes((notes) =>
+        notes.map((note) => (note.id === updatedNote.id ? updatedNote : note)),
+      );
     },
     [setNotes],
   );
 
   const handleTitleChange = useCallback(
     (title: string) => {
-      setSelectedNote((prev) => {
-        if (!prev) return null;
-        const updatedNote = { ...prev, title };
-        setNotes((notes) =>
-          notes.map((note) =>
-            note.id === updatedNote.id ? updatedNote : note,
-          ),
-        );
-        return updatedNote;
-      });
+      const prev = selectedNoteRef.current;
+      if (!prev) return;
+      const updatedNote = { ...prev, title };
+      selectedNoteRef.current = updatedNote;
+      setSelectedNote(updatedNote);
+      setNotes((notes) =>
+        notes.map((note) => (note.id === updatedNote.id ? updatedNote : note)),
+      );
     },
     [setNotes],
   );

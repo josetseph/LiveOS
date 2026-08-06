@@ -165,6 +165,15 @@ const editorTheme = EditorView.theme(
       borderRadius: "10px",
       background: "#000",
     },
+    ".cm-media-embed-pdf": {
+      display: "block",
+      width: "min(100%, 640px)",
+      height: "480px",
+      maxHeight: "70vh",
+      border: "1px solid rgba(255,255,255,0.12)",
+      borderRadius: "10px",
+      background: "#111",
+    },
     ".cm-media-embed-audio": {
       display: "block",
       width: "min(100%, 420px)",

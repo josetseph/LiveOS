@@ -129,6 +129,7 @@ export default function NotesPage() {
                   onWikilinkHover={wikilink.handleWikilinkHover}
                   onWikilinkLeave={wikilink.handleWikilinkLeave}
                   onAttachFile={media.handleFileAttach}
+                  onDropFiles={media.attachFiles}
                   attachDisabled={media.isUploading}
                   kb={currentKB}
                   placeholder="Start writing..."

@@ -16,8 +16,9 @@ from app.services.vault import (
 def note_body(note: Note, kb: KBContext) -> str:
     if note.rel_path and kb.vault_path:
         text = read_note_file(Path(kb.vault_path), note.rel_path)
-        if text or note.rel_path:
+        if text:
             return normalize_vault_file_refs(text)
+    # Legacy fallback: body stored in SQLite before vault-backed notes.
     return normalize_vault_file_refs(note.content or "")
 
 
