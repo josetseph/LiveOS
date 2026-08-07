@@ -496,26 +496,27 @@ class IngestionWorkflow:
                 # correct ID via find_node_id_by_name instead of minting a
                 # second different ID.  The stub is overwritten moments later
                 # by _update_node_summary with the real description + embedding.
-                stub_ok = 0
-                stub_fail = 0
-                for d in node_data:
-                    if d["is_new"] and d["embedding"]:
-                        if self._qdrant.upsert_node_core(
-                            node_id=d["id"],
-                            name=d["name"],
-                            node_type=d["type"],
-                            description_vector=d["embedding"],
-                        ):
-                            stub_ok += 1
-                        else:
-                            stub_fail += 1
+                # All stubs go up in a single batched upsert.
+                _stub_cores = [
+                    {
+                        "node_id": d["id"],
+                        "name": d["name"],
+                        "node_type": d["type"],
+                        "description_vector": d["embedding"],
+                    }
+                    for d in node_data
+                    if d["is_new"] and d["embedding"]
+                ]
+                stub_ok = self._qdrant.upsert_node_cores(_stub_cores)
                 logger.info(
-                    f"[Ontology] Seeded Qdrant stubs: ok={stub_ok} fail={stub_fail}"
+                    f"[Ontology] Seeded Qdrant stubs: "
+                    f"ok={len(_stub_cores) if stub_ok else 0} "
+                    f"fail={0 if stub_ok else len(_stub_cores)}"
                 )
-                if stub_fail:
+                if not stub_ok:
                     raise RuntimeError(
-                        f"Failed to seed {stub_fail} Qdrant node_cores stub(s) "
-                        f"(ok={stub_ok}) — aborting ingest to avoid Kuzu/Qdrant "
+                        f"Failed to seed {len(_stub_cores)} Qdrant node_cores stub(s) "
+                        "— aborting ingest to avoid Kuzu/Qdrant "
                         "ID split-brain. Check Qdrant is up and embedding "
                         "dimensions match collections."
                     )
@@ -696,21 +697,28 @@ class IngestionWorkflow:
                     f"{preview}{more}"
                 )
 
-            # Batch-embed all new/evolved relationship NL texts in one round-trip.
+            # Batch-embed all new/evolved relationship NL texts in one round-trip,
+            # then write all points in a single batched Qdrant upsert.
             if _qdrant_rel_pending:
                 _nl_batch = [item[1] for item in _qdrant_rel_pending]
                 _nl_vectors = embedding_service.embed_documents(_nl_batch)
-                for (result, nl_text, src_node_id, tgt_node_id), nl_vector in zip(
-                    _qdrant_rel_pending, _nl_vectors
-                ):
-                    self._qdrant.upsert_node_relationship(
-                        relationship_id=result["relationship_id"],
-                        natural_language=nl_text,
-                        nl_vector=nl_vector,
-                        source_node_id=src_node_id,
-                        target_node_id=tgt_node_id,
-                    )
-                    logger.debug(f"  [Ontology] Qdrant rel written: '{nl_text}'")
+                self._qdrant.upsert_node_relationships(
+                    [
+                        {
+                            "relationship_id": result["relationship_id"],
+                            "natural_language": nl_text,
+                            "nl_vector": nl_vector,
+                            "source_node_id": src_node_id,
+                            "target_node_id": tgt_node_id,
+                        }
+                        for (result, nl_text, src_node_id, tgt_node_id), nl_vector in zip(
+                            _qdrant_rel_pending, _nl_vectors
+                        )
+                    ]
+                )
+                logger.debug(
+                    f"  [Ontology] Qdrant rels written: {len(_qdrant_rel_pending)}"
+                )
 
             # Emit a compact per-note relationship summary for observability.
             _rel_skip_total = (
@@ -862,6 +870,9 @@ class IngestionWorkflow:
 
             node_id: str | None = await asyncio.to_thread(_get_existing)
             existing_contexts: list[str] = []
+            # Full Qdrant content for this node (when it exists) — fetched once and
+            # reused below for type resolution instead of re-querying Qdrant.
+            _core_content: dict = {}
 
             if node_id:
                 # Fetch existing isolated_contexts from Qdrant
@@ -870,6 +881,7 @@ class IngestionWorkflow:
                     return _content or {}
 
                 _existing_content = await asyncio.to_thread(_get_qdrant_contexts)
+                _core_content = _existing_content
                 existing_contexts = _existing_content.get("isolated_contexts", [])
                 logger.info(
                     f"  [NodeSummary] '{name}' EXISTING id={node_id} "
@@ -903,11 +915,11 @@ class IngestionWorkflow:
                     # have contexts in node_isolated_contexts even without a node_cores
                     # entry). Without this, existing_contexts stays [] and the
                     # subsequent Meilisearch upsert would silently wipe stored contexts.
-                    def _get_kuzu_node_contexts():
-                        content = self._qdrant.get_node_content_by_id(node_id)
-                        return (content or {}).get("isolated_contexts", [])
+                    def _get_kuzu_node_content():
+                        return self._qdrant.get_node_content_by_id(node_id) or {}
 
-                    existing_contexts = await asyncio.to_thread(_get_kuzu_node_contexts)
+                    _core_content = await asyncio.to_thread(_get_kuzu_node_content)
+                    existing_contexts = _core_content.get("isolated_contexts", [])
                     if existing_contexts:
                         logger.info(
                             f"  [NodeSummary] '{name}' fetched {len(existing_contexts)} "
@@ -949,37 +961,41 @@ class IngestionWorkflow:
                 f"({len(_contexts_to_add)} new, {len(new_contexts or []) - len(_contexts_to_add)} duplicate(s) skipped)"
             )
 
-            # 3. Resolve semantic node type from Qdrant (or fall back to caller-supplied type)
-            def _get_node_type():
-                _content = self._qdrant.get_node_content_by_id(node_id)
-                if _content and _content.get("type"):
-                    return _content["type"]
-                return (node_type or "thing").lower().strip() or "thing"
-
-            node_type = await asyncio.to_thread(_get_node_type)
+            # 3. Resolve semantic node type from the content fetched in step 1
+            # (or fall back to caller-supplied type) — no extra Qdrant round trip.
+            node_type = (
+                _core_content.get("type")
+                or (node_type or "thing").lower().strip()
+                or "thing"
+            )
 
             logger.info(
                 f"  [NodeSummary] '{name}' generating embeddings for "
                 f"{len(_contexts_to_add)} new isolated context(s)"
             )
 
-            # 4. Generate embeddings for Qdrant writes
+            # 4. Generate embeddings for Qdrant writes.
+            # New contexts and the merged-context passage (used for node_cores in
+            # step 6b) are embedded in a single batched call.
+            merged_ctx_text = " ".join(c for c in existing_contexts if c and c.strip())
+
             def _generate_embeddings():
                 # Embed only new isolated contexts (existing are already persisted).
                 _new_ctx_texts = [c for c in _contexts_to_add if c and c.strip()]
-                vectors = (
-                    embedding_service.embed_documents(_new_ctx_texts)
-                    if _new_ctx_texts
-                    else []
+                _batch = list(_new_ctx_texts)
+                if merged_ctx_text:
+                    _batch.append(merged_ctx_text)
+                vectors = embedding_service.embed_documents(_batch) if _batch else []
+
+                new_ctx_pairs: list[tuple[str, list[float]]] = list(
+                    zip(_new_ctx_texts, vectors[: len(_new_ctx_texts)])
                 )
+                _merged_vec = vectors[len(_new_ctx_texts)] if merged_ctx_text else None
+                return new_ctx_pairs, _merged_vec
 
-                new_ctx_pairs: list[tuple[str, list[float]]] = []
-                for t, v in zip(_new_ctx_texts, vectors):
-                    new_ctx_pairs.append((t, v))
-
-                return new_ctx_pairs
-
-            new_ctx_pairs = await asyncio.to_thread(_generate_embeddings)
+            new_ctx_pairs, merged_ctx_vector = await asyncio.to_thread(
+                _generate_embeddings
+            )
             logger.debug(
                 f"  [NodeSummary] '{name}' embeddings generated: "
                 f"new_ctx={len(new_ctx_pairs)}"
@@ -1035,18 +1051,15 @@ class IngestionWorkflow:
             # Joining all accumulated contexts into a single passage and embedding
             # it lets vector search match multi-constraint queries against the full
             # node content at once, rather than scoring each sentence in isolation.
-            # Documents are embedded without the query instruction prefix (asymmetric
-            # design required by Qwen3-Embedding).
-            merged_ctx_text = " ".join(c for c in existing_contexts if c and c.strip())
-            if merged_ctx_text:
+            # The vector was already computed in the step-4 batch embed call.
+            if merged_ctx_text and merged_ctx_vector:
 
                 def _write_node_core():
-                    merged_vec = embedding_service.embed_documents([merged_ctx_text])[0]
                     return self._qdrant.upsert_node_core(
                         node_id=node_id,
                         name=name,
                         node_type=node_type,
-                        description_vector=merged_vec,
+                        description_vector=merged_ctx_vector,
                         description=merged_ctx_text,
                     )
 
@@ -1615,17 +1628,21 @@ class IngestionWorkflow:
                     _valid_nids = [
                         nid for nid in member_entity_ids if nid in node_lookup
                     ]
-                    for nid, nl_text, nl_vec in zip(
-                        _valid_nids, _nl_texts, _nl_vectors
-                    ):
-                        self._qdrant.upsert_node_relationship(
-                            relationship_id=f"community_rel_{community_id}_{nid}",
-                            natural_language=nl_text,
-                            nl_vector=nl_vec,
-                            source_node_id=nid,
-                            target_node_id=community_id,
-                            is_community_rel=True,
-                        )
+                    self._qdrant.upsert_node_relationships(
+                        [
+                            {
+                                "relationship_id": f"community_rel_{community_id}_{nid}",
+                                "natural_language": nl_text,
+                                "nl_vector": nl_vec,
+                                "source_node_id": nid,
+                                "target_node_id": community_id,
+                                "is_community_rel": True,
+                            }
+                            for nid, nl_text, nl_vec in zip(
+                                _valid_nids, _nl_texts, _nl_vectors
+                            )
+                        ]
+                    )
                     logger.debug(
                         f"  [Community] Qdrant NL sentences written: {len(_nl_texts)} "
                         f"for community '{name}'"
@@ -1841,19 +1858,43 @@ class IngestionWorkflow:
             # Community fields are no longer stored on regular nodes — only the NL sentence
             # written above carries that signal for retrieval. Collected into a
             # single batched Meili write (one task wait instead of one per node).
+            # Names and relationship NL are batch-fetched from Qdrant in two calls
+            # instead of three round-trips per node.
+            _refresh_ids = list(level_assignments.keys())
+            _refresh_content = (
+                self._qdrant.get_nodes_content_by_ids(_refresh_ids)
+                if _refresh_ids
+                else {}
+            )
+            _refresh_rels = (
+                self._qdrant.get_relationships_for_node_ids(_refresh_ids)
+                if _refresh_ids
+                else []
+            )
+            _refresh_id_set = set(_refresh_ids)
+            _rel_nl_by_node: dict[str, list[str]] = {}
+            for _rel_row in _refresh_rels:
+                _nl = _rel_row.get("natural_language")
+                if not _nl:
+                    continue
+                for _endpoint_key in ("source_node_id", "target_node_id"):
+                    _endpoint = _rel_row.get(_endpoint_key)
+                    if _endpoint in _refresh_id_set:
+                        _bucket = _rel_nl_by_node.setdefault(_endpoint, [])
+                        if _nl not in _bucket:
+                            _bucket.append(_nl)
+
             community_rows: list[dict] = []
             for node_id in level_assignments:
-                payload = self._graph.get_node_storage_payload(node_id)
-                if not payload:
-                    continue
-                relationship_nl = payload.get("relationship_natural_language") or []
                 community_rows.append(
                     {
                         "node_id": node_id,
                         "relationship_natural_language": " ".join(
-                            sentence for sentence in relationship_nl if sentence
+                            _rel_nl_by_node.get(node_id, [])
                         ),
-                        "name": payload.get("name") or "",
+                        "name": (
+                            _refresh_content.get(node_id, {}).get("name") or ""
+                        ),
                     }
                 )
             self._meili.update_nodes_community(community_rows)

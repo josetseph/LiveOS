@@ -228,11 +228,7 @@ class QdrantService:
         if not self.is_available() or not self.client:
             return []
 
-        hits: list[dict[str, Any]] = []
-        for collection in self.collections:
-            if day_only and collection != self._col_contexts:
-                continue
-
+        def _search_one(collection: str) -> list[dict[str, Any]]:
             query_filter = None
             if collection == self._col_contexts and contexts_filter is not None:
                 query_filter = contexts_filter
@@ -255,16 +251,39 @@ class QdrantService:
                     query_filter=query_filter,
                     with_payload=True,
                 )
-                for point in result.points:
-                    hits.append(
-                        {
-                            "collection": collection,
-                            "score": point.score,
-                            "payload": point.payload or {},
-                        }
-                    )
+                return [
+                    {
+                        "collection": collection,
+                        "score": point.score,
+                        "payload": point.payload or {},
+                    }
+                    for point in result.points
+                ]
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.debug(f"Qdrant search failed for {collection}: {exc}")
+                return []
+
+        targets = [
+            c
+            for c in self.collections
+            if not (day_only and c != self._col_contexts)
+        ]
+        if not targets:
+            return []
+        if len(targets) == 1:
+            return _search_one(targets[0])
+
+        # Query collections concurrently — each is an independent network call.
+        # Results are flattened in self.collections order so downstream merge
+        # behaviour is identical to the previous sequential loop.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+            per_collection = list(pool.map(_search_one, targets))
+
+        hits: list[dict[str, Any]] = []
+        for chunk in per_collection:
+            hits.extend(chunk)
         return hits
 
     def search_node_cores(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -361,6 +380,80 @@ class QdrantService:
             # Fail closed — never call ensure_vector_size mid-ingest (split-brain risk).
             logger.warning(f"Qdrant upsert_node_core failed for {node_id}: {exc}")
             return False
+
+    def upsert_node_cores(self, cores: list[dict[str, Any]]) -> bool:
+        """Batch-upsert node_cores points in a single Qdrant call.
+
+        Each entry takes the same fields as ``upsert_node_core``:
+        node_id, name, node_type, description_vector, and optional description /
+        community_level / extra_payload. Returns True when all points stored.
+        """
+        if not cores:
+            return True
+        if not self.is_available() or not self.client:
+            return False
+        points: list[PointStruct] = []
+        for core in cores:
+            vector = self._prepare_vector(core["description_vector"])
+            payload: dict[str, Any] = {
+                "node_id": core["node_id"],
+                "name": core["name"],
+                "type": core["node_type"],
+            }
+            if core.get("description"):
+                payload["description"] = core["description"]
+            if core.get("community_level") is not None:
+                payload["community_level"] = core["community_level"]
+            if core.get("extra_payload"):
+                payload.update(core["extra_payload"])
+            points.append(
+                PointStruct(
+                    id=str(uuid.uuid5(uuid.NAMESPACE_OID, core["node_id"])),
+                    vector=vector,
+                    payload=payload,
+                )
+            )
+        try:
+            self.client.upsert(collection_name=self._col_cores, points=points)
+            return True
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                f"Qdrant upsert_node_cores failed for {len(points)} point(s): {exc}"
+            )
+            return False
+
+    def upsert_node_relationships(self, rels: list[dict[str, Any]]) -> None:
+        """Batch-upsert node_relationships points in a single Qdrant call.
+
+        Each entry takes the same fields as ``upsert_node_relationship``:
+        relationship_id, natural_language, nl_vector, source_node_id,
+        target_node_id, and optional is_community_rel.
+        """
+        if not rels or not self.is_available() or not self.client:
+            return
+        points: list[PointStruct] = []
+        for rel in rels:
+            vector = self._prepare_vector(rel["nl_vector"])
+            payload: dict[str, Any] = {
+                "natural_language": rel["natural_language"],
+                "source_node_id": rel["source_node_id"],
+                "target_node_id": rel["target_node_id"],
+            }
+            if rel.get("is_community_rel"):
+                payload["is_community_rel"] = True
+            points.append(
+                PointStruct(
+                    id=str(uuid.uuid5(uuid.NAMESPACE_OID, rel["relationship_id"])),
+                    vector=vector,
+                    payload=payload,
+                )
+            )
+        try:
+            self.client.upsert(collection_name=self._col_rels, points=points)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                f"Qdrant upsert_node_relationships failed for {len(points)} point(s): {exc}"
+            )
 
     def upsert_node_items(
         self,

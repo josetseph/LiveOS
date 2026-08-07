@@ -39,6 +39,12 @@ class LLMService:
         # their own, so a failing fallback cannot recurse.
         self.fallback_provider = None if provider else settings.LLM_FALLBACK_PROVIDER
         self._fallback_service: "LLMService | None" = None
+        # analyze_query memo: the iterative retrieval loop analyses the original
+        # question and hybrid_search re-analyses each sub-query; identical query
+        # strings recur within a session (temperature=0 → deterministic), so a
+        # small per-day cache avoids repeated chat-model calls (and, for local
+        # GGUFs, the model swap they force).
+        self._query_analysis_cache: dict[tuple[str, str], dict] = {}
 
         logger.info(f"Primary LLM Provider: {self.provider.upper()}")
         if self.fallback_provider:
@@ -1011,6 +1017,15 @@ class LLMService:
         from datetime import date as _date
 
         _today = _date.today().isoformat()  # e.g. "2026-05-25"
+
+        # Date is part of the key because relative-date resolution ("yesterday")
+        # depends on today. Only successful analyses are cached.
+        _cache_key = (query, _today)
+        _cached = self._query_analysis_cache.get(_cache_key)
+        if _cached is not None:
+            logger.info("Query analysis cache hit — skipping LLM call")
+            return dict(_cached)
+
         try:
             prompt = f"""Analyze the following search query and return a structured JSON object.
 
@@ -1069,7 +1084,13 @@ class LLMService:
             # Use extract_structured - same as ingestion
             result = self.extract_structured(prompt, QueryAnalysis, temperature=0)
             if result:
-                return result.model_dump()
+                analysis = result.model_dump()
+                if len(self._query_analysis_cache) >= 64:
+                    self._query_analysis_cache.pop(
+                        next(iter(self._query_analysis_cache))
+                    )
+                self._query_analysis_cache[_cache_key] = dict(analysis)
+                return analysis
             raise ValueError("Empty extraction result")
 
         except Exception as e:  # pylint: disable=broad-exception-caught

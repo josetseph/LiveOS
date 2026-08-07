@@ -265,6 +265,54 @@ class GraphService:
             {"base_name": base_lower, "limit": limit, "suffix_pat": _SUFFIX_PAT},
         )
 
+    def find_name_variants_batch(
+        self, base_names: list[str], limit_per_name: int = 5
+    ) -> dict[str, list[dict]]:
+        """Batched ``find_name_variants``: one UNWIND scan for many base names.
+
+        Returns a mapping of lowercase base name → variant rows (same row shape
+        as ``find_name_variants``), capped at ``limit_per_name`` per base name.
+        """
+        normalized = list(
+            dict.fromkeys(n.lower().strip() for n in base_names if n and n.strip())
+        )
+        if not normalized:
+            return {}
+        _SUFFIX_PAT = ".* (sr\\.?|jr\\.?|senior|junior|i|ii|iii|iv|v|vi)$"  # pylint: disable=invalid-name
+        query = """
+        UNWIND $base_names AS base
+        MATCH (n:Node)
+        WHERE n.kind IN ['indexable', 'note']
+          AND (toLower(n.name) STARTS WITH (base + ' ')
+           OR (toLower(n.name) CONTAINS base AND size(n.name) > size(base) + 2))
+          AND NOT (
+            (toLower(n.name) CONTAINS ' sr' AND base CONTAINS ' jr')
+            OR (toLower(n.name) CONTAINS ' jr' AND base CONTAINS ' sr')
+            OR (regexp_matches(toLower(n.name), $suffix_pat)
+                AND NOT regexp_matches(base, $suffix_pat))
+            OR (regexp_matches(base, $suffix_pat)
+                AND NOT regexp_matches(toLower(n.name), $suffix_pat))
+          )
+        RETURN DISTINCT
+            base AS base_name,
+            n.id AS node_id,
+            n.name AS name,
+            [n.kind] AS labels,
+            n.type AS entity_type
+        """
+        rows = self.execute_query(
+            query, {"base_names": normalized, "suffix_pat": _SUFFIX_PAT}
+        )
+        result: dict[str, list[dict]] = {}
+        for row in rows:
+            base = row.pop("base_name", "")
+            if not base:
+                continue
+            bucket = result.setdefault(base, [])
+            if len(bucket) < limit_per_name:
+                bucket.append(row)
+        return result
+
     def get_indexable_nodes_for_communities(self) -> list[dict]:
         """Return all indexable (non-community, non-note) nodes for community detection input."""
         query = """
@@ -352,23 +400,27 @@ class GraphService:
     def set_node_community_membership(
         self, node_ids: list[str], community_id: str, community_level: int
     ) -> None:
-        """Assign a node to a Leiden community at the given hierarchy level."""
+        """Assign nodes to a Leiden community at the given hierarchy level.
+
+        One UNWIND statement for the whole batch instead of a query per node;
+        IDs that don't match an existing node simply produce no rows.
+        """
         if not node_ids:
             return
-        for node_id in node_ids:
-            self.execute_query(
-                """
-                MATCH (c:Node {id: $community_id})
-                MATCH (n:Node {id: $node_id})
-                MERGE (n)-[r:MEMBER_OF]->(c)
-                SET r.level = $community_level
-                """,
-                {
-                    "node_id": node_id,
-                    "community_id": community_id,
-                    "community_level": community_level,
-                },
-            )
+        self.execute_query(
+            """
+            MATCH (c:Node {id: $community_id})
+            UNWIND $node_ids AS node_id
+            MATCH (n:Node {id: node_id})
+            MERGE (n)-[r:MEMBER_OF]->(c)
+            SET r.level = $community_level
+            """,
+            {
+                "node_ids": node_ids,
+                "community_id": community_id,
+                "community_level": community_level,
+            },
+        )
 
     def create_leiden_community(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
@@ -390,19 +442,20 @@ class GraphService:
             {"community_id": community_id, "name": name},
         )
 
-        for member_id in member_node_ids:
+        if member_node_ids:
             try:
                 self.execute_query(
                     """
                     MATCH (c:Node {id: $community_id})
-                    MATCH (n:Node {id: $member_id})
+                    UNWIND $member_ids AS member_id
+                    MATCH (n:Node {id: member_id})
                     MERGE (c)-[:CONTAINS]->(n)
                     """,
-                    {"community_id": community_id, "member_id": member_id},
+                    {"community_id": community_id, "member_ids": member_node_ids},
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.debug(
-                    f"[Graph] CONTAINS edge {community_id}->{member_id} skipped: {exc}"
+                    f"[Graph] CONTAINS edges for {community_id} skipped: {exc}"
                 )
 
         try:
@@ -716,9 +769,14 @@ class GraphService:
         self,
         node_name: str,
         max_depth: int = 2,
+        node_id: str | None = None,
     ) -> list[dict]:
-        """Return neighbouring nodes reachable within max_depth hops of the given node."""
-        node_id = self.resolve_node_id(node_name.lower().strip())
+        """Return neighbouring nodes reachable within max_depth hops of the given node.
+
+        Pass ``node_id`` when the caller already knows it to skip the
+        Qdrant name→id resolution round trip.
+        """
+        node_id = node_id or self.resolve_node_id(node_name.lower().strip())
         if not node_id:
             return []
 

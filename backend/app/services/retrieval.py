@@ -1,6 +1,7 @@
 """Hybrid retrieval: vector search, graph traversal, keyword search, and cross-encoder reranking."""
 
 # pylint: disable=too-many-lines,import-outside-toplevel
+import asyncio
 import calendar
 import logging
 import time
@@ -107,7 +108,9 @@ class RetrievalService:
                 return []
 
             related_nodes = self._graph.get_related_nodes(
-                node_name=node_name, max_depth=1
+                node_name=node_name,
+                max_depth=1,
+                node_id=node.get("node_id") or node.get("id") or None,
             )
             if not related_nodes:
                 return []
@@ -208,6 +211,7 @@ class RetrievalService:
                 related = self._graph.get_related_nodes(
                     node_name=node_name,
                     max_depth=1,
+                    node_id=src_node_id or None,
                 )
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug(
@@ -885,7 +889,7 @@ class RetrievalService:
 
     async def _search_meili_by_keyword(self, query: str) -> list[dict]:
         """Search Meilisearch full-text index and normalize into node-like results."""
-        hits = self._meili.search_nodes(query=query, limit=100)
+        hits = await asyncio.to_thread(self._meili.search_nodes, query, 100)
         if not hits:
             logger.info("  [Meili] No BM25 keyword hits.")
             return []
@@ -1037,162 +1041,191 @@ class RetrievalService:
         vector_nodes = []  # Found by vector search
         node_names_found = set()  # Track names to avoid duplicates
 
-        # STEP 1: ENTITY NAME MATCHING - Find nodes by extracted entity names
-        # This is critical for comparison questions where we need both entities
-        if query_entities:  # pylint: disable=too-many-nested-blocks
-            t_entity_start = time.perf_counter()
-            try:
-                # Normalize to lowercase so lookups match stored (lowercase) names
-                _normalized_query_entities = [e.lower().strip() for e in query_entities]
-                entity_found = self._graph.find_nodes_by_name(
-                    names=_normalized_query_entities, fuzzy=True
+        # STEPS 1, 1b, and 2 hit three independent stores (Kuzu, Meilisearch,
+        # Qdrant) so they run CONCURRENTLY. Results are merged afterwards in the
+        # original precedence order (entity → BM25 → vector), so dedup behaviour
+        # is unchanged.
+
+        def _entity_branch() -> list[dict]:  # pylint: disable=too-many-branches
+            """STEP 1 + 1.5: entity name matching with Person name-variant expansion."""
+            if not query_entities:
+                return []
+            # Normalize to lowercase so lookups match stored (lowercase) names
+            _normalized_query_entities = [e.lower().strip() for e in query_entities]
+            entity_found = self._graph.find_nodes_by_name(
+                names=_normalized_query_entities, fuzzy=True
+            )
+            # Collect ALL matching nodes first — do NOT dedup by name yet.
+            # Multiple graph nodes can share the same name but only one may have
+            # Qdrant content. Deduping before enrichment would silently drop the
+            # node that has content whenever an empty duplicate appears first.
+            _entity_candidates = []
+            for node in entity_found:
+                node["_source"] = "entity_match"
+                _entity_candidates.append(node)
+
+            # STEP 1.5: NAME VARIANT EXPANSION
+            # Search for variants of found names to catch fuller/alternate versions
+            # e.g., "Robert Smith" → also find "Robert Smith Jr."
+            # Only Person entities with multi-word names are expanded; all
+            # qualifying names go through one batched Kuzu lookup.
+            _seen_variant_keys: set = set(
+                (n.get("name") or "").lower().strip() for n in _entity_candidates
+            )
+            _expandable_names: list[str] = list(
+                dict.fromkeys(
+                    node.get("name", "")
+                    for node in entity_found
+                    if node.get("name")
+                    and len(node.get("name", "").split()) >= 2
+                    and (node.get("entity_type") or "").lower() == "person"
                 )
-                # Collect ALL matching nodes first — do NOT dedup by name yet.
-                # Multiple graph nodes can share the same name but only one may have
-                # Qdrant content. Deduping before enrichment would silently drop the
-                # node that has content whenever an empty duplicate appears first.
-                _entity_candidates = []
-                for node in entity_found:
-                    node["_source"] = "entity_match"
-                    _entity_candidates.append(node)
+            )
+            variant_nodes = []
+            if _expandable_names:
+                try:
+                    _variant_map = self._graph.find_name_variants_batch(
+                        _expandable_names
+                    )
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    logger.debug(f"  [Variant] Batch lookup failed: {e}")
+                    _variant_map = {}
+                for node_name in _expandable_names:
+                    for v in _variant_map.get(node_name.lower().strip(), []):
+                        _v_key = (v["name"] or "").lower().strip()
+                        if (
+                            _v_key not in _seen_variant_keys
+                            and _v_key != node_name.lower().strip()
+                        ):
+                            v["_source"] = "name_variant"
+                            v["_variant_of"] = node_name
+                            variant_nodes.append(v)
+                            _seen_variant_keys.add(_v_key)
 
-                # STEP 1.5: NAME VARIANT EXPANSION
-                # Search for variants of found names to catch fuller/alternate versions
-                # e.g., "Robert Smith" → also find "Robert Smith Jr."
-                _seen_variant_keys: set = set(
-                    (n.get("name") or "").lower().strip() for n in _entity_candidates
+            if variant_nodes:
+                logger.info(
+                    f"  [Entity] Found {len(variant_nodes)} name variants: "
+                    f"{[(v['name'], v.get('_variant_of')) for v in variant_nodes]}"
                 )
-                variant_nodes = []
-                for node in entity_found:  # Top 10 to avoid explosion
-                    node_name = node.get("name", "")
-                    node_type = (node.get("entity_type") or "").lower()
-                    # Only expand Person entities with multi-word names
-                    if (
-                        node_name
-                        and len(node_name.split()) >= 2
-                        and node_type == "person"
-                    ):
-                        try:
-                            variants = self._graph.find_name_variants(node_name)
-                            for v in variants:  # Top 5 variants per name
-                                _v_key = (v["name"] or "").lower().strip()
-                                if (
-                                    _v_key not in _seen_variant_keys
-                                    and _v_key != node_name.lower().strip()
-                                ):
-                                    v["_source"] = "name_variant"
-                                    v["_variant_of"] = node_name
-                                    variant_nodes.append(v)
-                                    _seen_variant_keys.add(_v_key)
-                        except Exception as e:  # pylint: disable=broad-exception-caught
-                            logger.debug(f"  [Variant] Failed for {node_name}: {e}")
+                _entity_candidates.extend(variant_nodes)
 
-                if variant_nodes:
-                    logger.info(
-                        f"  [Entity] Found {len(variant_nodes)} name variants: "
-                        f"{[(v['name'], v.get('_variant_of')) for v in variant_nodes]}"
+            # Dedup by node_id before enriching — the fuzzy UNWIND/CONTAINS
+            # query can return the same node multiple times when it matches
+            # more than one LLM-extracted query term (e.g. "ed wood" and
+            # "wood" both hit the same node with different matched_query
+            # values, so RETURN DISTINCT doesn't collapse them).
+            # node_id is the canonical key: one ID → one Qdrant record.
+            _seen_node_ids: dict[str, dict] = {}
+            for _n in _entity_candidates:
+                _nid = _n.get("node_id")
+                if _nid and _nid not in _seen_node_ids:
+                    _seen_node_ids[_nid] = _n
+                elif not _nid:
+                    # No ID — keep by name as fallback (shouldn't happen in practice)
+                    _fallback_key = (_n.get("name") or "").lower().strip()
+                    if _fallback_key and _fallback_key not in {
+                        (x.get("name") or "").lower().strip()
+                        for x in _seen_node_ids.values()
+                    }:
+                        _seen_node_ids[_fallback_key] = _n
+            _unique_candidates = list(_seen_node_ids.values())
+
+            _enrich_ids = [
+                n.get("node_id") for n in _unique_candidates if n.get("node_id")
+            ]
+            if _enrich_ids:
+                try:
+                    _qdrant_content = self._qdrant.get_nodes_content_by_ids(
+                        _enrich_ids
                     )
-                    _entity_candidates.extend(variant_nodes)
-
-                # Dedup by node_id before enriching — the fuzzy UNWIND/CONTAINS
-                # query can return the same node multiple times when it matches
-                # more than one LLM-extracted query term (e.g. "ed wood" and
-                # "wood" both hit the same node with different matched_query
-                # values, so RETURN DISTINCT doesn't collapse them).
-                # node_id is the canonical key: one ID → one Qdrant record.
-                _seen_node_ids: dict[str, dict] = {}
-                for _n in _entity_candidates:
-                    _nid = _n.get("node_id")
-                    if _nid and _nid not in _seen_node_ids:
-                        _seen_node_ids[_nid] = _n
-                    elif not _nid:
-                        # No ID — keep by name as fallback (shouldn't happen in practice)
-                        _fallback_key = (_n.get("name") or "").lower().strip()
-                        if _fallback_key and _fallback_key not in {
-                            (x.get("name") or "").lower().strip()
-                            for x in _seen_node_ids.values()
-                        }:
-                            _seen_node_ids[_fallback_key] = _n
-                _unique_candidates = list(_seen_node_ids.values())
-
-                _enrich_ids = [
-                    n.get("node_id") for n in _unique_candidates if n.get("node_id")
-                ]
-                if _enrich_ids:
-                    try:
-                        _qdrant_content = self._qdrant.get_nodes_content_by_ids(
-                            _enrich_ids
-                        )
-                        for _n in _unique_candidates:
-                            _nid = _n.get("node_id")
-                            if _nid and _nid in _qdrant_content:
-                                _c = _qdrant_content[_nid]
-                                _n["description"] = _c.get("description", "")
-                                _n["summary"] = _c.get("description", "")
-                                _n["isolated_contexts"] = _c.get(
-                                    "isolated_contexts", []
-                                )
-                    except Exception as _e:  # pylint: disable=broad-exception-caught
-                        logger.debug(
-                            f"  [Entity] Qdrant content enrichment failed: {_e}"
-                        )
-
-                for _n in _unique_candidates:
-                    entity_nodes.append(_n)
-                    node_names_found.add((_n.get("name") or "").lower().strip())
-
-                if entity_nodes:
-                    logger.info(
-                        f"  [Entity] Found {len(entity_nodes)} nodes by name: "
-                        f"{[n['name'] for n in entity_nodes]}"
+                    for _n in _unique_candidates:
+                        _nid = _n.get("node_id")
+                        if _nid and _nid in _qdrant_content:
+                            _c = _qdrant_content[_nid]
+                            _n["description"] = _c.get("description", "")
+                            _n["summary"] = _c.get("description", "")
+                            _n["isolated_contexts"] = _c.get(
+                                "isolated_contexts", []
+                            )
+                except Exception as _e:  # pylint: disable=broad-exception-caught
+                    logger.debug(
+                        f"  [Entity] Qdrant content enrichment failed: {_e}"
                     )
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.warning(f"  [Entity] Name matching failed: {e}")
-            t_entity = time.perf_counter() - t_entity_start
-            logger.info(f"  [⏱️ Timing] Entity name matching: {t_entity:.2f}s")
+            return _unique_candidates
 
-        # STEP 1b: BM25 MEILI SEARCH (always runs)
-        # Lexical full-text search on query + individual keywords/concepts.
-        # Grouped with entity matching since both are lexical (non-semantic).
-        try:
+        async def _meili_branch() -> list[dict]:
+            """STEP 1b: BM25 keyword search over query + keywords/concepts (parallel per term)."""
             _meili_queries = [query] + [
                 t
                 for t in query_keywords + query_concepts
                 if t and t.lower() not in query.lower()
             ]
+            _per_term = await asyncio.gather(
+                *[self._search_meili_by_keyword(_ts_q) for _ts_q in _meili_queries]
+            )
             _seen_ts: set[str] = set()
             _all_keyword_nodes: list[dict] = []
-            for _ts_q in _meili_queries:
-                _kn = await self._search_meili_by_keyword(_ts_q)
+            for _kn in _per_term:
                 for _n in _kn:
                     _key = (_n.get("name") or "").lower()
                     if _key not in _seen_ts:
                         _seen_ts.add(_key)
                         _all_keyword_nodes.append(_n)
-            if _all_keyword_nodes:
-                entity_nodes = self._merge_search_results(
-                    entity_nodes,
-                    _all_keyword_nodes,
-                    node_names_found,
-                )
-                logger.info(
-                    f"  [Keyword] Added {len(_all_keyword_nodes)} Meili BM25 matches"
-                )
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.warning(f"  [Keyword] Meili BM25 search failed: {e}")
+            return _all_keyword_nodes
 
-        # STEP 2: VECTOR SEARCH (always runs)
-        # Semantic similarity search to find nodes that lexical search missed.
-        # Results are deduplicated against entity/BM25 nodes via node_names_found.
-        t_vector_start = time.perf_counter()
-        logger.info("  [Vector] Running vector search")
-        try:
+        async def _vector_branch() -> list[dict]:
+            """STEP 2: semantic vector search over all Qdrant collections."""
+            logger.info("  [Vector] Running vector search")
             # Qdrant is the vector source of truth.
-            vector_results = await self._search_qdrant_multi_collection(
+            return await self._search_qdrant_multi_collection(
                 full_vector,
                 date_filter=query_date_filter,
                 period_filter=query_period_filter,
             )
+
+        t_parallel_start = time.perf_counter()
+        _entity_res, _meili_res, _vector_res = await asyncio.gather(
+            asyncio.to_thread(_entity_branch),
+            _meili_branch(),
+            _vector_branch(),
+            return_exceptions=True,
+        )
+        if isinstance(_entity_res, BaseException):
+            logger.warning(f"  [Entity] Name matching failed: {_entity_res}")
+            _entity_res = []
+        if isinstance(_meili_res, BaseException):
+            logger.warning(f"  [Keyword] Meili BM25 search failed: {_meili_res}")
+            _meili_res = []
+        if isinstance(_vector_res, BaseException):
+            logger.warning(f"  [Vector] Vector search failed: {_vector_res}")
+            _vector_res = []
+        logger.info(
+            f"  [⏱️ Timing] Parallel entity/BM25/vector search: "
+            f"{time.perf_counter() - t_parallel_start:.2f}s"
+        )
+
+        # ── Merge in the original precedence order: entity → BM25 → vector ──
+        for _n in _entity_res:
+            entity_nodes.append(_n)
+            node_names_found.add((_n.get("name") or "").lower().strip())
+        if entity_nodes:
+            logger.info(
+                f"  [Entity] Found {len(entity_nodes)} nodes by name: "
+                f"{[n['name'] for n in entity_nodes]}"
+            )
+
+        if _meili_res:
+            entity_nodes = self._merge_search_results(
+                entity_nodes,
+                _meili_res,
+                node_names_found,
+            )
+            logger.info(
+                f"  [Keyword] Added {len(_meili_res)} Meili BM25 matches"
+            )
+
+        try:
+            vector_results = _vector_res
             if vector_results:
                 logger.info(
                     f"  [Vector] Using Qdrant multi-collection search with {len(vector_results)} hits"
@@ -1208,24 +1241,32 @@ class RetrievalService:
                     node_names_found.add(_vkey)
 
             # STEP 2.5: NAME VARIANT EXPANSION for vector-found person entities
-            # Catches "Margaret Johnson" -> "Margaret Johnson-Williams" for multi-hop queries
+            # Catches "Margaret Johnson" -> "Margaret Johnson-Williams" for
+            # multi-hop queries. One batched Kuzu lookup for all vector names.
             vector_variant_nodes = []
+            _vector_names = [
+                vnode.get("name", "") for vnode in vector_nodes if vnode.get("name")
+            ]
+            _v_variant_map: dict[str, list[dict]] = {}
+            if _vector_names:
+                try:
+                    _v_variant_map = await asyncio.to_thread(
+                        self._graph.find_name_variants_batch, _vector_names
+                    )
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    logger.debug(f"  [Variant] Batch lookup failed: {e}")
             for vnode in vector_nodes:  # Check top vector results
                 vnode_name = vnode.get("name", "")
-                try:
-                    variants = self._graph.find_name_variants(vnode_name)
-                    for v in variants:  # Top 5 variants per name
-                        _vv_key = (v["name"] or "").lower().strip()
-                        if (
-                            _vv_key not in node_names_found
-                            and _vv_key != vnode_name.lower().strip()
-                        ):
-                            v["_source"] = "vector_variant"
-                            v["_variant_of"] = vnode_name
-                            vector_variant_nodes.append(v)
-                            node_names_found.add(_vv_key)
-                except Exception as e:  # pylint: disable=broad-exception-caught
-                    logger.debug(f"  [Variant] Failed for {vnode_name}: {e}")
+                for v in _v_variant_map.get(vnode_name.lower().strip(), []):
+                    _vv_key = (v["name"] or "").lower().strip()
+                    if (
+                        _vv_key not in node_names_found
+                        and _vv_key != vnode_name.lower().strip()
+                    ):
+                        v["_source"] = "vector_variant"
+                        v["_variant_of"] = vnode_name
+                        vector_variant_nodes.append(v)
+                        node_names_found.add(_vv_key)
 
             if vector_variant_nodes:
                 logger.info(
@@ -1241,10 +1282,7 @@ class RetrievalService:
                 )
 
         except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.warning(f"  [Vector] Vector search failed: {e}")
-
-        t_vector = time.perf_counter() - t_vector_start
-        logger.info(f"  [⏱️ Timing] Vector search: {t_vector:.2f}s")
+            logger.warning(f"  [Vector] Vector merge failed: {e}")
 
         # Combine all found nodes
         all_found_nodes = entity_nodes + vector_nodes

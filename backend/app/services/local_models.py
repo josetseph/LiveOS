@@ -811,7 +811,7 @@ class LocalLlamaEmbeddings:
         return self._runtime.embed(text)
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [self._runtime.embed(t) for t in texts]
+        return self._runtime.embed_batch(texts)
 
 
 class LocalLlamaRuntime:
@@ -1046,6 +1046,24 @@ class LocalLlamaRuntime:
             return list(emb[0] if emb and isinstance(emb[0], (list, tuple)) else emb)
         raise RuntimeError("Unexpected embedding response from llama-cpp-python")
 
+    def _embed_batch_unlocked(self, texts: list[str]) -> list[list[float]]:
+        """Embed a list of texts in one create_embedding call.
+
+        llama-cpp-python accepts a list input and returns one data entry per
+        text, which avoids per-text ensure_loaded/lock/API overhead.
+        """
+        assert self._embed is not None
+        out = self._embed.create_embedding(input=texts)
+        data = out.get("data") if isinstance(out, dict) else None
+        if data is not None and len(data) == len(texts):
+            return [list(d["embedding"]) for d in data]
+        # Length mismatch would silently mis-pair vectors with texts downstream —
+        # fail loud so ingestion aborts instead of corrupting the index.
+        raise RuntimeError(
+            "Unexpected batch embedding response from llama-cpp-python "
+            f"(expected {len(texts)} vectors, got {len(data) if data else 0})"
+        )
+
     def ensure_loaded(self) -> None:
         """Back-compat: ensure chat GGUF is loaded (exclusive)."""
         self.ensure_chat_loaded()
@@ -1248,6 +1266,17 @@ class LocalLlamaRuntime:
         assert self._embed is not None
         with self._lock:
             out = self._embed_unlocked(text)
+            self._touch()
+            return out
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed many texts with one residency check, one lock, one llama call."""
+        if not texts:
+            return []
+        self.ensure_embed_loaded()
+        assert self._embed is not None
+        with self._lock:
+            out = self._embed_batch_unlocked(texts)
             self._touch()
             return out
 
