@@ -151,7 +151,7 @@ open /Applications/Orb.app
 
 > [!TIP]
 > Unsigned builds may need an extra click through Gatekeeper / SmartScreen until notarization and Authenticode are enabled.
-> Prefer **v0.1.1+** — v0.1.0 Mac builds could show “damaged” due to broken Node helper symlinks from CI.
+> Prefer **v0.2.0+** — faster ingest/retrieval, Obsidian-style wikilinks, and Firefly upgrade fixes. Avoid v0.1.0 Mac builds (could show “damaged” from broken Node helper symlinks in CI).
 
 ---
 

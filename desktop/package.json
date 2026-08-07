@@ -1,7 +1,7 @@
 {
   "name": "orb",
   "productName": "Orb",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "author": "Joseph Etse <projects@josetseph.com>",
   "description": "Orb desktop — supervisor for vault notes, search engines, and API",
