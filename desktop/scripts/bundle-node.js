@@ -38,22 +38,25 @@ function nodeAsset() {
 }
 
 function download(url, dest) {
+  // Defer createWriteStream until HTTP 200 so redirects cannot race unlink.
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
     https
       .get(url, { timeout: 180000 }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          file.close();
-          fs.unlinkSync(dest);
-          download(res.headers.location, dest).then(resolve).catch(reject);
+          res.resume();
+          const next = new URL(res.headers.location, url).toString();
+          download(next, dest).then(resolve).catch(reject);
           return;
         }
         if (res.statusCode !== 200) {
+          res.resume();
           reject(new Error(`Download failed ${res.statusCode}: ${url}`));
           return;
         }
+        const file = fs.createWriteStream(dest);
         res.pipe(file);
         file.on("finish", () => file.close(() => resolve(dest)));
+        file.on("error", reject);
       })
       .on("error", reject);
   });

@@ -75,14 +75,13 @@ function platformTriple() {
 }
 
 function downloadFile(url, dest, onProgress, redirectsLeft = 5) {
+  // Open the write stream only after a 200 so GitHub 302→Azure redirects cannot
+  // race an async unlink of the destination against the follow-up download.
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
     const get = url.startsWith("https") ? https.get : http.get;
     const req = get(url, { timeout: 180000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        // unlink inside close(): the handle is still open here and Windows
-        // blocks deletion of open files.
-        file.close(() => fs.rmSync(dest, { force: true }));
+        res.resume();
         const next = new URL(res.headers.location, url).toString();
         if (redirectsLeft <= 0) {
           reject(new Error(`Too many redirects downloading ${url}`));
@@ -97,15 +96,11 @@ function downloadFile(url, dest, onProgress, redirectsLeft = 5) {
         return;
       }
       if (res.statusCode !== 200) {
-        file.close();
-        try {
-          fs.unlinkSync(dest);
-        } catch (_) {
-          /* ignore */
-        }
+        res.resume();
         reject(new Error(`Download failed ${res.statusCode}: ${url}`));
         return;
       }
+      const file = fs.createWriteStream(dest);
       const total = parseInt(res.headers["content-length"] || "0", 10);
       let received = 0;
       res.on("data", (chunk) => {
@@ -113,17 +108,38 @@ function downloadFile(url, dest, onProgress, redirectsLeft = 5) {
         if (onProgress && total) onProgress(Math.round((received / total) * 100));
       });
       res.pipe(file);
-      file.on("finish", () => file.close(() => resolve(dest)));
+      file.on("finish", () =>
+        file.close(() => {
+          try {
+            const size = fs.statSync(dest).size;
+            if (total > 0 && size !== total) {
+              reject(
+                new Error(
+                  `Incomplete download ${url}: got ${size} bytes, expected ${total}`,
+                ),
+              );
+              return;
+            }
+            if (size <= 0) {
+              reject(new Error(`Empty download: ${url}`));
+              return;
+            }
+            resolve(dest);
+          } catch (err) {
+            reject(err);
+          }
+        }),
+      );
+      file.on("error", (err) => {
+        try {
+          fs.unlinkSync(dest);
+        } catch (_) {
+          /* ignore */
+        }
+        reject(err);
+      });
     });
-    req.on("error", (err) => {
-      try {
-        file.close();
-        fs.unlinkSync(dest);
-      } catch (_) {
-        /* ignore */
-      }
-      reject(err);
-    });
+    req.on("error", reject);
     req.on("timeout", () => {
       req.destroy();
       reject(new Error(`Timeout downloading ${url}`));
